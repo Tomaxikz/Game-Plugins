@@ -81,6 +81,22 @@ def main() -> int:
     released_at = int(args[args.index("--released-at") + 1]) if "--released-at" in args else int(time.time())
 
     artifacts, errors = [], []
+
+    # Per-file `<asset>.sha256` files written by some builds are build-only: verify them against
+    # their asset and drop them. The release publishes one combined SHA256SUMS instead.
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".sha256"):
+            continue
+        sidecar = os.path.join(root, name)
+        asset = sidecar[: -len(".sha256")]
+        with open(sidecar) as f:
+            expected = (f.read().split() or [""])[0].lower()
+        if not os.path.isfile(asset):
+            errors.append(f"{name}: no matching asset")
+        elif expected != sha256(asset):
+            errors.append(f"{name}: checksum does not match {os.path.basename(asset)}")
+        os.remove(sidecar)
+
     for name in sorted(os.listdir(root)):
         path = os.path.join(root, name)
         if not os.path.isfile(path) or name.endswith(".meta.json") or name in ("manifest.json", "SHA256SUMS"):
