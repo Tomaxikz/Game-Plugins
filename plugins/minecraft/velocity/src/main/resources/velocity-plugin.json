@@ -1,0 +1,10 @@
+{
+  "id": "playermanager-bridge",
+  "name": "Player Manager Bridge",
+  "version": "${version}",
+  "description": "Live network data and typed actions for the Calagopus Player Manager panel (Velocity).",
+  "url": "https://github.com/Tomaxikz/Game-Plugins",
+  "authors": ["Tomaxikz"],
+  "dependencies": [],
+  "main": "dev.playermanager.bridge.velocity.PlayerManagerBridgeVelocity"
+}

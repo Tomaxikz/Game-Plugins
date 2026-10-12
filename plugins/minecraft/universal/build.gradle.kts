@@ -1,4 +1,5 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import org.gradle.api.attributes.java.TargetJvmVersion
 
 plugins {
     `java-library`
@@ -13,7 +14,14 @@ val proxyModules = listOf("velocity", "bungeecord").mapNotNull { findProject(":$
 
 dependencies {
     implementation(project(":bukkit"))
-    proxyModules.forEach { implementation(it) }
+    // Velocity 4.x is compiled to Java 25 bytecode, so only that dependency asks for the JVM 25 variant (the Java 8 halves are unaffected).
+    proxyModules.forEach { m ->
+        if (m.name == "velocity") {
+            implementation(project(m.path)) { attributes { attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 25) } }
+        } else {
+            implementation(project(m.path))
+        }
+    }
 }
 
 val platformList = buildList {

@@ -96,7 +96,105 @@ _(entries)_
 
 ## 4. Minecraft — proxies (worker C)
 
-_(entries)_
+# Minecraft proxies (Velocity and BungeeCord) — deviations and interpretations (worker C)
+
+Entries for the lead to merge into `NOTES.md` §4 ("Minecraft — proxies"). Format as in NOTES.md. Both proxies come from
+the same universal jar and share `ProxyPlatform` (one code path); each module has its own `ProxyHost` implementation.
+
+> **Velocity needs Java 25 and API 4.2.0; the universal jar stays Java 8 for the Bukkit half** — `velocity` compiles against
+> `com.velocitypowered:velocity-api:4.2.0` (class file major 69, Java 25); the module uses a Java 25 toolchain. To keep the
+> Java 8 halves resolvable, `universal/build.gradle.kts` requests the JVM 25 variant for the `:velocity` dependency only
+> (`TargetJvmVersion` attribute). The jar itself still contains Java 25 classes that only load on Velocity, so Bukkit servers
+> on Java 8 are unaffected. The sidecar keeps `"java": ">=8"`; the Velocity half needs Java 25 (the manifest's `java` field
+> cannot express that per platform). Source: https://repo.papermc.io (velocity-api 4.2.0 pom and jar), minecraft.md §1 and §10
+> ("Velocity bridges require Java 25"). Capability effect: none.
+
+> **BungeeCord API 1.21 (Java 8) for both BungeeCord and Waterfall** — compiled against `net.md-5:bungeecord-api:1.21-R0.4`
+> (`--release 8`). Waterfall is the same plugin (`platform: "bungeecord"`), not tested against a Waterfall jar yet. Source:
+> https://repo.papermc.io (bungeecord-api metadata: release 1.21-R0.4, latest snapshot 26.1). Capability effect: none.
+
+> **`game_version` is the newest concrete Minecraft version** — Velocity: `ProtocolVersion.MAXIMUM_VERSION` (26.3 with API 4.2.0).
+> BungeeCord: `ProxyServer.getGameVersion()` only reports ranges (`1.8.x-26.x`), so the newest `MINECRAFT_*` constant of
+> `net.md_5.bungee.protocol.ProtocolConstants` whose id equals the maximum of `SUPPORTED_VERSION_IDS` is used (read reflectively,
+> the protocol module is not in the API). Result: `26.3` on both (verified on BungeeCord CI build 2104). Source:
+> minecraft.md §1 ("proxies report the newest supported protocol version string"). Capability effect: `game_version`.
+
+> **`hello.game_info` is a start-time snapshot** — `protocol_range` (Velocity `ProtocolVersion.MINIMUM/MAXIMUM`; BungeeCord
+> `SUPPORTED_VERSION_IDS` min/max), `backends` (names and configured addresses, `players` = 0 at start because `PlatformInfo` is
+> read once by core) and `modded: false`. Live counts are in `server.info.game.backends`, which is the source the panel should use.
+> `modded` is per player (`client` mod lists are not reported yet), so the hello value is always `false`. Core limitation: a live
+> `helloGame` supplier would let hello carry live counts (not required by the contract). Source: minecraft.md §10,
+> NOTES D18. Capability effect: `hello.game_info` present on proxies.
+
+> **`player_fields` is `["ping"]` only; proxy extras live in `game`** — `player.get` returns the common `id`, `name`, `online`,
+> `ping` (null when unknown), `ip` (only with `include_sensitive`) and a `game` section with `server` (backend name or null),
+> `groups`, `joined_at` (unix s, omitted when unknown), `client` and `offline_uuid`. World-level common keys (`position`, `health`,
+> `world`, `inventory`, ...) are absent, not null. Source: minecraft.md §9 ("✗ for proxies, omitted, not null"), §10. Capability
+> effect: no world ops, no `positions.stream`, no `assets`, `inventory.write`; features `proxy` and `sensitive`.
+
+> **`players.list` rows carry the proxy fields at top level** — `server` (backend name; key always present, null while connecting),
+> `groups` (LuckPerms, lower-case; `[]` without LuckPerms), `admin` (true when a group is `admin`, `administrator`, `owner`, `op`,
+> `operator` or `operators`; proxies have no op list of their own), `joined_at` (unix s, from the join event after the bridge
+> started), `client` (`brand`, `locale` in `en_us` form, `protocol`, `view_distance`, each only when known), `game.offline_uuid`
+> (true when the id is the offline-mode UUID of the name). `ip` only with `include_sensitive`. Source: operations.md §3, minecraft.md
+> §2 and §10. Capability effect: none.
+
+> **Backends: configured address and live counts** — `address` is the configured socket address as `host:port` (the hostname exactly
+> as configured, no DNS, IPv6 in brackets) and is sent without `include_sensitive` (proxy backends are not player IPs, minecraft.md
+> §10). `server.info.game.backends` lists them sorted by name with live player counts; `worlds` is `[]`. Source: minecraft.md §10.
+> Capability effect: `server.info.game.backends` and `hello.game_info.backends`.
+
+> **Server name, MOTD and extensions** — `server.info.name` is the proxy product name (`Velocity` / `BungeeCord` / `Waterfall`),
+> `motd` is the plain-text MOTD (Velocity: `ProxyConfig.getMotd()`; BungeeCord: first listener, colour codes stripped),
+> `max_players` is Velocity `show-max-players` or the first BungeeCord listener's limit, `extensions` lists the proxy plugins.
+> Source: operations.md §2. Capability effect: none.
+
+> **Events are emitted from the proxy events that exist** — advertised: `join` (Velocity `PostLoginEvent`, BungeeCord
+> `PostLoginEvent`), `leave` (`DisconnectEvent` / `PlayerDisconnectEvent`; no `reason`, the proxies expose no stable disconnect
+> reason), `chat` (Velocity `PlayerChatEvent` at `PostOrder.LAST`; BungeeCord `ChatEvent` at `HIGHEST`, cancelled messages
+> skipped), `command` (Velocity `CommandExecuteEvent`, player and console sources; BungeeCord `ChatEvent.isCommand()`, player
+> sources only because console commands never reach the proxy listeners), `kick` (Velocity `KickedFromServerEvent`, BungeeCord
+> `ServerKickEvent`: a backend kick, the proxy has no event for kicks it performs itself). `ban` is not advertised (no proxy-level
+> ban event). Source: minecraft.md §7 (`kick`, `chat`), operations.md §7.2. Capability effect: `hello.capabilities.events`
+> = join, leave, chat, command, kick.
+
+> **Listeners never reach the proxy** — every event handler catches `Throwable` and logs through the bridge log. This matters:
+> BungeeCord's event bus kicked the first test player when a handler threw during `PostLoginEvent` (its handlers are invoked
+> reflectively, so the listener class is `public`). Velocity registers the main class's `@Subscribe` methods after construction, so
+> the main class does not register itself in its constructor (Guice "does not have a container" otherwise). Source: Velocity
+> plugin loader (`JavaPluginLoader`), BungeeCord `EventBus`. Capability effect: none.
+
+> **Proxy actions run through the proxy API** — `kick`, `whisper`, `message`, `title`, `actionbar`, `broadcast`, `send_server`,
+> `move_all` use the proxy API directly. `message` and `whisper` treat text starting with `{` or `[` as a JSON component (Adventure
+> GSON on Velocity, `ComponentSerializer` on BungeeCord), otherwise plain text; malformed JSON is `invalid_args`. Title ticks are
+> converted to durations at 50 ms per tick on Velocity; BungeeCord takes ticks natively. `send_server` and `move_all` match backend
+> names case-insensitively (core lower-cases identifiers). `broadcast` without `server` is network-wide. Source: minecraft.md §7
+> (proxy column), operations.md §9. Capability effect: `hello.capabilities.actions`.
+
+> **Action `reload` is conditional and not verified live** — Velocity advertises `reload` only when the `velocity` command exists
+> and runs `velocity reload`; BungeeCord always advertises it and runs the built-in `greload`. Neither command was exercised
+> against a real proxy here (the proxy may refuse, which answers `ok:false`). Source: minecraft.md §7 (`reload`, proxies p).
+> Capability effect: `reload` in `hello.capabilities.actions` on both proxies.
+
+> **Punishments and groups are commands through the proxy console, not APIs** — `ban`, `mute` (both need a duration of the form
+> `30m`, `12h`, `7d` …) run `ban|mute <name> [duration] [reason]`, `unban|unmute <name>` and `set_permission_group` runs
+> `lp user <uuid> parent set <group>`. Advertised only when LiteBans or AdvancedBan (`ban`, `unban`, `mute`, `unmute`) or LuckPerms
+> (`set_permission_group`) is loaded (`hello.integrations`: `luckperms`, `litebans`, `advancedban`). `ban` and `mute` need an online
+> target because the proxy only knows online players; `unban` and `unmute` accept any UUID but need the name, which the bridge
+> knows only for players seen since it started (otherwise `not_found`). Names are validated against `[A-Za-z0-9_]{1,16}`; reasons
+> are free text without control characters (core). The panel shows `refused` when the proxy does not accept a command. Source:
+> minecraft.md §7 (ban/mute on proxies: partial, via LiteBans/AdvancedBan), §10. Capability effect: the integration-dependent actions
+> above. NOT verified live: LiteBans, AdvancedBan and LuckPerms were not installed in the headless run.
+
+> **Headless test server settings and the login limiter** — the headless proxy runs in offline mode with
+> `player-info-forwarding-mode = "none"` (Velocity) and `ip_forward: false` (BungeeCord). Velocity answers a second login from the
+> same address within `login-ratelimit` (3 s by default) with "You are logging in too fast", so multi-bot tests must wait. Source:
+> Velocity default config. Capability effect: none (test tooling only).
+
+> **Headless run needs no Minecraft account** — `scripts/run-proxy-conformance.sh` writes `eula.txt` only from `MINECRAFT_EULA=true`,
+> uses the PaperMC fill API (Velocity 4.2.0, Paper 1.21.4, SHA-256 verified), the BungeeCord CI artifact from
+> hub.spigotmc.org (no published checksum: SHA-256 is recorded on first use) and a mineflayer bot (offline auth). Nothing from these
+> ships in an artifact. Source: scripts/run-proxy-conformance.sh header. Capability effect: none.
 
 ## 5. Rust (worker D)
 

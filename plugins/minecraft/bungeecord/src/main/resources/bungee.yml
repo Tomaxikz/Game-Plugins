@@ -1,0 +1,5 @@
+name: PlayerManagerBridge
+main: dev.playermanager.bridge.bungeecord.PlayerManagerBridgeBungee
+version: ${version}
+author: Tomaxikz
+description: Live network data and typed actions for the Calagopus Player Manager panel (BungeeCord / Waterfall).
