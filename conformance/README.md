@@ -67,7 +67,7 @@ values are never printed.
 ## Running the selftest
 
 ```sh
-node --test conformance/test/
+node --test 'conformance/test/*.test.mjs'
 ```
 
 Covers: the codec round-trips, the hash test vector (D17), the item and render-hash rules, the
@@ -75,7 +75,7 @@ Rust/FiveM/Minecraft block rules (unit level), the mock passing the whole suite 
 modes, `--slow` tests against a fast-timer mock, and one failing-test check per `--break`. About
 20 seconds, 57 tests.
 
-Run it with `node --test conformance/test/` (the directory form works after the rename to
+Run it with `node --test 'conformance/test/*.test.mjs'` (quote the glob so Node expands it; a bare directory argument fails on Node 22. Files are named
 `selftest.test.mjs`; the runner picks up `*.test.mjs`). The ping break (`no-ping`) takes
 about 80 seconds, so it only runs with `PM_SELFTEST_SLOW=1`.
 
@@ -261,7 +261,7 @@ expose tcp (`--tcp` with the token file), and once with the default unix socket.
 Mock-only self check in CI (no game server needed):
 
 ```sh
-node --test conformance/test/
+node --test 'conformance/test/*.test.mjs'
 ```
 
 ## Hash test vector (D17)

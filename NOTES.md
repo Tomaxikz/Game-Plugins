@@ -371,7 +371,7 @@ the FiveM source tree at `citizenfx/fivem` (HEAD, fetched read-only) and the fra
 
 ### Tests
 
-`node --test plugins/fivem/test/` → 48 pass, 0 fail (msgpack, canonical hash incl. D17 and the erratum check, framing, validation, a full integration run of `server/main.js` over a real Unix socket against `test/fake-fxserver.js`, the TCP fallback with token auth, and the OneSync-off path). The integration tests use a fake FXServer global environment and do not prove FXServer behaviour; the items under "Manual steps" are what still needs a live server.
+`node --test 'plugins/fivem/test/*.test.js'` → 48 pass, 0 fail (msgpack, canonical hash incl. D17 and the erratum check, framing, validation, a full integration run of `server/main.js` over a real Unix socket against `test/fake-fxserver.js`, the TCP fallback with token auth, and the OneSync-off path). The integration tests use a fake FXServer global environment and do not prove FXServer behaviour; the items under "Manual steps" are what still needs a live server.
 
 ### Manual steps on a real FXServer (fivem build with `node_version '22'`)
 
@@ -412,4 +412,4 @@ the FiveM source tree at `citizenfx/fivem` (HEAD, fetched read-only) and the fra
 
 > **FiveM slot base** — FiveM `main` slots are 1-based ints (ox_inventory); the suite checks 1..size. Source: `docs/protocol/games/fivem.md` §7.2. Capability effect: none.
 
-> **`node --test conformance/test/`** — works after the rename to `selftest.test.mjs`. Source: Node test runner (glob-based file discovery). Capability effect: none.
+> **`node --test 'conformance/test/*.test.mjs'`** — use a quoted glob; Node 22 does not accept a bare directory. Source: Node test runner (glob-based file discovery). Capability effect: none.

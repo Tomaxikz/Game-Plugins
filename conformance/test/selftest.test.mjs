@@ -1,4 +1,4 @@
-// Self-test: `node --test conformance/test/`
+// Self-test: `node --test 'conformance/test/*.test.mjs'`
 //  - MessagePack round-trips and framing
 //  - canonical hash test vector (D17: correct bytes; documented erratum checked separately)
 //  - the mock bridge passes the whole suite in unix and tcp mode

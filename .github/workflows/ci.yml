@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test conformance/test/
+      - run: node --test 'conformance/test/*.test.mjs'
 
   minecraft:
     name: minecraft (build + unit tests)
@@ -126,7 +126,7 @@ jobs:
         with:
           node-version: 22
       - run: sudo apt-get install -y --no-install-recommends lua5.4
-      - run: node --test plugins/fivem/test/
+      - run: node --test 'plugins/fivem/test/*.test.js'
       - run: plugins/fivem/build.sh
       - uses: actions/upload-artifact@v4
         with:

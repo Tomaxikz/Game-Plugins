@@ -112,7 +112,7 @@ jobs:
         with:
           node-version: 22
       - run: sudo apt-get install -y --no-install-recommends lua5.4
-      - run: node --test plugins/fivem/test/
+      - run: node --test 'plugins/fivem/test/*.test.js'
       - run: plugins/fivem/build.sh
       - uses: actions/upload-artifact@v4
         with:

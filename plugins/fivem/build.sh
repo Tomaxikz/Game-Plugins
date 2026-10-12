@@ -32,7 +32,7 @@ else
 fi
 
 echo "== test"
-(cd "$REPO" && node --test plugins/fivem/test/)
+(cd "$REPO" && node --test 'plugins/fivem/test/*.test.js')
 
 echo "== stage $VER"
 rm -rf "$STAGE" "$RELEASE"

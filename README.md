@@ -73,7 +73,7 @@ The version comes from `BRIDGE_VERSION` if it is set, otherwise from `VERSION`.
 ## Testing
 
 ```bash
-node --test conformance/test/
+node --test 'conformance/test/*.test.mjs'
 ```
 
 That runs the conformance client's own self-test against its mock bridge. To check a running bridge:
