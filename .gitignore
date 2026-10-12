@@ -1,0 +1,17 @@
+.gradle/
+build/
+**/build/
+!**/src/**/build/
+out/
+.idea/
+*.iml
+node_modules/
+bin/
+obj/
+dist/
+run/
+.playermanager/
+__pycache__/
+*.log
+.stonecutter/
+.workers/
