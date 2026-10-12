@@ -98,10 +98,16 @@ sections of [`NOTES.md`](NOTES.md) and in [`plugins/rust/smoke/README.md`](plugi
 
 ## Releases
 
-Pushing a tag `v<version>` that matches `VERSION` runs `.github/workflows/release.yml`. It builds every game,
-generates `manifest.json` and `SHA256SUMS`, and publishes **one** GitHub release containing all assets.
-Running the workflow manually with a test tag is a dry run: the release folder is uploaded as a workflow
-artifact, and a draft release is created only if you ask for one.
+`.github/workflows/release.yml` builds every game, generates `manifest.json` and `SHA256SUMS`, and publishes
+**one** GitHub release containing all assets. The panel picks it up from `releases/latest`.
+
+- **Release a version:** set `VERSION`, then either push the tag `v<VERSION>` or run the **Release** workflow
+  manually (Actions → Release → Run workflow). A manual run creates the tag itself on the selected commit.
+- **Dry run:** tick `dry_run`. Everything is built, and the release folder is uploaded as a workflow artifact;
+  nothing is published.
+- A version with a `-suffix` (e.g. `1.1.0-rc.1`) is published as a pre-release, which the panel ignores
+  unless its pre-release channel is on.
+- A published release is never replaced. To ship a fix, bump `VERSION`; the workflow refuses an existing tag.
 
 ## Licence and assets
 

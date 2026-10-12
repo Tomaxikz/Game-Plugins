@@ -6,10 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Test tag to build as (e.g. v1.0.0). Dry-run: builds everything and uploads the release directory as a workflow artifact; no GitHub release is created unless 'publish' is true."
-        required: true
-      publish:
-        description: "Create a draft GitHub release for this tag"
+        description: "Tag to release (e.g. v1.0.0). Empty = v + the VERSION file. The tag is created on the selected commit."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run: build everything and upload the release folder as a workflow artifact, publish nothing"
         type: boolean
         default: false
 
@@ -27,15 +28,17 @@ jobs:
       - id: v
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
         run: |
-          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then tag="$GITHUB_REF_NAME"; else tag="${INPUT_TAG:-v$file_version}"; fi
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::tag '$tag' is not v<semver>"; exit 1
           fi
           version="${tag#v}"
-          file_version="$(tr -d '[:space:]' < VERSION)"
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$version" != "$file_version" ]; then
-            echo "::error::tag $tag does not match VERSION $file_version"; exit 1
+          # Every artifact carries bridge_version from VERSION, so a published tag must match it.
+          if [ "$DRY_RUN" != "true" ] && [ "$version" != "$file_version" ]; then
+            echo "::error::tag $tag does not match VERSION $file_version (bump VERSION, or use dry_run)"; exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -143,13 +146,17 @@ jobs:
         with:
           name: release-${{ needs.version.outputs.tag }}
           path: release/
-      - name: Create GitHub release
-        if: github.event_name == 'push' || inputs.publish
+      - name: Publish GitHub release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          DRAFT: ${{ github.event_name == 'push' && 'false' || 'true' }}
         run: |
-          flags=(--title "$TAG" --notes-file release-notes.md --verify-tag)
-          if [ "$DRAFT" = "true" ]; then flags=(--title "$TAG (dry run)" --notes-file release-notes.md --draft --target "$GITHUB_SHA"); fi
-          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          # Published releases are never replaced (releases.md §5): bump VERSION instead.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; bump VERSION to publish a new one"; exit 1
+          fi
+          flags=(--title "$TAG" --notes-file release-notes.md)
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then flags+=(--verify-tag); else flags+=(--target "$GITHUB_SHA"); fi
+          # A -suffix version is a pre-release; the panel ignores those unless its pre-release channel is on.
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); else flags+=(--latest); fi
           gh release create "$TAG" release/* "${flags[@]}"
