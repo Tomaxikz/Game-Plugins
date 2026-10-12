@@ -1,5 +1,6 @@
 package dev.playermanager.bridge.mod.forge;
 
+import net.minecraftforge.eventbus.api.listener.ObjBooleanBiConsumer;
 import dev.playermanager.bridge.mod.mc.McBridge;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.CommandEvent;
@@ -26,7 +27,8 @@ public final class ForgeEntry {
         PlayerEvent.PlayerLoggedInEvent.BUS.addListener(this::onLogin);
         PlayerEvent.PlayerLoggedOutEvent.BUS.addListener(this::onLogout);
         LivingDeathEvent.BUS.addListener(this::onDeath);
-        LivingDamageEvent.Post.BUS.addListener(this::onDamage);
+        // Forge has no post-damage event: observe LivingDamageEvent last and skip it when another mod cancelled it.
+        LivingDamageEvent.BUS.addListener((ObjBooleanBiConsumer<LivingDamageEvent>) this::onDamage);
         ServerChatEvent.BUS.addListener(this::onChat);
         CommandEvent.BUS.addListener(this::onCommand);
         AdvancementEvent.AdvancementEarnEvent.BUS.addListener(this::onAdvancement);
@@ -62,9 +64,11 @@ public final class ForgeEntry {
         if (b != null && e.getEntity() instanceof ServerPlayer p) b.events().death(p, e.getSource());
     }
 
-    private void onDamage(LivingDamageEvent.Post e) {
+    private void onDamage(LivingDamageEvent e, boolean cancelled) {
         McBridge b = bridge;
-        if (b != null && e.getEntity() instanceof ServerPlayer p) b.events().damage(p, e.getSource(), e.getDamage(), p.getHealth());
+        if (cancelled || b == null || !(e.getEntity() instanceof ServerPlayer p)) return;
+        // Fired before the damage is applied, so health afterwards is an estimate (absorption ignored).
+        b.events().damage(p, e.getSource(), e.getAmount(), Math.max(0f, p.getHealth() - e.getAmount()));
     }
 
     private void onChat(ServerChatEvent e) {
