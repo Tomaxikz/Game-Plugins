@@ -44,5 +44,8 @@ tasks.register("buildAll") {
     group = "build"
     description = "Builds every release jar into build/release/ (universal now; mod loaders when added)."
     dependsOn(":universal:build")
-    listOf("fabric", "neoforge", "forge").forEach { n -> findProject(":$n")?.let { dependsOn("$it:build") } }
+    // Loader projects may be parents (e.g. :fabric) of per-version projects (:fabric:v26); build them all.
+    listOf("fabric", "neoforge", "forge").forEach { n ->
+        findProject(":$n")?.let { p -> p.allprojects.forEach { sub -> dependsOn(sub.tasks.matching { it.name == "build" }) } }
+    }
 }
