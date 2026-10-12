@@ -1,0 +1,10 @@
+{
+  "Group": "PlayerManager",
+  "Name": "PlayerManagerBridge",
+  "Version": "${version}",
+  "Description": "Local socket bridge exposing live player data and typed actions to the Player Manager panel.",
+  "Authors": [ { "Name": "Player Manager" } ],
+  "Main": "com.playermanager.hytale.PlayerManagerHytalePlugin",
+  "ServerVersion": "*",
+  "IncludesAssetPack": false
+}
