@@ -101,13 +101,14 @@ _(entries)_
 Entries for the lead to merge into `NOTES.md` §4 ("Minecraft — proxies"). Format as in NOTES.md. Both proxies come from
 the same universal jar and share `ProxyPlatform` (one code path); each module has its own `ProxyHost` implementation.
 
-> **Velocity needs Java 25 and API 4.2.0; the universal jar stays Java 8 for the Bukkit half** — `velocity` compiles against
-> `com.velocitypowered:velocity-api:4.2.0` (class file major 69, Java 25); the module uses a Java 25 toolchain. To keep the
-> Java 8 halves resolvable, `universal/build.gradle.kts` requests the JVM 25 variant for the `:velocity` dependency only
-> (`TargetJvmVersion` attribute). The jar itself still contains Java 25 classes that only load on Velocity, so Bukkit servers
-> on Java 8 are unaffected. The sidecar keeps `"java": ">=8"`; the Velocity half needs Java 25 (the manifest's `java` field
-> cannot express that per platform). Source: https://repo.papermc.io (velocity-api 4.2.0 pom and jar), minecraft.md §1 and §10
-> ("Velocity bridges require Java 25"). Capability effect: none.
+> **Velocity needs Java 25 and API 4.2.0; every class in the universal jar is Java 8 bytecode** — `velocity` compiles
+> against `com.velocitypowered:velocity-api:4.2.0` (class file major 69, Java 25) with a Java 25 compiler but
+> `--release 8`, and `disableAutoTargetJvm()` accepts the API's JVM-25 Gradle metadata (it is `compileOnly`; Velocity
+> itself runs on Java 25). Java 25 bytecode must not be in the jar: Paper 1.20.5+ remaps every class of a plugin jar with
+> an ASM that rejects class file 69 ("Unsupported class file major version 69"), which stopped the whole plugin from
+> loading on Paper 1.21.4 in CI (lead fix, 2026-10-12). The sidecar keeps `"java": ">=8"`; running on Velocity still
+> needs Java 25 (the manifest's `java` field cannot express that per platform). Source: https://repo.papermc.io
+> (velocity-api 4.2.0), minecraft.md §1 and §10. Capability effect: none.
 
 > **BungeeCord API 1.21 (Java 8) for both BungeeCord and Waterfall** — compiled against `net.md-5:bungeecord-api:1.21-R0.4`
 > (`--release 8`). Waterfall is the same plugin (`platform: "bungeecord"`), not tested against a Waterfall jar yet. Source:

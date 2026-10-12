@@ -1,5 +1,6 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.gradle.api.attributes.java.TargetJvmVersion
+import java.util.zip.ZipFile
 
 plugins {
     `java-library`
@@ -14,10 +15,10 @@ val proxyModules = listOf("velocity", "bungeecord").mapNotNull { findProject(":$
 
 dependencies {
     implementation(project(":bukkit"))
-    // Velocity 4.x is compiled to Java 25 bytecode, so only that dependency asks for the JVM 25 variant (the Java 8 halves are unaffected).
+    // :velocity uses a Java 25 toolchain but emits Java 8 bytecode (see velocity/build.gradle.kts); request the matching variant.
     proxyModules.forEach { m ->
         if (m.name == "velocity") {
-            implementation(project(m.path)) { attributes { attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 25) } }
+            implementation(project(m.path)) { attributes { attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 8) } }
         } else {
             implementation(project(m.path))
         }
@@ -75,3 +76,25 @@ val writeMeta = tasks.register("writeReleaseMeta") {
 
 tasks.named("shadowJar") { finalizedBy(writeMeta) }
 tasks.named("assemble") { dependsOn("shadowJar") }
+
+// Every class must be Java 8 bytecode (class file 52): Paper 1.20.5+ remaps every class of a plugin jar and refuses
+// the whole jar when any class is newer than its ASM supports (seen with Java 25 Velocity classes on Paper 1.21.4).
+val checkBytecode = tasks.register("checkUniversalBytecode") {
+    val jarFile = tasks.named<ShadowJar>("shadowJar").flatMap { it.archiveFile }
+    inputs.file(jarFile)
+    doLast {
+        val tooNew = mutableListOf<String>()
+        ZipFile(jarFile.get().asFile).use { zip ->
+            for (e in zip.entries()) {
+                if (!e.name.endsWith(".class") || e.name.startsWith("META-INF/versions/")) continue
+                val head = zip.getInputStream(e).use { it.readNBytes(8) }
+                val major = ((head[6].toInt() and 0xff) shl 8) or (head[7].toInt() and 0xff)
+                if (major > 52) tooNew += "${e.name} (class file $major)"
+            }
+        }
+        if (tooNew.isNotEmpty()) {
+            throw GradleException("Universal jar must be Java 8 bytecode; newer classes:\n  " + tooNew.joinToString("\n  "))
+        }
+    }
+}
+tasks.named("build") { dependsOn(checkBytecode) }
