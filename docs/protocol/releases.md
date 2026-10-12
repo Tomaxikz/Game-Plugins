@@ -126,7 +126,15 @@ Field rules:
 - `install.server_cfg_line`: FiveM only; the panel appends it to `server.cfg` if not present.
 - `dependencies`: other things the bridge needs. `source` is `modrinth` (project slug/id) or `bundled`. The panel resolves Modrinth versions for the server's loader + game version. Bridges should avoid dependencies where possible (no Fabric API unless truly needed).
 
-## 5. How the panel uses this (panel-side, for reference)
+## 5. Release source
+
+- Bridges are published only as GitHub releases of **`Tomaxikz/Game-Plugins`** (public repository).
+- The panel fetches `https://github.com/Tomaxikz/Game-Plugins/releases/latest/download/manifest.json`, then downloads assets from the same release (`…/releases/download/<tag>/<file>`). "Latest" = newest non-prerelease, non-draft release; pre-releases are ignored unless the panel admin enables a "pre-release channel".
+- The repository is a panel admin setting (default above), so forks/self-hosted mirrors can be used. Any source must serve the same `manifest.json` + asset layout.
+- The panel checks for a new release at most every **6 hours** (and on demand from the admin page), honouring GitHub rate limits (unauthenticated: send `If-None-Match` with the previous ETag).
+- Never delete or replace assets of an already published release; fix by publishing a new version. The panel caches downloaded assets by `sha256`.
+
+## 6. How the panel uses this (panel-side, for reference)
 
 The concrete panel work is tracked in `panel-changes.md` (section C).
 

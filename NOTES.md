@@ -56,8 +56,6 @@ Contract revision: `docs/protocol/` was updated upstream on 2026-10-12 18:11–1
 
 ## 2. Minecraft — core + Bukkit family (worker A)
 
-## 2. Minecraft — core + Bukkit family (worker A)
-
 Entries for the lead to merge into `NOTES.md` §2. Format: **topic** — what differs. Why. Source. Capability effect.
 
 > **Bukkit minimum version is 1.13, not 1.12 / 1.8.8** — the Bukkit-family plugin (and therefore the `game_versions` of `playermanager-bridge-minecraft-universal-<ver>.jar.meta.json`) is `>=1.13`. Below that the plugin loads, logs "older than 1.13" and leaves the bridge disabled (verified on Paper 1.12.2); the server is unaffected. Why: the whole item/block/id model depends on the 1.13 flattening (`Material#getKey`, `BlockData#getAsString`, namespaced ids, `GameRule`, `Advancement` keys). Supporting 1.8–1.12 would need a second, hand-maintained legacy id table (`legacy:<MATERIAL>` for most items) and could not be tested here (no 1.12 client/server matrix), so a half-working 1.12 path was judged worse than none. The proxy half of the universal jar is not affected by this limit. Source: https://hub.spigotmc.org/javadocs/spigot/org/bukkit/Material.html (`getKey` since 1.13), https://minecraft.wiki/w/Java_Edition_1.13/Flattening. Capability effect: no bridge on < 1.13. Release meta: `{"game_versions": ">=1.13", "java": ">=8"}` (the lead's `>=1.12` default was adjusted).
@@ -196,8 +194,6 @@ _(not run: needs a Rust server; see plugins/rust/smoke/README.md for what to rec
 > **Conformance** — `conformance/bin/pm-conformance.mjs --profile hytale --allow-actions --slow` against the real socket server + stream hub driven by the fake provider (`./gradlew runFakeBridge -Proot=<dir>`, test source `FakeServerMain`): 75 passed, 0 failed, 25 skipped (assets not advertised, MC/Rust/FiveM profiles, expect-conflict probe because no panel inventory-editing action id is advertised). This validates the protocol layer only, not the Hytale API.
 
 > **Not run against a real server** — the dedicated server needs the game assets (`Assets.zip`) and an authenticated session; the brief forbids logging in or accepting licences. Every API-backed path is compile-checked against the real 0.7.0 jar and probe-checked (`ProbeTest` resolves each capability against the jar) but was not executed in a live world.
-
-## 7. FiveM / RedM (worker F)
 
 ## 7. FiveM / RedM (worker F)
 
