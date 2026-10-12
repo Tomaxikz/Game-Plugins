@@ -1,0 +1,15 @@
+{
+  "name": "generic",
+  "description": "Any bridge. Only game-independent protocol checks; no game-specific expectations.",
+  "sources": ["docs/protocol/README.md", "docs/protocol/operations.md", "docs/protocol/items-and-assets.md"],
+  "game": null,
+  "platforms": null,
+  "required_ops": ["server.info", "players.list", "player.get"],
+  "forbidden_ops": [],
+  "required_features": [],
+  "forbidden_features": [],
+  "required_player_fields": [],
+  "required_containers": [],
+  "checks": [],
+  "expect": {}
+}

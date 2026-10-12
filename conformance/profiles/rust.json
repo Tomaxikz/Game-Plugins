@@ -1,0 +1,17 @@
+{
+  "name": "rust",
+  "description": "Rust bridge on Oxide (uMod) or Carbon.",
+  "sources": ["docs/protocol/games/rust.md sections 2, 3, 6, 8", "docs/protocol/items-and-assets.md section 8"],
+  "game": "rust",
+  "platforms": ["oxide", "carbon"],
+  "required_ops": ["server.info", "players.list", "player.get", "player.inventory", "item.get", "action.run"],
+  "forbidden_ops": [],
+  "required_features": [],
+  "forbidden_features": ["proxy"],
+  "required_player_fields": [],
+  "required_containers": [],
+  "checks": ["rust.steamid", "rust.assets"],
+  "expect": {
+    "containers": { "main": { "size": 24 }, "belt": { "size": 6 }, "wear": { "size": 8 } }
+  }
+}

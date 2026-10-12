@@ -34,11 +34,13 @@ docs were written before `operations.md` existed (`hytale.md` §10 #1 and `fivem
 | D14 | Version | — | One version for the repo in `/VERSION`. Builds read `BRIDGE_VERSION` env, else `/VERSION`. Release tag `v<ver>` must equal it (release workflow checks). |
 | D15 | Error on non-`hello` first request (Unix transport) | README only mandates `hello` first; consequence specified for TCP only. | Unix: any op before `hello` → `invalid_args` "hello required", connection stays open. TCP: `unauthorized` and close. |
 | D16 | `enabled_ops` / `disabled_actions` | README §7. | Ops not in `enabled_ops` (unless `"*"`) are removed from `capabilities.ops` and answer `unsupported`; same for `disabled_actions`. `hello` is always enabled. |
+| D17 | Hash test vector | `items-and-assets.md` §2 gives bytes `81 a2 69 64 ae …` → `027f2bef638386bd`. `minecraft:stone` is 15 bytes, so the fixstr header must be `af`; the documented bytes are malformed and the documented hash is over those malformed bytes. | The algorithm wins: correct bytes `81 a2 69 64 af 6d 69 6e 65 63 72 61 66 74 3a 73 74 6f 6e 65` → **`90d892ebcdb67d59`**. Every bridge tests the correct vector and also asserts the documented bytes hash to `027f2bef638386bd` (erratum check). **Panel action:** fix the vector in `items-and-assets.md` §2 and make sure the panel's own encoder writes `af`. |
+| D18 | `hello.game` defined twice | `operations.md` §1 lists `game` as the game id string **and** as an optional object of game-specific extras; a map cannot hold both. | `hello.game` is the **string** (panel `Game` enum, equals `bridge.json.game`). Game-specific hello extras (Minecraft proxies: `protocol_range`, `modded`, `backends`) go in **`hello.game_info`** (object) and are also sent in `server.info.game`, so a panel that does not know `game_info` loses nothing. **Panel action:** rename the object key in `operations.md` §1 and read `game_info`. |
 
 ## 1. Shared implementation rules (all bridges)
 
 - Canonical MessagePack + hash/fingerprint exactly per `items-and-assets.md` §2–3; test vector
-  `{"id":"minecraft:stone"}` → `027f2bef638386bd` is in every bridge's unit tests and in `conformance/`.
+  per D17 (`90d892ebcdb67d59`) is in every bridge's unit tests and in `conformance/`.
 - Floats that are integral are encoded as ints **only inside hash/fingerprint input**; on the wire,
   floats for float-typed fields (positions, health) are float64.
 - Per-op timeouts from `operations.md` §0; frames ≤ 4 MiB; ≥ 8 connections; idle close 120 s;
@@ -74,4 +76,10 @@ _(entries)_
 
 ## 8. Conformance (worker G)
 
-_(entries)_
+> **Hash test vector (D17)** — `items-and-assets.md` §2 lists `81 a2 69 64 ae 6d … 65` with hash `027f2bef638386bd`. The `ae` header declares 14 bytes but `minecraft:stone` is 15, so the listed bytes are invalid MessagePack. Correct canonical bytes use `af`; hash `90d892ebcdb67d59`. The suite asserts the correct values and checks the documented bytes separately as an erratum (`test/selftest.test.mjs`). Source: `docs/protocol/items-and-assets.md` §2 (in-repo). Capability effect: none (bridges must produce `90d892ebcdb67d59`).
+
+> **`hello.game` string vs object** — `operations.md` §1 defines `game` as the game id string, and also as an optional object for game-specific hello extras. `games/minecraft.md` §10 and §12 put proxy `protocol_range` and `backends` under `hello.game`. The suite treats `hello.game` as the string. Proxy bridges need a separate key (for example `hello.game_info`), which the lead should decide. Source: `docs/protocol/operations.md` §1, `docs/protocol/games/minecraft.md` §10. Capability effect: proxy `backends` cannot be discovered from `hello` as written.
+
+> **`node --test conformance/test/` (directory argument)** — on Node 26 a bare directory argument finds no tests (the runner takes glob patterns). The selftest is run as `node --test conformance/test/`. Source: Node.js test runner docs (Node 21+ glob behaviour). Capability effect: none.
+
+> **Truncated records and fingerprint recomputation** — `items-and-assets.md` §3 says the fingerprint is taken over the full item, while §1 lets the bridge drop components and set `truncated`. The suite recomputes a fingerprint only when no record in the subtree is truncated, and checks truncated records' fingerprints through `item.get`. Source: `docs/protocol/items-and-assets.md` §1, §3. Capability effect: none; bridges must compute the fingerprint over the full item even when truncating.

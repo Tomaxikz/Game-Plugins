@@ -1,0 +1,15 @@
+{
+  "name": "fivem",
+  "description": "FiveM (GTA V) and RedM (RDR3) bridge resource.",
+  "sources": ["docs/protocol/games/fivem.md sections 2, 4, 5, 9, 10, 11"],
+  "game": "fivem",
+  "platforms": ["fivem", "redm"],
+  "required_ops": ["server.info", "players.list", "player.get", "positions.subscribe", "positions.keyframe", "positions.unsubscribe", "action.run"],
+  "forbidden_ops": [],
+  "required_features": ["positions.stream"],
+  "forbidden_features": ["proxy"],
+  "required_player_fields": [],
+  "required_containers": [],
+  "checks": ["fivem.identity"],
+  "expect": {}
+}

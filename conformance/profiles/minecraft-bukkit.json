@@ -1,0 +1,17 @@
+{
+  "name": "minecraft-bukkit",
+  "description": "Paper, Spigot and Folia bridge (Bukkit family).",
+  "sources": ["docs/protocol/games/minecraft.md sections 2-9, 11", "docs/protocol/items-and-assets.md section 8"],
+  "game": "minecraft_java",
+  "platforms": ["paper", "spigot", "folia"],
+  "required_ops": ["server.info", "players.list", "player.get", "player.inventory", "player.nearby", "item.get", "positions.subscribe", "positions.keyframe", "positions.unsubscribe", "events.subscribe", "events.unsubscribe", "action.run", "assets.manifest", "assets.get"],
+  "forbidden_ops": [],
+  "required_features": ["positions.stream", "inventory.write", "sensitive"],
+  "forbidden_features": ["proxy"],
+  "required_player_fields": ["position", "health", "max_health", "game_mode", "experience", "food"],
+  "required_containers": ["inventory", "equipment", "ender_chest"],
+  "checks": ["mc.containers", "mc.world", "mc.uuid", "mc.items", "mc.player_game"],
+  "expect": {
+    "containers": { "inventory": { "size": 36 }, "equipment": { "size": 5 }, "ender_chest": { "size": 27 } }
+  }
+}
