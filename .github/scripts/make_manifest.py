@@ -52,6 +52,9 @@ RULES = [
 ]
 
 
+META_KEYS = {"platforms", "game_versions", "java", "install", "dependencies"}
+
+
 def mc_range(r: str) -> str:
     # "1.21.4-1.21.11" -> ">=1.21.4 <=1.21.11"; a single version -> "1.21.4" exactly.
     parts = r.split("-")
@@ -97,7 +100,8 @@ def main() -> int:
         meta_path = path + ".meta.json"
         if os.path.exists(meta_path):
             with open(meta_path) as f:
-                entry.update(json.load(f))
+                meta = json.load(f)
+            entry.update({k: v for k, v in meta.items() if k in META_KEYS})
             os.remove(meta_path)
         entry.setdefault("game_versions", "*")
         entry.setdefault("dependencies", [])
