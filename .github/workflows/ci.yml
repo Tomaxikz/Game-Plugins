@@ -17,8 +17,8 @@ jobs:
     name: conformance (self-test)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: node --test 'conformance/test/*.test.mjs'
@@ -27,8 +27,8 @@ jobs:
     name: minecraft (build + unit tests)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: |
@@ -36,11 +36,11 @@ jobs:
             17
             21
             25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Build all Minecraft targets
         working-directory: plugins/minecraft
         run: ./gradlew buildAll --stacktrace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: minecraft-jars
           path: plugins/minecraft/build/release/
@@ -58,24 +58,24 @@ jobs:
       # The repository owner accepted the Minecraft EULA for test servers.
       MINECRAFT_EULA: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: |
             21
             25
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: minecraft-jars
           path: plugins/minecraft/build/release/
       - name: Run ${{ matrix.platform }} with the bridge and the conformance client
         run: plugins/minecraft/scripts/headless-conformance.sh ${{ matrix.platform }}
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: headless-${{ matrix.platform }}-logs
           path: /tmp/pm-headless/**/logs/
@@ -85,12 +85,12 @@ jobs:
     name: rust (compile check + unit tests)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - run: plugins/rust/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rust
           path: plugins/rust/build/release/
@@ -100,18 +100,18 @@ jobs:
     name: hytale (build + unit tests)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - working-directory: plugins/hytale
         run: ./gradlew build --stacktrace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hytale
           path: plugins/hytale/build/release/
@@ -121,14 +121,14 @@ jobs:
     name: fivem (lint + unit tests)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: sudo apt-get install -y --no-install-recommends lua5.4
       - run: node --test 'plugins/fivem/test/*.test.js'
       - run: plugins/fivem/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fivem
           path: plugins/fivem/build/release/
