@@ -1,17 +1,57 @@
-.gradle/
+# Build output (every project writes artifacts to its own build/release/)
 build/
-**/build/
 !**/src/**/build/
 out/
+dist/
+
+# Gradle (Minecraft, Hytale) — keep the wrapper
+.gradle/
+.kotlin/
+!gradle/wrapper/gradle-wrapper.jar
+.stonecutter/
+
+# Minecraft mod-loader dev runs (Loom / ModDevGradle / ForgeGradle)
+run/
+runs/
+logs/
+
+# .NET (Rust bridge compile check and tests) — scoped so conformance/bin/ stays tracked
+plugins/rust/**/bin/
+plugins/rust/**/obj/
+*.user
+TestResults/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+
+# Bridge runtime files created when a bridge runs in a local test server
+.playermanager/
+
+# Local test servers and downloads (scripts use /tmp, but never commit them if run here)
+eula.txt
+*.sock
+
+# Secrets and local overrides
+.env
+.env.*
+token
+
+# Editors and OS
 .idea/
 *.iml
-node_modules/
-bin/
-obj/
-dist/
-run/
-.playermanager/
-__pycache__/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
-.stonecutter/
+
+# Lead/worker scratch (not part of the repository)
 .workers/
