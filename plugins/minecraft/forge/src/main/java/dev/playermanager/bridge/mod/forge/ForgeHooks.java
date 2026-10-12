@@ -18,9 +18,9 @@ final class ForgeHooks implements LoaderHooks {
         String lv = "unknown";
         List<ModEntry> out = new ArrayList<ModEntry>();
         try {
-            ModList ml = ModList.get();
-            lv = ml.getModContainerById("forge").map(c -> c.getModInfo().getVersion().toString()).orElse("unknown");
-            for (IModInfo i : ml.getMods()) {
+            // Forge 26.x: ModList is static.
+            lv = ModList.getModContainerById("forge").map(c -> c.getModInfo().getVersion().toString()).orElse("unknown");
+            for (IModInfo i : ModList.getMods()) {
                 Path p = null;
                 try { p = i.getOwningFile().getFile().getFilePath(); } catch (Throwable ignored) { }
                 out.add(new ModEntry(i.getModId(), i.getDisplayName(), i.getVersion().toString(), p));

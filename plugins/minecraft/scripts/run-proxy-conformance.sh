@@ -47,8 +47,8 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 
 # ---- Java
 pick_java() {  # pick_java <major> -> prints a JAVA_HOME or nothing
-  local want="$1" c
-  for c in "/usr/lib/jvm/java-$want-openjdk" "/usr/lib/jvm/java-$want-openjdk-amd64" "/usr/lib/jvm/jdk-$want" "$WORK/jdks/jdk$want"; do
+  local want="$1" c ci="JAVA_HOME_${1}_X64"
+  for c in "${!ci:-}" "/usr/lib/jvm/java-$want-openjdk" "/usr/lib/jvm/java-$want-openjdk-amd64" "/usr/lib/jvm/jdk-$want" "$WORK/jdks/jdk$want"; do
     [[ -x "$c/bin/java" ]] && { echo "$c"; return; }
   done
   echo ""

@@ -25,7 +25,10 @@ case "$PLATFORM" in
       exec "$HERE/run-paper-conformance.sh" "$PAPER_MC" "$PLATFORM"
     ;;
   velocity|bungeecord)
-    PM_JAVA_HOME="$(jdk 25)" exec "$HERE/run-proxy-conformance.sh" "$PLATFORM"
+    # Velocity 4.x needs Java 25; BungeeCord was validated on 21. The Paper backend runs on 21.
+    if [[ "$PLATFORM" == velocity ]]; then proxy_jdk=25; else proxy_jdk=21; fi
+    PM_JAVA_HOME="$(jdk "$proxy_jdk")" PM_BACKEND_JAVA_HOME="$(jdk 21)" \
+      exec "$HERE/run-proxy-conformance.sh" "$PLATFORM"
     ;;
   fabric|neoforge|forge)
     PM_JAVA_HOME="$(jdk 25)" exec "$HERE/run-modded-conformance.sh" "$PLATFORM" "$MOD_MC"
