@@ -1,0 +1,9 @@
+name: PlayerManagerBridge
+main: dev.playermanager.bridge.bukkit.PlayerManagerBridgePlugin
+version: '${version}'
+api-version: '1.13'
+description: Exposes live player data to the Calagopus Player Manager panel over a local socket.
+author: Player Manager
+load: POSTWORLD
+folia-supported: true
+softdepend: [LuckPerms, Vault, Nexo, Oraxen, ItemsAdder]

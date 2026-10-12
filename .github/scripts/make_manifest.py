@@ -19,7 +19,7 @@ RULES = [
     (re.compile(rf"^playermanager-bridge-minecraft-universal-{VER}\.jar$"), lambda m: {
         "game": "minecraft_java",
         "platforms": ["paper", "spigot", "folia", "velocity", "bungeecord"],
-        "game_versions": ">=1.12",
+        "game_versions": ">=1.13",
         "java": ">=8",
         "install": {"path": "plugins/", "extract": False},
     }),

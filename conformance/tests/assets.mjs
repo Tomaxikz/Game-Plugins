@@ -52,7 +52,8 @@ export const tests = [
         c.ok(isObj(e) && isHex(e.hash, 16), `entries[${i}].hash must be 16 hex chars`);
         c.ok(isObj(e) && RENDERS.includes(e.render), `entries[${i}].render ${e?.render} not in vocabulary`);
         if (ctx.game === 'minecraft_java' && isObj(e) && isStr(e.key)) {
-          c.ok(!e.key.startsWith('item:minecraft:'), `vanilla key ${e.key} must not be listed`);
+          // Default vanilla looks resolve panel-side; a vanilla id with a pack model (`@<model>`) is server art.
+          c.ok(!(e.key.startsWith('item:minecraft:') && !e.key.includes('@')), `vanilla key ${e.key} must not be listed`);
         }
       }
       const keys = entries.map((e) => e.key);
