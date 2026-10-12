@@ -1,0 +1,17 @@
+{
+  "required": false,
+  "package": "dev.playermanager.bridge.mod.fabric.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "DedicatedServerMixin",
+    "PlayerListMixin",
+    "ServerPlayerMixin",
+    "CommandsMixin",
+    "PlayerAdvancementsMixin",
+    "CommonPacketListenerMixin",
+    "ConfigurationPacketListenerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

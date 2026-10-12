@@ -1,0 +1,24 @@
+license="All Rights Reserved"
+
+[[mods]]
+modId="playermanager_bridge"
+version="${version}"
+displayName="Player Manager Bridge"
+authors="Tomaxikz"
+description='''
+Exposes live player data to the Calagopus Player Manager panel over a local socket. Server side only; vanilla clients can join.
+'''
+
+[[dependencies.playermanager_bridge]]
+    modId="neoforge"
+    type="required"
+    versionRange="[${neoMin},)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.playermanager_bridge]]
+    modId="minecraft"
+    type="required"
+    versionRange="${mcRange}"
+    ordering="NONE"
+    side="SERVER"

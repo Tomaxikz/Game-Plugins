@@ -1,0 +1,28 @@
+modLoader="javafml"
+loaderVersion="[${forgeMin},)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="playermanager_bridge"
+version="${version}"
+displayName="Player Manager Bridge"
+authors="Tomaxikz"
+# Server side only: a client (vanilla or modded) without this mod must be able to join.
+displayTest="IGNORE_SERVER_VERSION"
+description='''
+Exposes live player data to the Calagopus Player Manager panel over a local socket. Server side only; vanilla clients can join.
+'''
+
+[[dependencies.playermanager_bridge]]
+    modId="forge"
+    mandatory=true
+    versionRange="[${forgeMin},)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.playermanager_bridge]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="${mcRange}"
+    ordering="NONE"
+    side="SERVER"
