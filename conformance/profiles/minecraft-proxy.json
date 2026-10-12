@@ -1,15 +1,45 @@
 {
   "name": "minecraft-proxy",
   "description": "Velocity and BungeeCord bridge. Network-level state only: no worlds, inventories, positions or assets.",
-  "sources": ["docs/protocol/games/minecraft.md sections 9-10"],
+  "sources": [
+    "docs/protocol/games/minecraft.md sections 9-10"
+  ],
   "game": "minecraft_java",
-  "platforms": ["velocity", "bungeecord"],
-  "required_ops": ["server.info", "players.list", "events.subscribe", "events.unsubscribe", "action.run"],
-  "forbidden_ops": ["positions.subscribe", "positions.keyframe", "positions.unsubscribe", "player.nearby", "player.inventory", "item.get", "assets.manifest", "assets.get"],
-  "required_features": ["proxy"],
-  "forbidden_features": ["positions.stream", "inventory.write", "assets"],
+  "platforms": [
+    "velocity",
+    "bungeecord"
+  ],
+  "required_ops": [
+    "server.info",
+    "players.list",
+    "events.subscribe",
+    "events.unsubscribe",
+    "action.run"
+  ],
+  "forbidden_ops": [
+    "positions.subscribe",
+    "positions.keyframe",
+    "positions.unsubscribe",
+    "player.nearby",
+    "player.inventory",
+    "item.get",
+    "assets.manifest",
+    "assets.get"
+  ],
+  "required_features": [
+    "proxy"
+  ],
+  "forbidden_features": [
+    "positions.stream",
+    "inventory.write",
+    "assets"
+  ],
   "required_player_fields": [],
   "required_containers": [],
-  "checks": ["mc.proxy", "mc.uuid"],
+  "checks": [
+    "mc.proxy",
+    "mc.uuid",
+    "mc.version"
+  ],
   "expect": {}
 }

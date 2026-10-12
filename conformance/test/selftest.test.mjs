@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { encode, decode, PmFloat, isInt, isFloat, toHex } from '../lib/msgpack.mjs';
 import { canonicalBytes, hash16, TEST_VECTOR, sha256Hex, renderSubsetOf } from '../lib/canonical.mjs';
 import { encodeFrame, FrameReader, frameHeader, FrameError, MAX_FRAME } from '../lib/framing.mjs';
+import { itemErrors, containersErrors, blocksErrors, findKeyPaths, gameSectionErrors } from '../lib/schema.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONF = join(here, '..');
@@ -138,12 +139,55 @@ describe('framing', () => {
 });
 
 describe('render subset', () => {
-  test('MC render components make the hash unverifiable from the record alone', () => {
+  test('MC render components are part of the render subset (verifiable from the record)', () => {
     const r = renderSubsetOf({ id: 'minecraft:leather_chestplate', components: { 'minecraft:dyed_color': { rgb: 1 } } });
-    assert.equal(r.verifiable, false);
+    assert.equal(r.verifiable, true);
+    assert.deepEqual(r.subset.render_components, { 'minecraft:dyed_color': { rgb: 1 } });
+  });
+  test('bundle/container render components use the nested item hashes', () => {
+    const r = renderSubsetOf({ id: 'minecraft:bundle', components: { 'minecraft:bundle_contents': [] }, contents: [{ hash: 'aaaaaaaaaaaaaaaa' }] });
+    assert.deepEqual(r.subset.render_components['minecraft:bundle_contents'], ['aaaaaaaaaaaaaaaa']);
+  });
+  test('legacy snbt items stay format-only; non-render components do not enter the subset', () => {
+    assert.equal(renderSubsetOf({ id: 'minecraft:stone', components: { snbt: '{}' } }).verifiable, false);
     const s = renderSubsetOf({ id: 'minecraft:stone', components: { 'minecraft:custom_data': {} } });
-    assert.equal(s.verifiable, true);
     assert.deepEqual(s.subset, { id: 'minecraft:stone' });
+  });
+});
+
+describe('contract rules (schema)', () => {
+  const H = '0123456789abcdef';
+  const F = '0'.repeat(64);
+  const rec = (o) => ({ count: 1, hash: H, fingerprint: F, ...o });
+  test('item encoding is Minecraft-only; top-level records have no slot; contents need int slots', () => {
+    assert.ok(itemErrors(rec({ id: 'water', encoding: 'components' }), 'x', { game: 'fivem' }).some((m) => /encoding/.test(m)));
+    assert.equal(itemErrors(rec({ id: 'minecraft:stone', encoding: 'components' }), 'x', { game: 'minecraft_java' }).length, 0);
+    assert.ok(itemErrors(rec({ id: 'a:b', slot: 0 }), 'x', { game: 'minecraft_java' }).some((m) => /top-level/.test(m)));
+    assert.ok(itemErrors(rec({ id: 'a:b', contents: [rec({ id: 'a:c', slot: '0' })] }), 'x', { game: 'minecraft_java' }).some((m) => /int slot/.test(m)));
+  });
+  test('Rust: platform data in components only; skin omitted when 0', () => {
+    assert.ok(itemErrors(rec({ id: 'rifle.ak', shortname: 'rifle.ak' }), 'x', { game: 'rust' }).some((m) => /shortname/.test(m)));
+    assert.ok(itemErrors(rec({ id: 'rifle.ak', skin: 0 }), 'x', { game: 'rust' }).some((m) => /skin/.test(m)));
+    assert.equal(itemErrors(rec({ id: 'rifle.ak', components: { uid: 1, definition_id: 2 } }), 'x', { game: 'rust' }).length, 0);
+    assert.ok(itemErrors(rec({ id: 'rifle.ak', components: { label: 'x' } }), 'x', { game: 'rust' }).length > 0);
+  });
+  test('FiveM: one main container with 1-based slots; components label/weight/metadata', () => {
+    const cont = [{ id: 'main', size: 50, slots: [{ slot: 1, item: rec({ id: 'water', count: 3, components: { label: 'Water', weight: 0.5, metadata: {} } }) }] }];
+    assert.deepEqual(containersErrors(cont, { game: 'fivem', slotBase: 1 }), []);
+    assert.ok(containersErrors([{ id: 'main', size: 50, slots: [{ slot: 0, item: rec({ id: 'water' }) }] }], { game: 'fivem', slotBase: 1 }).length > 0);
+    assert.ok(itemErrors(rec({ id: 'water', components: { color: 'red' } }), 'x', { game: 'fivem' }).length > 0);
+  });
+  test('MC blocks: data length and index range are checked', () => {
+    const palette = ['minecraft:air', 'minecraft:stone', 'minecraft:grass_block[snowy=false]'];
+    const good = { origin: { x: 1, y: 2, z: 3 }, size: { x: 2, y: 2, z: 2 }, order: 'yzx', palette, bits: 2, data: new Uint8Array([0x19, 0x06]) };
+    assert.deepEqual(blocksErrors(good), []);
+    assert.ok(blocksErrors({ ...good, data: new Uint8Array([0x19]) }).some((m) => /bytes/.test(m)));
+    assert.ok(blocksErrors({ ...good, data: new Uint8Array([0xff, 0xff]) }).some((m) => />= palette/.test(m)));
+    assert.ok(blocksErrors({ ...good, order: 'xyz' }).length > 0);
+  });
+  test('address keys are found anywhere in a payload; common keys in game are flagged', () => {
+    assert.deepEqual(findKeyPaths({ a: [{ address: 'x' }] }, 'address'), ['$.a[0].address']);
+    assert.ok(gameSectionErrors({ position: {}, xp_level: 3 }, { mc: true }).length === 2);
   });
 });
 
@@ -304,6 +348,16 @@ const BREAK_CASES = [
   { brk: 'wrong-manifest-hash', mode: 'unix', fail: ['assets.manifest.paging-hash'] },
   { brk: 'reversed-assets', mode: 'unix', fail: ['assets.get.schema', 'assets.get.order-unknown'] },
   { brk: 'accept-hotbar-string', mode: 'unix', fail: ['args.item.get-slot-forms'] },
+  { brk: 'common-key-in-game', mode: 'unix', fail: ['player.get.common-keys-not-in-game'] },
+  { brk: 'inventory-in-player-get', mode: 'unix', fail: ['player.get.common-keys-not-in-game'] },
+  { brk: 'xp-keys-in-game', mode: 'unix', fail: ['profile.mc.player-game'] },
+  { brk: 'slot-on-top-level', mode: 'unix', fail: ['player.inventory.schema'] },
+  { brk: 'address-present', mode: 'unix', fail: ['envelope.no-address'] },
+  { brk: 'skip-render-components', mode: 'unix', fail: ['player.inventory.digests'] },
+  { brk: 'mainhand-slot', mode: 'unix', fail: ['profile.mc.containers'] },
+  { brk: 'bad-block-data', mode: 'unix', fail: ['player.nearby.blocks-mc'] },
+  { brk: 'block-index-oob', mode: 'unix', fail: ['player.nearby.blocks-mc'] },
+  { brk: 'max-connections-4', mode: 'unix', fail: ['conn.eight-concurrent'] },
 ];
 if (SLOW_OK) BREAK_CASES.push({ brk: 'no-ping', mode: 'unix', slow: true, fail: ['ping.keepalive-60s'] });
 

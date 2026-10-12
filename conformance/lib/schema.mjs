@@ -41,6 +41,7 @@ export function helloErrors(d, bridge) {
   if (bridge && bridge.platform !== undefined && d.platform !== bridge.platform) {
     e.push(`platform ${d.platform} != bridge.json platform ${bridge.platform}`);
   }
+  if (d.game_info !== undefined && !isObj(d.game_info)) e.push('game_info must be an object when present (NOTES D18)');
   const c = d.capabilities;
   if (!isObj(c)) {
     e.push('capabilities must be an object');
@@ -188,7 +189,8 @@ export function playersListErrors(d, opts = {}) {
     } else if (p.online === false) {
       sawOffline = true;
       if ('ping' in p) e.push(`${pp}.ping must be omitted for offline players`);
-      if (opts.features && !opts.features.includes('offline_players')) e.push(`${pp} is offline but feature offline_players is not advertised`);
+      const sleeper = Array.isArray(p.groups) && p.groups.includes('sleeping');
+      if (opts.features && !sleeper && !opts.features.includes('offline_players')) e.push(`${pp} is offline but feature offline_players is not advertised`);
     }
     if (!Array.isArray(p.groups)) e.push(`${pp}.groups must always be an array`);
     else {
@@ -223,8 +225,23 @@ export function playersListErrors(d, opts = {}) {
   return e;
 }
 
-/** A single encoded item record (items-and-assets.md section 1). */
-export function itemErrors(rec, path = 'item', { nested = false, depth = 0 } = {}) {
+// Platform extras allowed per game (items-and-assets.md section 1, NOTES D6/D10). Rust and FiveM
+// carry game data inside `components` only; top-level extras are forbidden.
+const PLATFORM_TOP_FORBIDDEN = {
+  rust: ['shortname', 'amount', 'item_id', 'durability_percent', 'ammo_type', 'blueprint_target', 'label', 'weight', 'metadata'],
+  fivem: ['shortname', 'amount', 'item_id', 'durability_percent', 'ammo_type', 'blueprint_target', 'label', 'weight', 'metadata'],
+};
+const PLATFORM_COMPONENTS = {
+  rust: ['uid', 'definition_id', 'blueprint_target'],
+  fivem: ['label', 'weight', 'metadata'],
+};
+
+/**
+ * A single encoded item record (items-and-assets.md section 1).
+ * opts.game: the bridge game (encoding allowed only for minecraft_java; game extras rules).
+ * opts.nested: true for entries of `contents` (slot is then required to be an int).
+ */
+export function itemErrors(rec, path = 'item', { nested = false, depth = 0, game = null } = {}) {
   const e = [];
   const err = (m) => e.push(`${path}: ${m}`);
   if (!isObj(rec)) {
@@ -235,7 +252,7 @@ export function itemErrors(rec, path = 'item', { nested = false, depth = 0 } = {
   if (!isStr(rec.id) || rec.id === '') err('id must be a non-empty string');
   if (!isIntV(rec.count) || num(rec.count) < 1) err('count must be an int >= 1');
   if (!nested && 'slot' in rec) err('top-level item must not carry slot (the slot lives in the container entry)');
-  if (nested && 'slot' in rec && !(isIntV(rec.slot) || isStr(rec.slot))) err('contents slot must be an int or a name');
+  if (nested && !('slot' in rec && isIntV(rec.slot) && num(rec.slot) >= 0)) err('contents entries need an int slot relative to the parent');
   for (const [k, v] of Object.entries(rec)) {
     if (v === null && !ITEM_NULLABLE_KEYS.includes(k)) err(`key ${k} is null (omit unknown keys instead)`);
   }
@@ -254,20 +271,35 @@ export function itemErrors(rec, path = 'item', { nested = false, depth = 0 } = {
     }
   }
   if (rec.components !== undefined && !isObj(rec.components)) err('components must be a map');
-  if (rec.encoding !== undefined && !['components', 'nbt', 'bukkit_meta'].includes(rec.encoding)) err('encoding must be components|nbt|bukkit_meta');
+  if (rec.encoding !== undefined) {
+    if (game !== null && game !== 'minecraft_java') err(`encoding is Minecraft-only (game is ${game})`);
+    else if (!['components', 'nbt', 'bukkit_meta'].includes(rec.encoding)) err('encoding must be components|nbt|bukkit_meta');
+    if (rec.encoding === 'bukkit_meta' && 'components' in rec) err('bukkit_meta items carry no components');
+  }
   if (rec.truncated !== undefined && !isBool(rec.truncated)) err('truncated must be a bool');
   if (rec.model !== undefined && rec.model !== null && !isStr(rec.model)) err('model must be a string');
   if (rec.tint !== undefined && !(Array.isArray(rec.tint) && rec.tint.every(isIntV))) err('tint must be [int]');
-  if (rec.skin !== undefined && !(isIntV(rec.skin) && num(rec.skin) >= 0)) err('skin must be an int >= 0');
+  if (rec.skin !== undefined) {
+    if (!(isIntV(rec.skin) && num(rec.skin) >= 0)) err('skin must be an int >= 0');
+    else if (game === 'rust' && num(rec.skin) === 0) err('skin must be omitted when there is none (0)');
+  }
   for (const k of ['condition', 'max_condition']) {
     if (rec[k] !== undefined && !isNum(rec[k])) err(`${k} must be a number`);
   }
   if (rec.ammo !== undefined) {
     if (!isObj(rec.ammo) || !isIntV(rec.ammo.count) || (rec.ammo.id !== undefined && !isStr(rec.ammo.id))) err('ammo must be {id?, count int}');
   }
+  if (PLATFORM_TOP_FORBIDDEN[game]) {
+    for (const k of PLATFORM_TOP_FORBIDDEN[game]) if (k in rec) err(`${k} is not a top-level ${game} key (platform data belongs in components)`);
+  }
+  if (PLATFORM_COMPONENTS[game] && isObj(rec.components)) {
+    for (const k of Object.keys(rec.components)) {
+      if (!PLATFORM_COMPONENTS[game].includes(k)) err(`components.${k} is not a ${game} component`);
+    }
+  }
   if (rec.contents !== undefined) {
     if (!Array.isArray(rec.contents)) err('contents must be an array');
-    else rec.contents.forEach((c, i) => e.push(...itemErrors(c, `${path}.contents[${i}]`, { nested: true, depth: depth + 1 })));
+    else rec.contents.forEach((c, i) => e.push(...itemErrors(c, `${path}.contents[${i}]`, { nested: true, depth: depth + 1, game })));
   }
   if (!isHex(rec.hash, 16)) err('hash must be 16 lowercase hex chars');
   if (!isHex(rec.fingerprint, 64)) err('fingerprint must be 64 lowercase hex chars');
@@ -318,6 +350,7 @@ export function containersErrors(containers, opts = {}) {
       continue;
     }
     const size = isIntV(c.size) ? num(c.size) : Infinity;
+    const base = opts.slotBase ?? 0;
     const used = new Set();
     const named = opts.named?.[c.id];
     for (const [j, s] of c.slots.entries()) {
@@ -331,14 +364,14 @@ export function containersErrors(containers, opts = {}) {
         if (named && !named.includes(s.slot)) e.push(`${sp}.slot ${s.slot} is not a named slot of ${c.id}`);
       } else if (!isIntV(s.slot)) {
         e.push(`${sp}.slot must be an int (or a name)`);
-      } else if (num(s.slot) < 0 || num(s.slot) >= size) {
-        e.push(`${sp}.slot ${num(s.slot)} outside 0..${size - 1}`);
+      } else if (num(s.slot) < base || num(s.slot) >= base + size) {
+        e.push(`${sp}.slot ${num(s.slot)} outside ${base}..${base + size - 1}`);
       }
       const key = String(s.slot);
       if (used.has(key)) e.push(`${sp}.slot ${key} appears twice in ${c.id}`);
       used.add(key);
       if (!isObj(s.item)) e.push(`${sp}.item must be an encoded item (empty slots are omitted)`);
-      else e.push(...itemErrors(s.item, `${sp}.item`));
+      else e.push(...itemErrors(s.item, `${sp}.item`, { game: opts.game ?? null }));
     }
   }
   return e;
@@ -375,6 +408,73 @@ export function playerGetErrors(d, id) {
   if (d.ping !== undefined && d.ping !== null && !isIntV(d.ping)) e.push('ping must be an int');
   if (d.last_seen !== undefined && !isIntV(d.last_seen)) e.push('last_seen must be an int');
   if (d.game !== undefined && !isObj(d.game)) e.push('game must be an object');
+  if ('inventory' in d) e.push('player.get must not carry inventory (use player.inventory)');
+  if (isObj(d.game)) e.push(...gameSectionErrors(d.game));
+  return e;
+}
+
+/** Common player.get keys must not be repeated inside `game` (NOTES D1, D11). */
+export const COMMON_PLAYER_KEYS = ['world', 'dimension', 'position', 'health', 'max_health', 'armor', 'held_item', 'vehicle', 'game_mode', 'food', 'saturation', 'experience', 'ping', 'ip'];
+
+export function gameSectionErrors(game, { mc = false } = {}) {
+  const e = [];
+  for (const k of COMMON_PLAYER_KEYS) {
+    if (k in game) e.push(`game.${k} repeats a common player.get key (NOTES D1)`);
+  }
+  if (mc) {
+    for (const k of Object.keys(game)) if (/^xp_/.test(k)) e.push(`game.${k}: XP is only the common experience object (NOTES D11)`);
+  }
+  return e;
+}
+
+/** Recursively finds a forbidden key (D8: no address key anywhere on the socket). */
+export function findKeyPaths(value, key, path = '$', out = []) {
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => findKeyPaths(v, key, `${path}[${i}]`, out));
+  } else if (value && typeof value === 'object' && !(value instanceof Uint8Array)) {
+    for (const [k, v] of Object.entries(value)) {
+      if (k === key) out.push(`${path}.${k}`);
+      findKeyPaths(v, key, `${path}.${k}`, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * MC player.nearby block slice (NOTES D9, minecraft.md section 6): origin/size as {x,y,z},
+ * order "yzx", palette, bits = max(1, ceil(log2(palette.length))), data bin of exactly
+ * ceil(cells*bits/8) bytes, and every index < palette length.
+ */
+export function blocksErrors(b) {
+  const e = [];
+  if (!isObj(b)) return ['blocks must be an object'];
+  const xyz = (v) => isObj(v) && isIntV(v.x) && isIntV(v.y) && isIntV(v.z);
+  if (!xyz(b.origin)) e.push('blocks.origin must be {x,y,z} ints');
+  if (!xyz(b.size) || num(b.size.x) < 1 || num(b.size.y) < 1 || num(b.size.z) < 1) e.push('blocks.size must be {x,y,z} ints >= 1');
+  if (b.order !== 'yzx') e.push('blocks.order must be "yzx"');
+  if (!Array.isArray(b.palette) || b.palette.length < 1 || !b.palette.every(isStr)) e.push('blocks.palette must be a non-empty string[]');
+  if (!(b.data instanceof Uint8Array)) e.push('blocks.data must be bin');
+  if (!isIntV(b.bits) || num(b.bits) < 1) e.push('blocks.bits must be an int >= 1');
+  if (e.length) return e;
+  const cells = num(b.size.x) * num(b.size.y) * num(b.size.z);
+  if (cells > 262144) e.push(`blocks has ${cells} cells (max 262144)`);
+  const L = b.palette.length;
+  const bits = Math.max(1, Math.ceil(Math.log2(L)));
+  if (num(b.bits) !== bits) e.push(`blocks.bits ${num(b.bits)} != ${bits} for palette of ${L}`);
+  const need = Math.ceil((cells * num(b.bits)) / 8);
+  if (b.data.length !== need) e.push(`blocks.data is ${b.data.length} bytes, expected ${need}`);
+  if (e.length) return e;
+  const width = num(b.bits);
+  let bad = 0;
+  for (let n = 0; n < cells; n++) {
+    let v = 0;
+    for (let k = 0; k < width; k++) {
+      const bit = n * width + k;
+      v = (v << 1) | ((b.data[bit >> 3] >> (7 - (bit & 7))) & 1);
+    }
+    if (v >= L) bad += 1;
+  }
+  if (bad) e.push(`${bad} block indices are >= palette length ${L}`);
   return e;
 }
 

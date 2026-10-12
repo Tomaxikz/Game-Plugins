@@ -63,27 +63,44 @@ export const MC_RENDER_COMPONENTS = [
   'minecraft:painting/variant',
 ];
 
+// Components whose render value is the list of nested item hashes (items-and-assets.md section 2).
+const NESTED_HASH_COMPONENTS = ['minecraft:bundle_contents', 'minecraft:container'];
+
 /**
- * Build the render subset of an encoded item record that the client can verify on its own.
+ * Build the render subset of an encoded item record (items-and-assets.md section 2, step 1).
+ * render_components is taken from record.components (MC 1.20.5+). Nested-hash components
+ * (bundle_contents, container) use the `hash` of each record in `contents`.
+ * Legacy `components.snbt` (pre-1.20.5) keeps its render tags inside a string, so the render hash
+ * is not recomputable from the record: returned as verifiable: false (format only).
  * Returns { verifiable: true, subset } or { verifiable: false, reason }.
- * Not verifiable when render-relevant component data is present (MC components, legacy snbt)
- * or when the record carries a glint override.
  */
 export function renderSubsetOf(rec) {
   const comps = rec.components;
-  if (comps && typeof comps === 'object' && !Array.isArray(comps)) {
-    if ('snbt' in comps) return { verifiable: false, reason: 'legacy snbt components' };
-    for (const k of Object.keys(comps)) {
-      if (MC_RENDER_COMPONENTS.includes(k)) {
-        return { verifiable: false, reason: `render component ${k}` };
-      }
-    }
+  if (comps && typeof comps === 'object' && !Array.isArray(comps) && 'snbt' in comps) {
+    return { verifiable: false, reason: 'legacy snbt components' };
   }
   const subset = { id: rec.id };
   if (typeof rec.model === 'string' && rec.model !== '') subset.model = rec.model;
   if (Array.isArray(rec.tint) && rec.tint.length > 0) subset.tint = rec.tint;
   if (typeof rec.skin === 'number' && rec.skin !== 0) subset.skin = rec.skin;
-  if (Array.isArray(rec.enchantments) && rec.enchantments.length > 0) subset.glint = true;
+  const renderComps = {};
+  if (comps && typeof comps === 'object' && !Array.isArray(comps)) {
+    for (const k of MC_RENDER_COMPONENTS) {
+      if (!(k in comps)) continue;
+      if (NESTED_HASH_COMPONENTS.includes(k) && Array.isArray(rec.contents)) {
+        renderComps[k] = rec.contents.map((c) => c.hash);
+      } else {
+        renderComps[k] = comps[k];
+      }
+    }
+  }
+  if (Object.keys(renderComps).length > 0) subset.render_components = renderComps;
+  const override = comps && typeof comps === 'object' ? comps['minecraft:enchantment_glint_override'] : undefined;
+  if (typeof override === 'boolean') {
+    if (override) subset.glint = true;
+  } else if (Array.isArray(rec.enchantments) && rec.enchantments.length > 0) {
+    subset.glint = true;
+  }
   if (rec.variant !== undefined && rec.variant !== null) subset.variant = rec.variant;
   return { verifiable: true, subset };
 }

@@ -41,6 +41,16 @@ const BREAKS = {
   'wrong-manifest-hash': 'assets.manifest manifest_hash is constant garbage',
   'reversed-assets': 'assets.get returns results in reverse request order',
   'accept-hotbar-string': 'item.get accepts the "hotbar:0" slot form (D4)',
+  'common-key-in-game': 'player.get repeats position/health inside game (D1)',
+  'xp-keys-in-game': 'player.get game carries xp_level (D11)',
+  'inventory-in-player-get': 'player.get carries an inventory key',
+  'slot-on-top-level': 'player.inventory records carry slot at top level',
+  'address-present': 'players.list rows carry an address key (D8)',
+  'skip-render-components': 'render hash ignores render_components (dyed leather)',
+  'mainhand-slot': 'equipment container lists a mainhand slot',
+  'max-connections-4': 'bridge refuses connections beyond 4 (config max_connections below the 8 minimum)',
+  'bad-block-data': 'player.nearby blocks.data is one byte short',
+  'block-index-oob': 'player.nearby blocks indices exceed the palette',
 };
 
 function parseArgs(argv) {
@@ -71,6 +81,8 @@ const PM_DIR = join(ROOT, '.playermanager');
 const SOCK_REL = '.playermanager/bridge.sock';
 const SOCK_ABS = join(ROOT, SOCK_REL);
 const MAX_INFLIGHT = 16;
+const MAX_CONNECTIONS = BRK.has('max-connections-4') ? 4 : 8; // config.json max_connections default 8
+let activeConnections = 0;
 const MAX_FRAME = 4194304;
 const SUB_KEYFRAME_MS = 10000;
 
@@ -81,7 +93,9 @@ const PNG_1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUl
 
 function finishItem(base) {
   const rec = { ...base };
+  if (rec.components && !rec.encoding) rec.encoding = 'components';
   const sub = renderSubsetOf(rec);
+  if (BRK.has('skip-render-components') && sub.subset) delete sub.subset.render_components;
   let hash = sub.verifiable ? hash16(sub.subset) : hash16({ id: rec.id, tint: rec.tint });
   if (BRK.has('wrong-hash')) hash = hash16({ id: rec.id, count: rec.count });
   rec.hash = hash;
@@ -129,7 +143,7 @@ const PLAYERS = [
     health: 20,
     food: 20,
     inv: {
-      inventory: { size: 36, slots: { 0: SWORD, 4: COBBLE, 9: SHULKER } },
+      inventory: { size: 36, slots: { 0: SWORD, 4: COBBLE, 9: SHULKER, 10: LEATHER } },
       equipment: { size: 5, slots: { head: HELMET } },
       ender_chest: { size: 27, slots: {} },
     },
@@ -150,7 +164,7 @@ const PLAYERS = [
     health: 14,
     food: 17,
     inv: {
-      inventory: { size: 36, slots: { 0: STONE, 30: LEATHER } },
+      inventory: { size: 36, slots: { 0: STONE } },
       equipment: { size: 5, slots: {} },
       ender_chest: { size: 27, slots: {} },
     },
@@ -272,14 +286,49 @@ function playerRow(p, { includeOffline, includeSensitive }) {
     row.reason = p.reason;
   }
   if (includeSensitive && p.online) row.ip = '127.0.0.1';
+  if (BRK.has('address-present') && p.online) row.address = '127.0.0.1:25565';
   if (BRK.has('ip-always') && p.online && !includeSensitive) row.ip = '127.0.0.1';
   return row;
+}
+
+function packBits(indices, bits) {
+  const out = new Uint8Array(Math.ceil((indices.length * bits) / 8));
+  indices.forEach((v, n) => {
+    for (let k = 0; k < bits; k++) {
+      const bit = n * bits + k;
+      if ((v >> (bits - 1 - k)) & 1) out[bit >> 3] |= 1 << (7 - (bit & 7));
+    }
+  });
+  return out;
+}
+
+function mockBlocks() {
+  const palette = ['minecraft:air', 'minecraft:stone', 'minecraft:grass_block[snowy=false]'];
+  const size = { x: 2, y: 2, z: 2 };
+  let indices = [0, 1, 2, 1, 0, 0, 1, 2];
+  if (BRK.has('block-index-oob')) indices = [0, 1, 2, 1, 0, 0, 1, 3];
+  const bits = Math.max(1, Math.ceil(Math.log2(palette.length)));
+  let data = packBits(indices, bits);
+  if (BRK.has('bad-block-data')) data = data.subarray(0, data.length - 1);
+  return {
+    origin: { x: 10, y: 60, z: -80 },
+    size,
+    world: 'world',
+    dimension: 'minecraft:overworld',
+    order: 'yzx',
+    palette,
+    bits,
+    data,
+    block_entities: [],
+    truncated: false,
+  };
 }
 
 function containersOf(p) {
   const out = [];
   for (const [id, c] of Object.entries(p.inv)) {
-    const slots = Object.entries(c.slots).map(([k, item]) => ({ slot: /^\d+$/.test(k) ? Number(k) : k, item }));
+    const slots = Object.entries(c.slots).map(([k, item]) => ({ slot: /^\d+$/.test(k) ? Number(k) : k, item: BRK.has('slot-on-top-level') ? { ...item, slot: 0 } : item }));
+    if (id === 'equipment' && BRK.has('mainhand-slot')) slots.push({ slot: 'mainhand', item: STONE });
     out.push({ id, size: c.size, slots });
   }
   return out;
@@ -493,7 +542,9 @@ class Conn {
         const rad = (yaw * Math.PI) / 180;
         const dx = -Math.sin(rad);
         const dz = Math.cos(rad);
+        const blocks = args.blocks === true ? mockBlocks() : undefined;
         return ok({
+          ...(blocks ? { blocks } : {}),
           held_item: SWORD,
           look: { yaw, pitch: 0, dx, dy: 0, dz },
           target: null,
@@ -597,7 +648,12 @@ class Conn {
     if (want('food')) d.food = p.food;
     if (want('experience')) d.experience = { level: 30, progress: 0.4, total: 1395 };
     if (args.include_sensitive === true) d.ip = '127.0.0.1';
-    if (want('game')) d.game = { offline_uuid: false, air_ticks: 300, fire_ticks: -20, effects: [{ id: 'minecraft:speed', amplifier: 1, duration_ticks: 1200, ambient: false, particles: true }], groups: p.groups };
+    if (want('game')) {
+      d.game = { offline_uuid: false, air_ticks: 300, max_air_ticks: 300, fire_ticks: -20, effects: [{ id: 'minecraft:speed', amplifier: 1, duration_ticks: 1200, ambient: false, particles: true }], groups: p.groups };
+      if (BRK.has('common-key-in-game')) d.game.position = { ...p.pos };
+      if (BRK.has('xp-keys-in-game')) d.game.xp_level = 30;
+    }
+    if (BRK.has('inventory-in-player-get')) d.inventory = [];
     if (args.fields) for (const k of Object.keys(d)) if (!['id', 'name', 'online', ...args.fields.map((f) => f.split('.')[0])].includes(k)) delete d[k];
     return { body: { ok: true, data: d } };
   }
@@ -728,6 +784,14 @@ if (MODE === 'tcp') {
 }
 
 const server = net.createServer((socket) => {
+  if (activeConnections >= MAX_CONNECTIONS) {
+    socket.destroy();
+    return;
+  }
+  activeConnections += 1;
+  socket.once('close', () => {
+    activeConnections -= 1;
+  });
   const conn = new Conn(socket);
   socket.on('data', (chunk) => conn.onData(chunk));
   socket.on('error', () => conn.close());

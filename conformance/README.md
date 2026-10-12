@@ -70,19 +70,20 @@ values are never printed.
 node --test conformance/test/
 ```
 
-Covers: the codec round-trips, the hash test vector (D17), the mock passing the whole suite in
-unix and tcp modes, `--slow` tests against a fast-timer mock, and one failing-test check per
-`--break`. About 20 seconds.
+Covers: the codec round-trips, the hash test vector (D17), the item and render-hash rules, the
+Rust/FiveM/Minecraft block rules (unit level), the mock passing the whole suite in unix and tcp
+modes, `--slow` tests against a fast-timer mock, and one failing-test check per `--break`. About
+20 seconds, 57 tests.
 
-Notes: `node --test conformance/test/` (a bare directory argument) finds no tests on Node 26
-(the test runner takes glob patterns). Use the file path above. The ping break (`no-ping`) takes
+Run it with `node --test conformance/test/` (the directory form works after the rename to
+`selftest.test.mjs`; the runner picks up `*.test.mjs`). The ping break (`no-ping`) takes
 about 80 seconds, so it only runs with `PM_SELFTEST_SLOW=1`.
 
 Unix socket paths must be shorter than 108 bytes. The selftest uses `os.tmpdir()`, which keeps
 them short.
 
 Mock breaks (`node conformance/mock/mock-bridge.mjs --root DIR --break <name>`, add `--tcp` for
-tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) it must fail:
+tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) it must fail (the mock is Minecraft-only; Rust and FiveM rules are covered by unit tests in the selftest and by their profiles):
 
 | Break | Mode | Must fail |
 |---|---|---|
@@ -106,6 +107,16 @@ tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) 
 | `wrong-manifest-hash` | unix | assets.manifest.paging-hash |
 | `reversed-assets` | unix | assets.get.schema, assets.get.order-unknown |
 | `accept-hotbar-string` | unix | args.item.get-slot-forms |
+| `common-key-in-game` | unix | player.get.common-keys-not-in-game |
+| `inventory-in-player-get` | unix | player.get.common-keys-not-in-game |
+| `xp-keys-in-game` | unix | profile.mc.player-game |
+| `slot-on-top-level` | unix | player.inventory.schema |
+| `address-present` | unix | envelope.no-address |
+| `skip-render-components` | unix | player.inventory.digests |
+| `mainhand-slot` | unix | profile.mc.containers |
+| `bad-block-data` | unix | player.nearby.blocks-mc |
+| `block-index-oob` | unix | player.nearby.blocks-mc |
+| `max-connections-4` | unix | conn.eight-concurrent |
 | `no-ping` | unix | ping.keepalive-60s (slow, `PM_SELFTEST_SLOW=1`) |
 
 
@@ -113,7 +124,7 @@ tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) 
 
 The "Against mock" column is the unix run of the reference mock with default options (no `--slow`, no `--allow-actions`). Skips are expected for those tests.
 
-| Test id | Group | Needs | Title | Against mock |
+| Test id | Group | Needs | Title | Against mock (unix) |
 |---|---|---|---|---|
 | `bridge.json.schema` | bridge.json | root | bridge.json has every README section 1 key with the right type and enum values | pass |
 | `bridge.json.socket-path` | bridge.json | root, unix | unix socket path is relative to the server root, inside it, short enough, and is a socket | pass |
@@ -148,7 +159,7 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `args.server-info-unknown-args-ignored` | args | hello | unknown args are ignored (forward compatibility) | pass |
 | `server.info.schema` | server | op:server.info | server.info matches operations.md section 2 | pass |
 | `players.list.schema` | players | op:players.list | players.list matches operations.md section 3 (groups always an array, max 5000) | pass |
-| `players.list.default-online-only` | players | op:players.list, op:server.info | players.list without include_offline returns only online players, and count matches server.info.online | pass |
+| `players.list.default-online-only` | players | op:players.list, op:server.info | players.list without include_offline returns only online players (sleepers need include_offline); count matches server.info.online | pass |
 | `players.list.include-offline` | players | op:players.list | players.list include_offline: offline entries only when offline_players is advertised | pass |
 | `players.list.sensitive` | players | op:players.list | players.list: ip only with include_sensitive (and only when the sensitive feature is advertised) | pass |
 | `player.get.not-found` | player | op:player.get, hello | player.get for an unknown id is not_found | pass |
@@ -162,6 +173,9 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `item.get.matches-inventory` | inventory | op:item.get, op:player.inventory, player | item.get returns the same fingerprint and hash as the inventory record (never truncated) | pass |
 | `item.get.nested-path` | inventory | op:item.get, op:player.inventory, player | item.get with path reaches a nested item (contents[0] of a container item) | pass |
 | `item.get.errors` | inventory | op:item.get | item.get: unknown container is not_found; unknown player is not_found | pass |
+| `player.get.common-keys-not-in-game` | player | op:player.get, player | player.get: common keys are not repeated in game, and there is no top-level inventory (NOTES D1) | pass |
+| `envelope.no-address` | data | hello | no address key appears in any socket response (NOTES D8) | pass |
+| `player.nearby.blocks-mc` | player | op:player.nearby, player | Minecraft player.nearby blocks slice: origin/size maps, order yzx, palette, packed bin data, indices in range (NOTES D9) | pass |
 | `positions.subscribe.ack-keyframe` | positions | op:positions.subscribe | positions.subscribe acks {sub}; first frame is a keyframe with seq 0 | pass |
 | `positions.frames.schema-quantised` | positions | op:positions.subscribe | positions frames: quantised int coordinates, state enum, delta/gone rules | pass |
 | `positions.seq` | positions | op:positions.subscribe | seq starts at 0 and increases by exactly 1 per frame on a subscription | pass |
@@ -203,6 +217,7 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `profile.required-player-fields` | profile | hello | profile required player_fields are advertised | pass |
 | `profile.mc.containers` | profile | profile:mc.containers, op:player.inventory, player | Minecraft containers: inventory 36, equipment 5 named slots, ender_chest 27 (docs/protocol/games/minecraft.md section 5) | pass |
 | `profile.mc.world` | profile | profile:mc.world, hello | Minecraft world/dimension: folder paths relative to server root, namespaced dimension, environment vocabulary | pass |
+| `profile.mc.version-range` | profile | profile:mc.version, hello | Minecraft universal jar range is >= 1.12 (releases.md, NOTES D19) | pass |
 | `profile.mc.uuid` | profile | profile:mc.uuid, op:players.list | Minecraft player ids are lowercase hyphenated UUID strings | pass |
 | `profile.mc.items` | profile | profile:mc.items, op:player.inventory, player | Minecraft item ids are namespace:path (legacy:<MATERIAL> allowed for unknown legacy names) | pass |
 | `profile.mc.player-game` | profile | profile:mc.player_game, op:player.get, player | Minecraft player.get game object: typed keys from games/minecraft.md section 4 | pass |
@@ -211,7 +226,6 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `profile.rust.assets` | profile | profile:rust.assets, op:assets.manifest | Rust exposes no art: manifest empty, assets.get unavailable/no_art_on_server | skip |
 | `profile.fivem.identity` | profile | profile:fivem.identity, hello | FiveM: license: identifiers, game.server_id 1..65535 for online players, world gta5/rdr3, no dimension | skip |
 | `profile.hytale.world` | profile | profile:hytale.world, hello | Hytale: plain world-name strings, no dimension key, container sizes come from the build (not fixed) | skip |
-
 
 ## Profiles
 

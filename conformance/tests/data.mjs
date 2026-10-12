@@ -10,6 +10,9 @@ import {
   containersErrors,
   itemErrors,
   digestErrors,
+  blocksErrors,
+  findKeyPaths,
+  gameSectionErrors,
 } from '../lib/schema.mjs';
 import { subtreeTruncated } from '../lib/canonical.mjs';
 import { okData, errCode, describeResp } from './helpers.mjs';
@@ -42,7 +45,7 @@ export const tests = [
   {
     id: 'players.list.default-online-only',
     group: 'players',
-    title: 'players.list without include_offline returns only online players, and count matches server.info.online',
+    title: 'players.list without include_offline returns only online players (sleepers need include_offline); count matches server.info.online',
     needs: ['op:players.list', 'op:server.info'],
     async run(ctx) {
       const d = okData(await ctx.call('players.list', {}), 'players.list');
@@ -63,7 +66,7 @@ export const tests = [
       const d = okData(await ctx.call('players.list', { include_offline: true }), 'players.list include_offline');
       const errs = playersListErrors(d, { features: ctx.features() });
       if (errs.length) fail(errs.slice(0, 6).join('; '));
-      const offline = d.players.filter((p) => p.online === false).length;
+      const offline = d.players.filter((p) => p.online === false && !(Array.isArray(p.groups) && p.groups.includes('sleeping'))).length;
       if (!ctx.features().includes('offline_players') && offline) fail(`${offline} offline entries but offline_players not advertised`);
       return `${offline} offline entries`;
     },
@@ -203,7 +206,7 @@ export const tests = [
       const p = await ctx.getPlayer();
       const d = okData(await ctx.call('player.inventory', { id: p.id }), 'player.inventory');
       if (!Array.isArray(d.containers)) fail('containers must be an array');
-      const errs = containersErrors(d.containers, { named: ctx.profile?.expect?.named_slots });
+      const errs = containersErrors(d.containers, { named: ctx.profile?.expect?.named_slots, game: ctx.game, slotBase: ctx.game === 'fivem' ? 1 : 0 });
       if (errs.length) fail(errs.slice(0, 8).join('; '));
       const n = d.containers.reduce((a, c) => a + c.slots.length, 0);
       return `${d.containers.length} containers, ${n} items`;
@@ -222,7 +225,7 @@ export const tests = [
       for (const c of d.containers) {
         for (const s of c.slots) {
           items += 1;
-          const e = itemErrors(s.item, `${c.id}[${s.slot}]`);
+          const e = itemErrors(s.item, `${c.id}[${s.slot}]`, { game: ctx.game });
           if (e.length) acc.errors.push(...e);
           else digestErrors(s.item, `${c.id}[${s.slot}]`, acc);
         }
@@ -253,7 +256,7 @@ export const tests = [
       if (!pick) throw new Skip('no untruncated item to compare');
       const got = okData(await ctx.call('item.get', { id: p.id, container: pick.container, slot: pick.slot }), 'item.get');
       const rec = got.item;
-      const errs = itemErrors(rec, 'item.get');
+      const errs = itemErrors(rec, 'item.get', { game: ctx.game });
       if (errs.length) fail(errs.slice(0, 6).join('; '));
       if ('slot' in rec) fail('item.get record must not carry slot');
       if (rec.truncated === true) fail('item.get must never return truncated');
@@ -298,6 +301,60 @@ export const tests = [
       return p ? 'unknown player and container -> not_found' : 'unknown player -> not_found';
     },
   },
+  {
+    id: 'player.get.common-keys-not-in-game',
+    group: 'player',
+    title: 'player.get: common keys are not repeated in game, and there is no top-level inventory (NOTES D1)',
+    needs: ['op:player.get', 'player'],
+    async run(ctx) {
+      const p = await ctx.getPlayer();
+      const d = okData(await ctx.call('player.get', { id: p.id }), 'player.get');
+      const errs = [];
+      if ('inventory' in d) errs.push('player.get carries inventory');
+      if (d.game !== undefined) errs.push(...gameSectionErrors(d.game, { mc: ctx.game === 'minecraft_java' }));
+      if (errs.length) fail(errs.join('; '));
+      return 'no common keys repeated';
+    },
+  },
+  {
+    id: 'envelope.no-address',
+    group: 'data',
+    title: 'no address key appears in any socket response (NOTES D8)',
+    needs: ['hello'],
+    async run(ctx) {
+      const found = [];
+      found.push(...findKeyPaths(ctx.hello, 'address', 'hello'));
+      const info = okData(await ctx.call('server.info', {}), 'server.info');
+      found.push(...findKeyPaths(info, 'address', 'server.info'));
+      const pl = okData(await ctx.call('players.list', { include_offline: true, include_sensitive: true }), 'players.list');
+      found.push(...findKeyPaths(pl, 'address', 'players.list'));
+      const p = await ctx.getPlayer();
+      if (p) {
+        const d = okData(await ctx.call('player.get', { id: p.id, include_sensitive: true }), 'player.get');
+        found.push(...findKeyPaths(d, 'address', 'player.get'));
+      }
+      // Proxy backends carry the configured backend socket address (minecraft.md section 10), not player data.
+      const real = found.filter((path) => !/backends\[\d+\]/.test(path));
+      if (real.length) fail(real.slice(0, 5).join(', '));
+      return 'no player address key (proxy backends excepted)';
+    },
+  },
+  {
+    id: 'player.nearby.blocks-mc',
+    group: 'player',
+    title: 'Minecraft player.nearby blocks slice: origin/size maps, order yzx, palette, packed bin data, indices in range (NOTES D9)',
+    needs: ['op:player.nearby', 'player'],
+    async run(ctx) {
+      if (ctx.game !== 'minecraft_java') throw new Skip('Minecraft only');
+      const p = await ctx.getPlayer();
+      const d = okData(await ctx.call('player.nearby', { id: p.id, radius: 4, blocks: true }), 'player.nearby blocks');
+      if (!('blocks' in d)) throw new Skip('blocks not supported by this bridge (absent is allowed)');
+      const errs = blocksErrors(d.blocks);
+      if (errs.length) fail(errs.slice(0, 5).join('; '));
+      return `${d.blocks.palette.length} palette entries, ${d.blocks.size.x * d.blocks.size.y * d.blocks.size.z} cells`;
+    },
+  },
+
+
+
 ];
-
-

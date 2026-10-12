@@ -20,12 +20,14 @@ export const tests = [
     title: 'at least 8 concurrent connections are accepted and answered',
     needs: ['hello'],
     async run(ctx) {
-      const conns = [];
-      for (let i = 0; i < 8; i++) conns.push((await ctx.open({ hello: true })).client);
+      // The suite's main connection counts too: 8 in total (README section 2, config max_connections 8).
+      await sleep(150); // let closes from earlier tests reach the bridge
+      const main = await ctx.mainClient();
+      const conns = [main];
+      for (let i = 1; i < 8; i++) conns.push((await ctx.open({ hello: true })).client);
       const results = await Promise.all(conns.map((c) => c.request('server.info', {})));
-      results.forEach((r, i) => okData(r, `connection ${i}`));
-      conns.forEach((c) => c.close());
-      return '8 of 8 answered';
+      results.forEach((r, i) => okData(r, `connection ${i + 1} of 8`));
+      return '8 of 8 connections (incl. main) answered';
     },
   },
   {

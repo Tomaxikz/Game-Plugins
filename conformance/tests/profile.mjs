@@ -5,7 +5,7 @@
 import { Check, fail, isObj, isStr, isIntV, isNum } from '../lib/check.mjs';
 import { num } from '../lib/msgpack.mjs';
 import { NAMESPACED, UUID_LOWER, MC_EQUIPMENT_SLOTS } from '../lib/protocol.mjs';
-import { containersErrors } from '../lib/schema.mjs';
+import { containersErrors, gameSectionErrors } from '../lib/schema.mjs';
 import { okData } from './helpers.mjs';
 
 const WORLD_ENV = ['normal', 'nether', 'the_end', 'custom'];
@@ -15,6 +15,15 @@ function worldPathErrors(w, c, where) {
   if (typeof w !== 'string') return;
   c.ok(!w.startsWith('/') && !w.endsWith('/'), `${where}: world ${w} must not start or end with /`);
   c.ok(!w.split('/').includes('..'), `${where}: world ${w} must not contain ..`);
+}
+
+async function firstStreamPlayers(ctx) {
+  const { client } = await ctx.open({ hello: true });
+  const { sub, resp } = await client.subscribe('positions.subscribe', { interval_ms: 250 });
+  okData(resp, 'positions.subscribe');
+  const f = await sub.next(3000);
+  client.close();
+  return f.data?.players ?? [];
 }
 
 function expectOf(ctx) {
@@ -140,6 +149,19 @@ export const tests = [
     },
   },
   {
+    id: 'profile.mc.version-range',
+    group: 'profile',
+    title: 'Minecraft universal jar range is >= 1.12 (releases.md, NOTES D19)',
+    needs: ['profile:mc.version', 'hello'],
+    run(ctx) {
+      const v = String(ctx.hello.game_version ?? '');
+      const [major, minor] = v.split('.').map((x) => Number(x));
+      if (!Number.isInteger(major)) fail(`game_version ${v} is not a version string`);
+      if (major === 1 && (minor ?? 0) < 12) fail(`game_version ${v} is below 1.12`);
+      return `game_version ${v}`;
+    },
+  },
+  {
     id: 'profile.mc.uuid',
     group: 'profile',
     title: 'Minecraft player ids are lowercase hyphenated UUID strings',
@@ -208,6 +230,7 @@ export const tests = [
         }
       }
       if (d.experience !== undefined && d.experience !== null) c.ok(isObj(d.experience) && isNum(d.experience.progress), 'experience must be {level,progress,total}');
+      for (const err of gameSectionErrors(g, { mc: true })) c.errs.push(err);
       c.done();
       return 'game object typed';
     },
@@ -225,10 +248,12 @@ export const tests = [
       const backends = info.game?.backends;
       c.ok(Array.isArray(backends), 'server.info.game.backends must be an array');
       for (const [i, b] of (backends ?? []).entries()) {
-        c.ok(isObj(b) && isStr(b.name) && isStr(b.address) && isIntV(b.players), `backends[${i}] needs name, address and players`);
+        c.ok(isObj(b) && isStr(b.name) && isStr(b.address) && isIntV(b.players), `backends[${i}] needs name, address (string) and players`);
       }
+      c.ok(typeof ctx.hello.game === 'string', 'hello.game must be the game id string (NOTES D18)');
       const hb = ctx.hello.game_info?.backends;
       c.ok(Array.isArray(hb), 'hello.game_info.backends must be an array');
+      for (const [i, b] of (hb ?? []).entries()) c.ok(isObj(b) && isStr(b.name) && isStr(b.address) && isIntV(b.players), `hello.game_info.backends[${i}] needs name, address and players`);
       if (ctx.hello.game_info?.protocol_range !== undefined) {
         const pr = ctx.hello.game_info.protocol_range;
         c.ok(isObj(pr) && isIntV(pr.min) && isIntV(pr.max), 'protocol_range must be {min,max}');
@@ -255,8 +280,19 @@ export const tests = [
       }
       const info = okData(await ctx.call('server.info', {}), 'server.info');
       for (const w of info.worlds) c.ok(!('dimension' in w), 'rust worlds must not carry dimension');
+      for (const p of pl.players) {
+        const sleeping = Array.isArray(p.groups) && p.groups.includes('sleeping');
+        if (sleeping) c.ok(p.online === false, `${p.name} is sleeping but listed online`);
+      }
+      if (ctx.has('positions.subscribe')) {
+        for (const e of await firstStreamPlayers(ctx)) {
+          c.ok(!('yaw' in e) && !('pitch' in e), `rust stream entry ${e.name} must omit yaw and pitch`);
+        }
+      }
       const g = info.game ?? {};
       const req = { hostname: 'string', description: 'string', url: 'string', header_image: 'string', map_name: 'string', world_size: 'int', seed: 'int', entity_count: 'int', fps: 'num', save_interval: 'int', backpacks_plugin: 'bool', roles: 'array', bans: 'array' };
+      for (const r of g.roles ?? []) c.ok(isObj(r) && isStr(r.id) && ['owner', 'admin', 'moderator'].includes(r.role), 'roles[] needs id and role owner|admin|moderator');
+      for (const b of g.bans ?? []) c.ok(isObj(b) && isStr(b.id) && isStr(b.reason), 'bans[] needs id and reason string');
       for (const [k, t] of Object.entries(req)) {
         const v = g[k];
         const ok = t === 'string' ? isStr(v) : t === 'int' ? isIntV(v) : t === 'num' ? isNum(v) : t === 'bool' ? typeof v === 'boolean' : Array.isArray(v);
@@ -319,6 +355,14 @@ export const tests = [
         c.ok(d.world === world, `player world ${d.world} != ${world}`);
         c.ok(!('dimension' in d), 'FiveM player.get must not carry dimension');
         if (d.position) c.ok(!('pitch' in d.position), 'FiveM stream/position omits pitch');
+        const inv = okData(await ctx.call('player.inventory', { id: p.id }), 'player.inventory');
+        c.ok(inv.containers.length === 1 && inv.containers[0].id === 'main', `FiveM exposes one container main, got ${inv.containers.map((x) => x.id).join(',')}`);
+      }
+      if (ctx.has('positions.subscribe')) {
+        for (const e of await firstStreamPlayers(ctx)) {
+          c.ok(!('pitch' in e), `FiveM stream entry ${e.name} must omit pitch`);
+          c.ok(isIntV(e.yaw), `FiveM stream entry ${e.name} yaw must be an int (heading x 100)`);
+        }
       }
       c.done();
       return `world ${world}`;
@@ -335,11 +379,13 @@ export const tests = [
       for (const w of info.worlds) {
         c.ok(isStr(w.world), 'world must be a plain string');
         c.ok(!('dimension' in w), 'hytale worlds must not carry dimension');
+        for (const k of Object.keys(w)) c.ok(['world', 'name', 'loaded', 'players'].includes(k), `hytale worlds[] key ${k} is not in {world,name,loaded,players}`);
       }
       const p = await ctx.getPlayer();
       if (p) {
         const d = okData(await ctx.call('player.get', { id: p.id, fields: ['position'] }), 'player.get');
         c.ok(!('dimension' in d), 'hytale player.get must not carry dimension');
+        for (const k of Object.keys(d.game ?? {})) c.ok(['stats', 'permissions', 'groups', 'equipment'].includes(k), `hytale game key ${k} is not stats|permissions|groups|equipment`);
         const inv = okData(await ctx.call('player.inventory', { id: p.id }), 'player.inventory');
         c.ok(inv.containers.every((x) => isStr(x.id) && isIntV(x.size)), 'container ids and sizes must be present');
       }
