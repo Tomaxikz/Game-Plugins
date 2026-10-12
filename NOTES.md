@@ -164,7 +164,106 @@ _(not run: needs a Rust server; see plugins/rust/smoke/README.md for what to rec
 
 ## 7. FiveM / RedM (worker F)
 
-_(entries)_
+## 7. FiveM / RedM (worker F)
+
+Scope: `plugins/fivem/playermanager_bridge/` (resource), `plugins/fivem/test/`, `plugins/fivem/build.sh`.
+Targets: FXServer cerulean manifest, Node 22 JS runtime (`node_version '22'`), gta5 and rdr3. Built and tested against
+the FiveM source tree at `citizenfx/fivem` (HEAD, fetched read-only) and the framework/ox_inventory repos (HEAD). No live FXServer was run.
+
+### Verification checklist (games/fivem.md section 14)
+
+> **1. Unix `listen()` under server root** — Not verified on FXServer. Node `net` listen on a Unix path is exercised locally (tests bind `.playermanager/bridge.sock`); the TCP fallback is exercised by forcing a path longer than AF_UNIX allows. Write location: see "Write strategy" below. Capability effect: `bridge.json.transport` = `unix` or `tcp`.
+
+> **2. Natives (server side)** — Verified in FXServer source, registered in `code/components/citizen-server-impl/src/state/ServerGameState_Scripting.cpp` and `.../src/PlayerScriptFunctions.cpp`: `GET_PED_ARMOUR` (reads ped health node), `GET_ENTITY_HEADING` (returns 0..360), `GET_ENTITY_MAX_HEALTH` (peds only, else 0), `GET_VEHICLE_NUMBER_PLATE_TEXT`, `GET_SELECTED_PED_WEAPON`, `GET_ENTITY_SPEED` (velocity magnitude, m/s), `GET_VEHICLE_PED_IS_IN`, `GET_PLAYER_PING` (-1 when no peer; bridge maps to `null`). Source: https://github.com/citizenfx/fivem/blob/HEAD/code/components/citizen-server-impl/src/state/ServerGameState_Scripting.cpp . `GET_PLAYER_PING`: https://github.com/citizenfx/fivem/blob/HEAD/code/components/citizen-server-impl/src/PlayerScriptFunctions.cpp . Unarmed weapon hash `0xA2719263` (2725352035): joaat('weapon_unarmed') reproduces it; verify on target.
+
+> **3. Vehicle health and seat/speed sources** — FXServer source has server-side `GET_VEHICLE_BODY_HEALTH` / `GET_VEHICLE_ENGINE_HEALTH` (ServerGameState_Scripting.cpp). Kept per contract: vehicle `health` is a client report (body health), `seat` is a client report, `speed` is the server native. Client natives verified in the natives dump (https://runtime.fivem.net/doc/natives.json): `GET_VEHICLE_BODY_HEALTH` 0xF271147EB7B40F12, `IS_VEHICLE_SEAT_FREE`, `GET_PED_IN_VEHICLE_SEAT`, `GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS`, `GET_ENTITY_SPEED`.
+
+> **4. `DropPlayer`** — Registered as `DROP_PLAYER` in `PlayerScriptFunctions.cpp`. The JS global is `DropPlayer(source, reason)`. Verify the JS wrapper on target.
+
+> **5. ESX / QBCore / Qbox export names and signatures** — ESX (`esx-framework/esx_core` `[core]/es_extended`, v1.16.0): `exports("getSharedObject")` in `shared/main.lua`; `ESX.GetPlayerFromId(source)` in `server/modules/player/lookup.lua`; `xPlayer.getJob()` / `xPlayer.setJob(newJob, grade, onDuty)` in `server/classes/player/job.lua` (invalid job is silently ignored, so the bridge calls `ESX.DoesJobExist` first); `xPlayer.getAccounts(true)` (name -> amount) in `server/classes/player/accounts.lua`. QBCore (`qbcore-framework/qb-core` v1.3.0): `exports('GetCoreObject')` in `shared/main.lua`; `exports('GetPlayer')` in `server/player.lua`; `Player:SetJob(job, grade)` returns false for unknown jobs; PlayerData `job.grade.level`; `PlayerData.items` (read path only). Qbox (`Qbox-project/qbx_core` v1.24.0): `exports('GetPlayer')` in `server/functions.lua`; `exports('SetJob', SetJob)` with signature `SetJob(identifier, jobName, grade)` in `server/player.lua`; `GetMoney(identifier, moneyType)`.
+
+> **6. ox_inventory exports** — `overextended/ox_inventory` `modules/inventory/server.lua`: `GetInventory(inv, owner)` (`inv` = source; returns object with `items` keyed by slot, `weight`, `maxWeight`, `slots`), `AddItem(inv, item, count, metadata, slot, cb)`, `RemoveItem(inv, item, count, metadata, slot, ignoreTotal, strict)`, `GetItemCount(inv, item, metadata, strict)`, `Search(inv, 'slots'|'count', item, metadata)`. `Items(name)` in `modules/items/server.lua`. Images: `web/images/*.png` per `fxmanifest.lua`. Note: `GetInventoryItems(inv, owner)` takes an inventory id, not the contract's `GetInventoryItems(source)`; the bridge uses `GetInventory`.
+
+> **7. txAdmin resource name** — `monitor` is the bridge's assumption; not verified against the txAdmin repo. Capability effect: `server.info.game.txadmin_present` only. Verify on target.
+
+> **8. OneSync convar** — `citizen-server-impl/include/OneSyncVars.h` (values `on`/`true`, `legacy`, `off`/`false`); convar `onesync` declared in `state/ServerGameState.cpp`. The bridge reads `GetConvar('onesync')` and treats `on`/`true` as enabled. It does **not** add a `dependencies '/onesync'` line, because that would stop the resource from loading and the contract requires the bridge to run and report `unsupported` instead. Capability effect: `hello` returns `ops: ["hello"]`, empty actions and features, and `unsupported_reason`.
+
+> **9. `node_version '22'`** — Key read in `citizen-scripting-v8/src/V8ScriptRuntime.cpp` (`HandlesFile`: default `"16"`). Which runtime the value selects was not traced further. Verify on target that `'22'` gives the Node 22 runtime. https://github.com/citizenfx/fivem/blob/HEAD/code/components/citizen-scripting-v8/src/V8ScriptRuntime.cpp
+
+> **10. RedM differences** — `games { 'gta5', 'rdr3' }` and `rdr3_warning '…'` are taken verbatim from the official sample `ext/system-resources/resources/chat/fxmanifest.lua`. Source of the enforcement: `citizen-server-impl/src/ServerResources.cpp` refuses an rdr3-enabled resource without `rdr3_warning` (verified). `set_armour` is omitted on rdr3; `armor` is omitted on rdr3; `vehicle` is not reported on rdr3 (client reports are gta5-only). Native names for RDR3 were not checked beyond the shared natives used.
+
+### Deviations and interpretations (one per line in NOTES.md format)
+
+> **Hash test vector (D17)** — The vector in `items-and-assets.md` §2 uses the fixstr prefix `0xae`; `"minecraft:stone"` is 15 bytes, so the prefix is `0xaf`. Corrected bytes `81 a2 69 64 af …` hash to `90d892ebcdb67d59`; the doc value `027f2bef638386bd` is reproduced by the malformed bytes and is kept as an erratum test. Source: local computation, SHA-256 of both byte strings. Capability effect: none.
+
+> **Item platform data (lead update)** — FiveM extras (`label`, `weight`, `metadata`) are sent under `components`, not as top-level keys (this supersedes D6 for FiveM). `name` is only set when metadata carries a custom label. Source: lead contract update. Capability effect: `features` unchanged.
+
+> **Weapon/ped hash names** — Names come from a built-in table keyed by GTA JOAAT (lowercased), which reproduces `mp_m_freemode_01` = 1885233650 and `WEAPON_UNARMED` = 2725352035. Unknown hashes: `name: null`; held weapons without a known name use the hash as a string id. Source: joaat check, see above.
+
+> **Action response shape** — `action.run` returns `data: {ok, done, result}`. `operations.md` §9 asks for `{ok, message?, result?}`; `games/fivem.md` §8.2 asks for `{done: true}`. The bridge sends both `ok`/`result` and `done` (unknown keys are ignored by the panel). Capability effect: none.
+
+> **Client-acknowledged actions** — Per request id, 2 s ack, acks accepted only from the target source (fivem §8.2/8.3). The bridge's client Lua sends `pm:server:ack`. `revive` fires `TriggerServerEvent(platform.revive_event)` from the target's client, so the configured event runs with the revived player as `source`. Source of the event convention: framework-specific. Capability effect: `revive` advertised only when `platform.revive_event` is set and a framework is detected.
+
+> **Ban** — Not implemented and never advertised. `platform.ban` is stored but has no route (fivem §8.4). Capability effect: no `ban` action.
+
+> **Kick/message/teleport/heal/set_armour/revive** — `set_armour` and `armor` are gta5-only; `vehicle` details are gta5-only. Capability effect: `set_armour` absent on rdr3.
+
+> **Vehicle state report rate** — The client reports at most once per second (fixed) and on entry/exit; the server rate-limits to 250 ms and range-checks (`seat` -1..15, body health 0..1000). `platform.vehicle_report_interval_ms` is accepted but the client does not read it (no server→client channel for config). Capability effect: none.
+
+> **Framework inventory fallbacks** — Read-only for QBCore and Qbox (`PlayerData.items`, verified read path). ESX inventory fallback not implemented (verify in fivem §7.3). Write actions only advertised with ox_inventory. Capability effect: `player.inventory` / `item.get` exist for qbcore/qbox without ox.
+
+> **Positions** — Stream entries carry `world` (gta5/rdr3), quantised `x,y,z` (1/16), `yaw` = heading×100 and no `pitch`, `state` alive/dead. Sampler runs one main-thread read per tick; quantisation happens off the read. Keyframe every 10 s and on request; 60 s ping keep-alive.
+
+> **Events** — Advertised: `join` (`playerJoining`), `leave` (`playerDropped`, identity from a join-time cache), `chat` (`chatMessage`, slash commands dropped). `command`, `death`, `damage`, `kick`, `ban`, `advancement` are not advertised: no verified server-side FXServer hook in this build. The `chatMessage` argument order `(source, author, message)` is taken from `qbx_core/server/events.lua`.
+
+> **Sensitive IP** — `ip` is `GetPlayerEndpoint` with the port stripped. Only with `include_sensitive`. Capability effect: `features` include `sensitive`.
+
+> **JS globals for natives** — The bridge calls natives as JS globals with camel case names (`GetPlayerPed`, `GetEntityCoords`), following the pattern used by the runtime's own `main.js` (`GetNumPlayerIdentifiers`, `GetPlayerFromIndex`). The `natives_universal.d.ts` file was not retrievable (14-byte stub upstream), so each global name is unverified on the target. Verify on target.
+
+> **Entity coordinates** — `GetEntityCoords` is accepted either as `[x,y,z]` or `{x,y,z}`; the runtime's JS return type was not confirmed. Verify on target.
+
+> **Client natives** — `GetGameName()` is used in the client script to choose gta5/rdr3 paths (the server-side `GET_GAME_NAME` is registered, the client registration was not checked). Verify on target.
+
+> **Write strategy (platform fivem)** — Every bridge write goes through the first strategy that verifiably works (probe = create dir, write `probe.txt`, read back, compare). Order, implemented in `server/lib/storage.js`: 1) plain fs at the contract location `<server root>/.playermanager/`; 2) plain fs in the resource folder with the '@<resource>/' alias for writes; 3) plain fs in the resource folder with absolute paths; 4) `SaveResourceFile`/`LoadResourceFile` natives (no Node fs). The winner and every attempt are written to `bridge.log` and the console (e.g. "write strategy resource-alias selected (attempts: server-root: EPERM; resource-alias: ok)"). Why this order: FXServer refuses a resource JS write unless the path resolves to '@<own resource>/...'. `citizen-scripting-core/src/FilesystemPermissions.cpp` 'GetResourcePath' lines 62-66 return no resource name for a path not starting with '@', and 'ScriptingFilesystemAllowWrite' lines 113-117 accept only the calling resource. `citizen-scripting-node/src/NodeScriptRuntime.cpp` line 152 ('@' paths use vfs::GetDevice), 166-175 (absolute paths use vfs::FindDevice), 177-180 (write check on the path string). The '@' form may not reach the folder through Node's own fs layer (libuv would open it relative to the cwd); that is why strategy 3 and 4 exist. Sources: https://github.com/citizenfx/fivem/blob/HEAD/code/components/citizen-scripting-core/src/FilesystemPermissions.cpp and https://github.com/citizenfx/fivem/blob/HEAD/code/components/citizen-scripting-node/src/NodeScriptRuntime.cpp . Capability effect: `bridge.json.dir` and `socket` (relative to the server root) name the directory actually used.
+
+> **SaveResourceFile deviations (strategy 4 only)** — (a) `bridge.json` and `config.json` are written with one `SaveResourceFile` call each, not temp-file plus rename: the temp file is held in memory and written to the target by the rename step, so a crash mid-write can leave a truncated file. (b) `token` is written without mode 0600 (the native has no mode argument); its file mode is the FXServer default. The token is still random and only accepted over TCP. (c) The directory `resources/[playermanager]/playermanager_bridge/.playermanager/` must already exist (the native does not create directories; the panel install creates it). (d) Stale files cannot be unlinked; the probe file `probe.txt` is overwritten on each start and never removed. (e) The log is appended by read-modify-write. Sources: lib/storage.js; natives per https://docs.fivem.net (SaveResourceFile/LoadResourceFile, see MetadataScriptFunctions.cpp SAVE_RESOURCE_FILE in citizenfx/fivem). Capability effect: none; the panel reads the same files.
+
+> **Socket name** — The unix socket is bound inside the chosen directory (absolute path, not an fs write). If a stale `bridge.sock` exists and cannot be unlinked (permission error), the bridge binds `bridge-<pid>.sock` instead. `bridge.json.socket` always names the socket actually bound, so the panel must read `socket` rather than assume `bridge.sock`. Clean shutdown: libuv removes its own pipe on close. Capability effect: none beyond the name.
+
+> **bridge.json dir (panel action)** — `bridge.json` gains `"dir"`, the `.playermanager` directory actually used, relative to the server root (e.g. `resources/[playermanager]/playermanager_bridge/.playermanager`). `socket` is relative to the server root too and names the socket actually bound (may be `bridge-<pid>.sock`). Unknown keys are ignored, so this is additive. Panel: for game fivem, if `<root>/.playermanager/bridge.json` is absent, read `resources/[playermanager]/playermanager_bridge/.playermanager/bridge.json` (install path from manifest.json plus the resource folder name). Panel `config.json` edits must go to the directory named by `dir`. Capability effect: none (discovery only).
+
+> **Asset folders (items-and-assets.md section 8)** — Images are read from `ox_inventory/web/images`, `qb-inventory/html/images` and `qs-inventory/html/images` when those resources are started, always read-only, always 'static'. Reads are absolute paths and not gated by the write check. Capability effect: `assets` feature and assets ops are advertised when any of the three folders exists.
+
+> **Server root** — `process.cwd()` if it contains `resources/`; else derived from `GetResourcePath(GetCurrentResourceName())` by taking the path before the `resources` segment; `PM_BRIDGE_ROOT` overrides (tests). `GET_RESOURCE_PATH` verified in `citizen-scripting-core/src/MetadataScriptFunctions.cpp`.
+
+> **Module loading** — Server code is split into `server/lib/*.js` and loaded with CommonJS `require('./lib/…')`. The FXServer JS loader's support for relative `require` was not confirmed. Verify on target; if unsupported, the lib files must be concatenated into `main.js`.
+
+> **Frames and framing** — 4-byte big-endian length, msgpack bodies, 4 MiB cap, u32 request ids, 16 in-flight per connection, 8 max connections (minimum). Idle close 120 s; keep-alive ping 60 s. These follow `README.md` §2–3.
+
+### Tests
+
+`node --test plugins/fivem/test/` → 48 pass, 0 fail (msgpack, canonical hash incl. D17 and the erratum check, framing, validation, a full integration run of `server/main.js` over a real Unix socket against `test/fake-fxserver.js`, the TCP fallback with token auth, and the OneSync-off path). The integration tests use a fake FXServer global environment and do not prove FXServer behaviour; the items under "Manual steps" are what still needs a live server.
+
+### Manual steps on a real FXServer (fivem build with `node_version '22'`)
+
+1. Put `playermanager_bridge/` in `resources/[playermanager]/`, `ensure playermanager_bridge` in `server.cfg`, `set onesync on`. Confirm `bridge.json` appears under `.playermanager/` and `transport` is `unix`.
+2. Check `bridge.log` in the directory named by `dir`. The line 'write strategy <name> selected (attempts: …)' records the strategy the live server picked (server-root, resource-alias, resource-absolute or save-resource-file). Record which one won and the attempts list; if none won, the bridge is disabled and the log says so.
+3. With the panel or `conformance/bin/pm-conformance.mjs --root <server> --profile fivem`, run `hello`, `server.info`, `players.list`, `player.get`.
+4. Check `positions.subscribe` keyframe values against an in-game position (coords × 16).
+5. Repeat with ESX, QBCore and Qbox running (one at a time); confirm `framework.name` and job/money fields.
+6. Repeat with ox_inventory running; confirm `player.inventory`, `item.get`, `give_item`, `remove_item` (with `expected_fingerprint`) and `assets.get` returns PNG from `web/images`.
+7. Confirm `kick`, `message`, `teleport` (coords and to_player), `heal`, `set_armour` (gta5) are acknowledged by the client and that a client that does not ack gives `timeout`.
+8. Set `platform.revive_event` and confirm `revive` is advertised and triggers the framework event.
+9. Run on RedM with `rdr3_warning` present: confirm no `set_armour`, `platform: "redm"`, `world: "rdr3"`.
+10. Set `onesync off`: confirm `hello` reports `unsupported_reason` and no other op works.
+11. Check the `GetEntityCoords` return shape and the `GetGameName` client native on the target build.
+
+### Blocked / needs lead
+
+- Which write strategy the live server picks (manual step 2) and whether the '@' alias works through Node fs are unverified.
+- txAdmin resource name 'monitor' unverified; ESX inventory fallback and any ban route not implemented (not advertised).
+
+> **Shipped working directory** — the release zip contains `playermanager_bridge/.playermanager/README.txt` so the directory exists for the `SaveResourceFile` strategy, which cannot create directories. Source: lead review. Capability effect: none.
 
 ## 8. Conformance (worker G)
 
