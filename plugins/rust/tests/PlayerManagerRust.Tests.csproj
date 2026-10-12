@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Unit + in-process protocol tests: the plugin file compiled together with stubs/Stubs.cs, driven through a
+       fake game provider. Runs on the SDK's modern runtime; the plugin itself is checked separately for the
+       Unity-Mono-like surface by CompileCheck.csproj. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS0618;CS0649;CS0169;CS0414;CS0219;CS8632;xUnit1031</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../PlayerManagerRust.cs" />
+    <Compile Include="stubs/*.cs" />
+    <Compile Include="unit/*.cs" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Compile check: the single plugin file against hand-written stubs (stubs/Stubs.cs). netstandard2.1 is the
+       closest SDK-buildable surface to Unity 6 Mono. LangVersion 7.3 mirrors what Oxide's compiler accepts. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>PlayerManagerRust.CompileCheck</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>CS0618;CS0649;CS0169;CS0414;CS0219;CS8632</NoWarn>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Carbon)' == 'true'">
+    <DefineConstants>$(DefineConstants);CARBON</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../PlayerManagerRust.cs" />
+    <Compile Include="stubs/*.cs" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>
