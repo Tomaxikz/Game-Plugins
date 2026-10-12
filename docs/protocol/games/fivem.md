@@ -2,7 +2,7 @@
 
 Game-side contract for FiveM (GTA V, `gta5`) servers. RedM runs on the same FXServer runtime and uses `platform: "redm"` with `game: "fivem"`; differences are listed in §12. This file defines the `game` object of `player.get`, the FiveM identity rules, framework and inventory behaviour, actions, client-script events, and the capability matrix.
 
-Read first: `../README.md` (transport, framing, handshake, error codes, conventions). Common `player.get` fields are defined in `../operations.md`; encoded item records are defined in `../items-and-assets.md`. Both files are referenced by name here.
+Read first: `../README.md` (transport, framing, handshake, error codes, conventions). Common `player.get` fields are defined in `../operations.md`; encoded item records are defined in `../items-and-assets.md`.
 
 Status legend used below: **verified** = stated as fact by the project; **verify** = must be checked against docs.fivem.net/natives or the framework repository before the bridge ships.
 
@@ -76,15 +76,15 @@ Prerequisites checked by the bridge at `hello`; a failed check is reported throu
 
 | Field | Value | Notes |
 |---|---|---|
-| `id` (player id) | The first `license:` identifier, e.g. `license:2c1f9e...` | Stable across sessions. Required in `player.get` and as the `target` of actions. |
-| `server_id` | Integer, FXServer player source (`source`), 1 to 65535 | Changes every join. Used in client events and natives. Absent when the player is offline. |
-| `identifiers` | Array of `type:value` strings from `GetPlayerIdentifiers(source)` | Only these types are exported: `license`, `steam`, `discord`, `fivem`, `xbl`, `live`. |
-| `ip` | String, IPv4/IPv6 from `GetPlayerEndpoint(source)` | Only when the request has `include_sensitive: true`. Never in streams. |
+| `id` (player id) | The first `license:` identifier, e.g. `license:2c1f9e...` | Stable across sessions. Required in `players.list`, `player.get` and as the `target` of actions (the bridge resolves it to the current `server_id` itself). |
+| `server_id` | Integer, FXServer player source (`source`), 1 to 65535 | Lives in `game.server_id` (in `player.get` and in `players.list[].game`). Changes every join. Used in client events and natives. Absent when the player is offline. Never a `target`. |
+| `identifiers` | Array of `type:value` strings (in `game.identifiers`) from `GetPlayerIdentifiers(source)` | Only these types are exported: `license`, `steam`, `discord`, `fivem`, `xbl`, `live`. |
+| `ip` | String, IPv4/IPv6 from `GetPlayerEndpoint(source)` | Common `ip` key; only when the request has `include_sensitive: true`. Never in streams. |
 
 Identifier handling:
 
 - A player may lack some types (e.g. no `steam:` when Steam is not running). Missing types are omitted, not `null`.
-- If no `license:` identifier exists, the player is listed with `id: null` and an `identifiers` array; actions on that player fail with `invalid_args`. **verify**: FiveM requires `license` for joining; treat absence as a bridge error.
+- If no `license:` identifier exists, the bridge cannot form an `id`, so the player is not listed and the bridge logs an error; a `server_id` target is never accepted. **verify**: FiveM requires `license` for joining; treat absence as a bridge error.
 
 Example identifiers array:
 
@@ -94,24 +94,38 @@ Example identifiers array:
 
 ---
 
-## 5. The `game` object in `player.get`
+## 5. `player.get`: common keys and the `game` object
 
-`player.get` returns the common section from `../operations.md` plus this `game` object. Keys are defined here; absent keys mean "not supported"; `null` means "supported but unknown or empty right now".
+`player.get` returns the common section from `../operations.md` plus a `game` object. Keys of `game` are defined here; absent keys mean "not supported"; `null` means "supported but unknown or empty right now".
+
+Common keys as FiveM fills them:
+
+| Common key | FiveM source | Notes |
+|---|---|---|
+| `id`, `name`, `online` | license identifier, `GetPlayerName` | `id` per §4 |
+| `world` | constant `"gta5"` or `"rdr3"` | No `dimension`. |
+| `position` | `GetEntityCoords(ped)` + heading | `{x,y,z,yaw}` in metres / degrees, GTA world coordinates unmodified, no map projection. `yaw` = entity heading (**verify** the native and range 0 to 360); `pitch` omitted. |
+| `health`, `max_health` | `GetEntityHealth` / `GetEntityMaxHealth` | Peds only. **verify** max-health native. |
+| `armor` | `GetPedArmour` | Integer 0 to 100. **verify**. |
+| `ping` | `GetPlayerPing` | **verify**. |
+| `held_item` | selected weapon as an item record | `id` = `WEAPON_*` name when the hash is known, else the hash as a string; `null` = unarmed. |
+| `vehicle` | summary `{type: "vehicle", name?}` | `null` = on foot. Details are in `game.vehicle`. |
+| `ip` | §4 | `include_sensitive` only. |
+
+`game` keys:
 
 | Key | Type | Source | Notes |
 |---|---|---|---|
-| `world` | string, `"gta5"` or `"rdr3"` | constant per platform | Also mirrored in the common `world` field. |
-| `routing_bucket` | integer | `GetPlayerRoutingBucket` | `0` is the default world. Mirrored as the common `instance` field. |
-| `position` | `{x, y, z}`, floats, metres | `GetEntityCoords(ped)` | GTA world coordinates, unmodified. No map projection. |
-| `heading` | float, degrees | entity heading native | **verify** the native and range (0 to 360). |
-| `ping` | integer, ms | `GetPlayerPing` | **verify**. Also surfaced as the common `ping`. |
-| `health` | `{health, max_health}` | `GetEntityHealth` / `GetEntityMaxHealth` | Peds only. **verify** max-health native. |
-| `armour` | integer, 0 to 100 | `GetPedArmour` | **verify**. |
+| `server_id` | integer | `source` | §4 |
+| `identifiers` | string[] | `GetPlayerIdentifiers` | §4 |
+| `routing_bucket` | integer | `GetPlayerRoutingBucket` | `0` is the default world. This is the only place the bucket appears (there is no common `instance` key). |
 | `ped_model` | `{hash, name}` | `GetEntityModel(ped)` | `name` is `null` unless resolved (see §5.1). |
 | `vehicle` | object or `null` | see §5.2 | `null` = on foot. |
-| `weapon` | `{hash, name}` or `null` | `GetSelectedPedWeapon(ped)` | `null` = unarmed. **verify** the unarmed hash. |
+| `weapon` | `{hash, name}` or `null` | `GetSelectedPedWeapon(ped)` | `null` = unarmed. **verify** the unarmed hash. Same weapon as common `held_item`, with the raw hash. |
 | `framework` | object | §6 | Always present. `framework.name` is `none` if nothing detected. |
-| `inventory` | object or `null` | §7 | `null` = no inventory data available. |
+| `inventory` | object or `null` | §7 | Summary only (source, weights); items come from `player.inventory`. `null` = no inventory data available. |
+
+`players.list` rows carry `game: { "server_id": n }` for online players.
 
 ### 5.1 Hash names
 
@@ -134,21 +148,19 @@ Present only when the ped is seated (driver or passenger); `null` on foot.
 ```json
 {
   "id": "license:2c1f9e0a7b",
-  "server_id": 12,
   "name": "Example Player",
   "online": true,
   "ping": 48,
-  "identifiers": ["license:2c1f9e0a7b", "steam:110000112345678", "discord:123456789012345678"],
   "world": "gta5",
-  "instance": 0,
+  "position": { "x": -1037.52, "y": -2737.61, "z": 13.76, "yaw": 329.5 },
+  "health": 200, "max_health": 200,
+  "armor": 35,
+  "held_item": { "id": "WEAPON_PISTOL", "count": 1, "hash": "0123456789abcdef", "fingerprint": "..." },
+  "vehicle": { "type": "vehicle" },
   "game": {
-    "world": "gta5",
+    "server_id": 12,
+    "identifiers": ["license:2c1f9e0a7b", "steam:110000112345678", "discord:123456789012345678"],
     "routing_bucket": 0,
-    "position": { "x": -1037.52, "y": -2737.61, "z": 13.76 },
-    "heading": 329.5,
-    "ping": 48,
-    "health": { "health": 200, "max_health": 200 },
-    "armour": 35,
     "ped_model": { "hash": 1885233650, "name": "mp_m_freemode_01" },
     "vehicle": {
       "model": { "hash": 1031562256, "name": null },
@@ -164,24 +176,13 @@ Present only when the ped is seated (driver or passenger); `null` on foot.
       "job": { "name": "police", "grade": 2, "label": "Police" },
       "gang": null,
       "money": { "cash": 1500, "bank": 22000, "black_money": 0 },
-      "metadata": {}
+      "metadata": null
     },
     "inventory": {
       "source": "ox_inventory",
-      "containers": [
-        { "id": "main", "slots": 50, "weight": 12.4, "max_weight": 30000 }
-      ],
-      "items": [
-        {
-          "container": "main",
-          "slot": 1,
-          "name": "bread",
-          "label": "Bread",
-          "count": 3,
-          "weight": 0.3,
-          "metadata": {}
-        }
-      ]
+      "weight": 12.4,
+      "max_weight": 30000,
+      "slots": 50
     }
   }
 }
@@ -256,21 +257,22 @@ Framework field mapping, all **verify against repo**:
 | Clear | `ClearInventory(source)` | Reserved; not in the action table (destructive) |
 | Item definitions | `Items` | Labels, weights, images for the item record |
 
-Containers exposed by the bridge:
+`player.inventory` (envelope in `../operations.md` §5) exposes one container:
 
-| Container `id` | Meaning |
-|---|---|
-| `main` | Full player inventory (all slots). The only container with items in the response. |
-| `hotbar` | Informational only. ox_inventory's hotbar is a view of the first five slots of `main`; items are **not** repeated under `hotbar`. Present in `containers` when ox_inventory reports it. |
+| Container `id` | `size` | Meaning |
+|---|---|---|
+| `main` | ox_inventory slot count | Full player inventory (all slots). `slot` is an int exactly as ox_inventory reports it (1-based). |
 
-Items use the encoded item record from `../items-and-assets.md`. The FiveM-specific fields are `container`, `slot`, `name` (ox item name), `label`, `count`, `weight`, `metadata`. Item images: ox_inventory `web/images/<item>.png` when the file exists; otherwise the item has no image and the panel uses its fallback icon.
+ox_inventory's hotbar is a view of the first five slots of `main`, not a separate container (containers must not overlap), so it is not exposed; `game.inventory` may carry `hotbar_slots: 5` as information.
+
+Items are the encoded item record from `../items-and-assets.md`: `id` = ox item name (`water`, `WEAPON_PISTOL`), `count`, and the FiveM platform map `components: { "label": ..., "weight": ..., "metadata": {...} }`. `name` is only set for a custom name in metadata. Item images: ox_inventory `web/images/<item>.png` when the file exists (asset rules in `../items-and-assets.md` §8); otherwise the item has no image and the panel uses its fallback icon.
 
 ### 7.3 Framework fallbacks (verify against repo)
 
 | Framework | Source | Behaviour |
 |---|---|---|
-| ESX | `xPlayer.getInventory()` | Read and write via `xPlayer.addInventoryItem` / `removeInventoryItem`. Slot numbers are not available; `slot` is `null`. |
-| QBCore | `PlayerData.items` | Read path only is verified. Writes (`Player.Functions.AddItem` / `RemoveItem`) stay `verify` in §9 until tested. Slots come from the item record. |
+| ESX | `xPlayer.getInventory()` | Read and write via `xPlayer.addInventoryItem` / `removeInventoryItem`. Slot numbers are not available: the bridge numbers slots by list position (1-based, not stable between calls), so slot-exact actions are not offered on this fallback. |
+| QBCore | `PlayerData.items` | Read path only is verified. Writes (`Player.Functions.AddItem` / `RemoveItem`) stay `verify` in §9 until tested. Slots come from the framework's item list. |
 | Qbox | `PlayerData.items` (via `qbx_core`) | Same as QBCore. |
 | none | — | `inventory: null` |
 
@@ -282,22 +284,22 @@ Fallback writes are not advertised as `give_item` / `remove_item` capabilities u
 
 ### 8.1 Action table
 
-The panel calls actions with `target` = the player `id` (license) or `server_id`, plus `action` and `args`. Actions not listed in `hello` capabilities must not be offered.
+The panel calls `action.run` with `target` = the player `id` (the license string; never `server_id`), plus `action` and `args`. Actions not listed in `hello` capabilities must not be offered.
 
 | Action id | Label | Destructive | Offline ok | Needs client script | Args | Behaviour | Availability |
 |---|---|---|---|---|---|---|---|
-| `kick` | Kick | yes | no | no | `reason` (text) | `DropPlayer(server_id, reason)` on main thread. The panel's existing `clientkick` route (console command through Wings) remains valid. | Always |
-| `message` | Message | no | no | yes | `text` | Client notification via `pm:client:notify`. | Always |
-| `teleport` | Teleport | no | no | yes | `x`, `y`, `z` (metres), `heading` (optional), `instance` (optional routing bucket) | Server sets routing bucket if `instance` given, then `pm:client:teleport`. | Always |
+| `kick` | Kick | yes | no | no | `reason` (text) | `DropPlayer(server_id, reason)` on main thread. The panel's existing `clientkick` route (console command through Wings) remains valid as the no-bridge fallback. | Always |
+| `message` | Message | no | no | yes | `message` (text) | Client notification via `pm:client:notify`. | Always |
+| `teleport` | Teleport | no | no | yes | either `to_player` (player id), or `x`, `y`, `z` (metres) with optional `yaw` (heading, degrees) and `routing_bucket` | For `to_player` the server reads the destination ped's coordinates. Sets the routing bucket first if `routing_bucket` is given, then `pm:client:teleport`. `world` is accepted only as the constant `gta5`/`rdr3`. | Always |
 | `heal` | Heal | no | no | yes | `health` (optional, default max) | `pm:client:heal`. Sets ped health to the target value. | Always |
 | `set_armour` | Set armour | no | no | yes | `amount` (0 to 100) | `pm:client:set_armour` (SetPedArmour is an RPC native, client-run). | Always |
 | `revive` | Revive | no | no | yes | — | Fires the framework's revive event, configured in `config.json` `platform.revive_event`. | Only when `platform.revive_event` is set and framework is not `none` |
-| `give_item` | Give item | no | no | no | `item`, `count`, `metadata` (optional) | `AddItem` (ox_inventory) or framework fallback where verified (§7.3). | ox_inventory present, or verified framework fallback |
-| `remove_item` | Remove item | yes | no | no | `item`, `count`, `slot` (optional) | `RemoveItem`. Count is checked first with `GetItemCount`; shortfall returns `conflict`. | Same as `give_item` |
+| `give_item` | Give item | no | no | no | `item`, `amount`, `metadata` (optional) | `AddItem` (ox_inventory) or framework fallback where verified (§7.3). | ox_inventory present, or verified framework fallback |
+| `remove_item` | Remove item | yes | no | no | `item`, `amount`, `slot` (optional, int), `expected_fingerprint` (optional) | `RemoveItem`. This is the FiveM `fields` set for the id (see `../operations.md` §9). Count is checked first with `GetItemCount`; shortfall returns `conflict`. | Same as `give_item` |
 | `set_job` | Set job | no | no | no | `job` (name), `grade` (integer) | ESX `setJob(name, grade)`; QBCore/Qbox `Functions.SetJob(name, grade)`. | Framework `esx`, `qbcore`, `qbox` |
 | `ban` | Ban | yes | no | no | `reason`, `duration` (optional, seconds) | No verified ban path in v1. Enabled only when `platform.ban` in `config.json` names a verified route (txAdmin API or framework ban). | Disabled by default; see §8.4 |
 
-Existing panel actions for FiveM (from `dev_tomaxikz_playermanager` `src/actions.rs`): only `kick` (console `clientkick`). The bridge keeps `kick` as an action id and adds the rest.
+Existing panel actions for FiveM (from `dev_tomaxikz_playermanager` `src/actions.rs`): only `kick` (console `clientkick`). The bridge keeps `kick` as an action id and adds the rest. `teleport_player` is not advertised; the panel maps it to `teleport` (`../operations.md` §Teleport).
 
 ### 8.2 Result and acknowledgement rules
 
@@ -319,7 +321,7 @@ The bridge ships a small client script. It is the only component that runs clien
 
 | Event | Direction | Payload | Purpose |
 |---|---|---|---|
-| `pm:client:teleport` | server to client | `{req, x, y, z, heading}` | Move the ped (or the vehicle it sits in, if driver). |
+| `pm:client:teleport` | server to client | `{req, x, y, z, heading}` (`heading` = the action's `yaw`) | Move the ped (or the vehicle it sits in, if driver). |
 | `pm:client:heal` | server to client | `{req, health}` | Set ped health. |
 | `pm:client:revive` | server to client | `{req}` | Forwarded to the framework revive event (§8.1). |
 | `pm:client:set_armour` | server to client | `{req, amount}` | Set ped armour. |
@@ -378,53 +380,43 @@ Rows: framework. Columns: ox_inventory absent or present. Cells: `yes`, `no`, or
 
 ## 10. `server.info` extras
 
-`server.info` (see `../operations.md`) for FiveM adds these keys under the game object:
+`server.info` (see `../operations.md`) maps onto the common keys as: `name` = `sv_hostname`, `max_players` = `sv_maxclients`, `worlds` = `[{ "world": "gta5" | "rdr3", "name": ... }]`, `extensions[]` = resources (`kind: "resource"`, `state` = resource state, capped at 500 entries, via `GetNumResources` / `GetResourceByFindIndex`). FiveM adds this `game` object:
 
 ```json
 {
   "game": {
-    "hostname": "My FiveM Server",
     "sv_projectName": "Example Project",
     "gametype": "roleplay",
     "mapname": "default",
-    "max_players": 64,
     "onesync": "on",
     "game_build": "3095",
     "server_version": "FXServer-master v6.0.1234 linux",
-    "txadmin_present": true,
-    "resources": [
-      { "name": "es_extended", "state": "started" },
-      { "name": "ox_inventory", "state": "started" },
-      { "name": "monitor", "state": "started" }
-    ]
+    "txadmin_present": true
   }
 }
 ```
 
 | Key | Source | Notes |
 |---|---|---|
-| `hostname` | `sv_hostname` convar | |
 | `sv_projectName` | convar | |
 | `gametype`, `mapname` | convars | Also reported by `/dynamic.json` in the panel today. |
-| `max_players` | `sv_maxclients` convar | |
 | `onesync` | OneSync convar | String: `"on"`, `"off"`, or `"legacy"`. **verify** value set. |
 | `game_build` | **verify**: `GetGameBuildNumber` or the `sv_enforceGameBuild` convar | |
 | `server_version` | `version` convar | |
 | `txadmin_present` | resource named `monitor` in state `started` | **verify** resource name. Presence only; the bridge does not talk to txAdmin. |
-| `resources` | `GetNumResources` / `GetResourceByFindIndex` | Names and state. Capped at 500 entries. |
 
 ---
 
 ## 11. Positions and streams
 
-Normal responses use metres and degrees, as in §5.
+Normal responses use metres and degrees, as in §5. `world` is `gta5`/`rdr3` and `dimension` is omitted in stream entries too.
 
-Stream frames (per `../README.md` §4):
+Stream entries (frame format in `../operations.md` §7.1):
 
 | Field | Encoding |
 |---|---|
 | `x`, `y`, `z` | Integers, metres × 16 |
-| `heading` | Integer, degrees × 100 |
+| `yaw` | Integer, heading degrees × 100 (`pitch` omitted) |
 
 Streams are emitted at most every `positions_min_interval_ms` (default 250 ms, see `../README.md` §7). Players outside the 424-unit culling radius of an observer are still reported by the server; the panel map is not limited by client culling.
 
@@ -489,13 +481,11 @@ FiveM-specific keys go under `"platform"` (per `../README.md` §7):
 
 ---
 
-## 15. Open conflicts with the current panel
+## 15. Open items
 
-| Topic | Bridge contract | Panel today | Resolution needed |
-|---|---|---|---|
-| Player id | `license:` string; `server_id` separate | `players.json` `id` (numeric server id) becomes `Player.id`; `target()` validates 1 to 65535 | Panel must accept license ids or send `server_id` as target. |
-| Actions | `kick`, plus teleport, heal, revive, armour, items, job, message | Only `kick` (console `clientkick`) | Additive. |
-| Ban and framework actions | Disabled by default; enabled by config | README: placeholders, not advertised | Keep disabled until verified. |
-| Transport | Bridge socket with `hello` | HTTP `/players.json` and `/dynamic.json` through the Wings TCP tunnel to the game port | Both can coexist; bridge is the richer source when present. |
-| Routing bucket key | Common `instance` plus `game.routing_bucket` (same value) | n/a | Confirm against `../operations.md`. |
-| Missing siblings | `../operations.md` and `../items-and-assets.md` are referenced here | `../operations.md` and `../items-and-assets.md` were not present in `docs/bridge/` when this file was written (`releases.md` was) | Must land with this file. |
+| Topic | Item | Kind |
+|---|---|---|
+| Panel targeting | The panel must target FiveM players by the license `id` (today `Player.id` is the numeric server id and `target()` validates 1 to 65535). | panel, see `../panel-changes.md` |
+| Ban and framework actions | Disabled by default; enabled only through a verified `platform.ban` route (§8.4). | bridge verify |
+| Bridge socket vs HTTP | The bridge coexists with the panel's HTTP `/players.json` and `/dynamic.json` path; the bridge is the richer source when present. | panel, see `../panel-changes.md` |
+| Everything marked **verify** | §14 checklist. | bridge verify |

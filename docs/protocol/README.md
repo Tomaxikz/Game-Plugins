@@ -118,7 +118,7 @@ The first request on every connection is `hello` (see `operations.md`). Its resp
 
 | Thing | Convention |
 |---|---|
-| Player id | Minecraft/Hytale: UUID string, lowercase, hyphenated. Rust: SteamID64 as **string**. FiveM: the `license:` identifier string; the current session's numeric server id is the separate `server_id` field. Actions always target `id`; the bridge resolves it to the server id itself (panel: FiveM targeting changes from numeric server id to `id` when a bridge is present). |
+| Player id | Minecraft/Hytale: UUID string, lowercase, hyphenated. Rust: SteamID64 as **string**. FiveM: the `license:` identifier string; the current session's numeric server id is the separate `game.server_id` (in `player.get.game` and `players.list[].game`). Actions always target `id`; the bridge resolves it to the server id itself (panel: FiveM targeting changes from numeric server id to `id` when a bridge is present). |
 | Data source label | Panel-side: data obtained through a bridge is labelled `source: "bridge"` in panel responses; `observed_at`/`captured_at` = time the panel received the frame. |
 | Timestamps | Unix seconds (integer). Durations in seconds unless the key ends in `_ms` or `_ticks`. Exception: Minecraft advancement completion times keep the vanilla string form (see `games/minecraft.md`). |
 | Positions in normal responses | Floats in native world units (Minecraft/Hytale blocks, Rust/FiveM metres). |

@@ -32,58 +32,54 @@ Plugin lifecycle used by the bridge:
 | `world` | Hytale **world name** as a plain string (e.g. `"default"`). There is **no dimension** on Hytale. Omit any dimension key |
 | Position | Floats in blocks (native world units), `x`, `y`, `z` |
 | Rotation | `yaw`, `pitch` in degrees (**verify per build**: yaw origin and sign) |
-| Durations | Seconds, integer; `_ms` suffix for milliseconds |
+| Durations | Seconds, integer; `_ms` suffix for milliseconds, `_ticks` for ticks |
 | Stream positions | Quantised per `../README.md` §6 (1/16 block, 1/100 degree) |
 
 Position type: newer builds (Stable 5 onward) use JOML vectors. The bridge converts to plain floats before encoding. Never expose JOML types on the wire.
 
 ## 3. `server.info` extras
 
-The common `server.info` keys come from `../operations.md`. Hytale adds:
+The common `server.info` keys come from `../operations.md`. Hytale maps onto them as follows and adds a small `game` object:
+
+| Common key | Hytale source |
+|---|---|
+| `worlds[]` | Every world known to the universe: `{ "world": "<world name>", "name": "<world name>", "loaded": bool, "players": n }`. No `dimension`. `loaded` is the live state. |
+| `extensions[]` | Installed plugins `{ "name", "version", "kind": "plugin" }` (omit the list if the bridge cannot enumerate them). |
+| `platform_version` / `game_version` | Pinned server build string (also in `hello`). |
 
 ```json
 {
-  "platform": "hytale",
-  "platform_version": "0.7.0-pre.5",
-  "game": "hytale",
-  "universe": {
-    "name": "My Universe",
-    "player_count": 4,
-    "max_players": 20
-  },
+  "name": "My Universe",
+  "max_players": 20,
+  "online": 4,
   "worlds": [
-    { "name": "default", "loaded": true, "player_count": 3 },
-    { "name": "nether_like", "loaded": false, "player_count": 0 }
+    { "world": "default", "name": "default", "loaded": true, "players": 3 },
+    { "world": "nether_like", "name": "nether_like", "loaded": false, "players": 0 }
   ],
-  "server": {
-    "build": "0.7.0-pre.5",
-    "bridge_build": "1.0.0+hytale-0.7.0-pre.5"
-  },
-  "plugins": [
-    { "id": "nitrado.query", "version": "x.y.z" }
-  ]
+  "extensions": [ { "name": "nitrado.query", "version": "x.y.z", "kind": "plugin" } ],
+  "game": {
+    "universe": { "name": "My Universe" },
+    "server": { "build": "0.7.0-pre.5", "bridge_build": "1.0.0+hytale-0.7.0-pre.5" }
+  }
 }
 ```
 
-- `universe`, `worlds` and `server.build` are new keys. Their exact field names are bridge-defined and not yet checked against the API (**verify per build**).
-- `worlds` lists names known to the universe, not only loaded ones. `loaded` is the live state.
-- `plugins` is optional. Omit it if the bridge cannot list them.
+- The `game` keys (`universe`, `server.build`, `server.bridge_build`) are new. Their exact sources are bridge-defined and not yet checked against the API (**verify per build**).
 
-## 4. `player.get` `game` object
+## 4. `player.get`
 
-The common section (`id`, `name`, `online`, `ip` only with `include_sensitive`, etc.) is in `../operations.md`. Hytale puts everything else under `game`. Omit any key the bridge cannot read. `null` means known but empty right now.
+The common section (`../operations.md`) carries `id`, `name`, `online`, `world` (no `dimension`), `position` (`{x,y,z,yaw,pitch}`; yaw/pitch **verify per build**), `health` / `max_health`, `game_mode`, `ping`, and `ip` only with `include_sensitive`. Hytale-specific data goes under `game`. Omit any key the bridge cannot read. `null` means known but empty right now. Inventories come from `player.inventory` (§5), not from `player.get`.
 
 ```json
 {
   "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5",
   "name": "Steve",
   "online": true,
+  "world": "default",
+  "position": { "x": 12.5, "y": 64.0, "z": -3.25, "yaw": 90.0, "pitch": -10.0 },
+  "health": 18.0, "max_health": 20.0,
+  "game_mode": "adventure",
   "game": {
-    "world": "default",
-    "position": { "x": 12.5, "y": 64.0, "z": -3.25 },
-    "rotation": { "yaw": 90.0, "pitch": -10.0 },
-    "game_mode": "adventure",
-    "health": { "value": 18.0, "max": 20.0 },
     "stats": {
       "stamina": { "value": 7.0, "max": 10.0 }
     },
@@ -94,27 +90,22 @@ The common section (`id`, `name`, `online`, `ip` only with `include_sensitive`, 
         "head": null,
         "chest": { "id": "example:iron_chestplate", "count": 1 }
       }
-    },
-    "containers": [
-      { "id": "HotbarInventory", "size": 9, "slots": [] },
-      { "id": "StorageInventory", "size": 36, "slots": [] }
-    ]
+    }
   }
 }
 ```
 
-| Key | Type | Status | Notes |
-|---|---|---|---|
-| `world` | string | Documented (user-verified) | Name only, no dimension |
-| `position` | `{x,y,z}` floats | Documented (user-verified via `TransformComponent`) | Blocks |
-| `rotation` | `{yaw,pitch}` floats | **verify per build** | Degrees |
-| `game_mode` | string | **verify per build** | Panel currently offers `adventure` and `creative` only. Use exactly the values the build reports |
-| `health` | `{value,max}` | **verify per build** | Likely from `EntityStats`. Saved file key `Components.EntityStats` is the hint |
-| `stats` | map of `{value,max}` | **verify per build** | Stamina, mana or other stats as the build exposes them. Keys are stat ids as the API reports them |
-| `permissions` | string array | **verify per build** | Only if the build exposes a permissions API. Otherwise omit |
-| `groups` | string array | **verify per build** | Saved file reads `permissions.json` `Users[id].Groups`. The panel treats `operators` as operator status |
-| `equipment` | map | **verify per build** | Derived from the armour container when the build has no equipment API |
-| `containers` | array | Discovered per build | See §5 |
+| Key | Where | Type | Status | Notes |
+|---|---|---|---|---|
+| `world` | common | string | Documented (user-verified) | Name only, no dimension |
+| `position` `x,y,z` | common | floats | Documented (user-verified via `TransformComponent`) | Blocks |
+| `position` `yaw,pitch` | common | floats | **verify per build** | Degrees |
+| `game_mode` | common | string | **verify per build** | Panel currently offers `adventure` and `creative` only. Use exactly the values the build reports, and advertise them as `choices` of the `gamemode` ActionSpec |
+| `health`, `max_health` | common | numbers | **verify per build** | Likely from `EntityStats`. Saved file key `Components.EntityStats` is the hint |
+| `stats` | `game` | map of `{value,max}` | **verify per build** | Stamina, mana or other stats as the build exposes them. Keys are stat ids as the API reports them |
+| `permissions` | `game` | string array | **verify per build** | Only if the build exposes a permissions API. Otherwise omit |
+| `groups` | `game` | string array | **verify per build** | Saved file reads `permissions.json` `Users[id].Groups`. The panel treats `operators` as operator status |
+| `equipment` | `game` | map | **verify per build** | Derived from the armour container when the build has no equipment API |
 
 Rules:
 - `health`, `stats`, `game_mode`, `permissions` and `equipment` are each omitted if the build cannot read them. The matching capability is then `false`.
@@ -148,16 +139,16 @@ These are the saved-file keys, not a contract for the live bridge. The bridge re
 - `size` is the real capacity from the API. Do not hard-code it.
 - `slots` lists non-empty slots only. Each `item` is an encoded record from `../items-and-assets.md`.
 - Container ids are case-sensitive and stable within one pinned build.
-- Writes (give_item, clear_inventory, slot-exact operations) must name a container id from the most recent `player.get`. Unknown ids → `invalid_args`.
+- `slot` is an int. Writes (give_item, clear_inventory, slot-exact operations) must name a container id from the most recent `player.inventory`. Unknown ids → `invalid_args`.
 
 ## 6. Actions
 
-`action` ids are shared with `../operations.md` (`player.action`). The Hytale list is the union of the panel's existing Hytale ids and bridge additions.
+Action ids are shared with `../operations.md` (`action.run`). The Hytale list is the union of the panel's existing Hytale ids and bridge additions.
 
 | Action | Args | Bridge implementation (native API) | Panel today | Status |
 |---|---|---|---|---|
 | `kick` | `reason` (text, optional) | Disconnect player with reason | Yes (reason field) | verify per build |
-| `ban` | `reason` (text, optional) | Ban by UUID | Yes, but the Hytale command drops `reason` | **conflict**, see §10 |
+| `ban` | `reason` (text, optional) | Ban by UUID | Yes, but the Hytale command drops `reason` | open item, see §10 |
 | `unban` | — | Remove ban | Yes | verify per build |
 | `whitelist` | — | Add to whitelist | Yes | verify per build |
 | `unwhitelist` | — | Remove from whitelist | Yes | verify per build |
@@ -167,8 +158,7 @@ These are the saved-file keys, not a contract for the live bridge. The bridge re
 | `deop` | — | Revoke operator | Yes (`op remove` command today) | verify per build |
 | `kill` | — | Kill entity | Yes | verify per build |
 | `gamemode` | `mode`: `adventure` \| `creative` | Set game mode | Yes (only these two values) | verify per build |
-| `teleport` | `world` (string), `x`, `y`, `z` (floats) | Teleport within the same world (see §7) | Not offered for Hytale today | **new** in bridge |
-| `teleport_player` | `destination` (player id or name) | Teleport to another player, same world only | Yes | verify per build |
+| `teleport` | either `to_player` (player id) or `world` (string, must be the player's current world), `x`, `y`, `z` (floats), optional `yaw`, `pitch` | Teleport within the same world (see §7). The panel's `teleport_player` is a panel-side alias mapped to `teleport` with `to_player`; it is never advertised. | `teleport_player` only (to another player) | **new** in bridge; verify per build |
 | `give_item` | `item` (identifier), `amount` (int), `container` (id, optional) | Add item to inventory | Yes (`give ... --quantity N` command today) | verify per build |
 | `clear_inventory` | `container` (id, optional; omit for all) | Clear containers | Yes (`inventory clear` command today) | verify per build |
 | `heal` | — | Restore health to max | Yes (`heal` command today) | verify per build |
@@ -176,7 +166,7 @@ These are the saved-file keys, not a contract for the live bridge. The bridge re
 Rules:
 - An action not listed in `capabilities.actions` must fail with `unsupported`.
 - Player ids for `op` and `deop` must be UUIDs. The panel enforces this.
-- `teleport` must reject a `world` other than the player's current world with `unsupported` (see §7).
+- `teleport` (both forms) must reject a different world with `unsupported` (see §7). This same-world restriction is a capability note, not a separate action.
 - Command fallbacks (console `op add`, `give ... --quantity`) are not used by the bridge. Native API calls only.
 
 ## 7. Teleport
@@ -211,8 +201,7 @@ Rules:
 | `kick`, `ban`, `unban` | — | Yes |
 | `op` / `deop` | — | Yes |
 | `whitelist*` | — | Yes |
-| `teleport` (same world) | — | Yes |
-| `teleport_player` | — | Yes |
+| `teleport` (same world; `to_player` and coordinates forms) | — | Yes |
 | `assets.get` (from operator's `Assets.zip`) | Panel design rule | Yes (see `../items-and-assets.md`) |
 
 Rules:
@@ -229,23 +218,15 @@ Rules:
 - The panel's Nitrado plugin JAR must match the Hytale build too (the installer does not guess compatibility; see `../../README.md` Hytale setup).
 - Asset data comes from the operator's own `Assets.zip` at runtime. Never bundle game assets in the bridge JAR.
 
-## 10. Conflicts found
+## 10. Open items
 
-These are gaps between this document, the panel's current code and the Hytale sources. Each needs a decision before the bridge ships.
-
-| # | Where | Conflict | Proposed resolution |
-|---|---|---|---|
-| 1 | `docs/bridge/` | `operations.md` and `items-and-assets.md` do not exist. Only `README.md` is present. `games/` did not exist; it was created with this file | Write the sibling docs before the Hytale bridge is implemented. This file references them |
-| 2 | `src/protocols.rs` | Nitrado Query is **not** in `protocols.rs`. That file handles Minecraft Query, RakNet, RCON and console parsing. Hytale Query is in `src/service.rs` (`Game::Hytale` branch, `/Nitrado/Query`) and `src/transport.rs` (Accept header `application/x.hytale.nitrado.query+json;version=1`) | Treat `service.rs` and `transport.rs` as the Hytale query code. Update any note that points at `protocols.rs` |
-| 3 | Nitrado Query fields | Brief says Name/UUID/World. Code reads only `Players[].UUID` and `Players[].Name`. `World` is not read from Query; it comes from saved `universe/players` files. Query also returns `Server`, `Universe`, `Plugins` (stored in `snapshot.info`) | Document Query as Name/UUID for the roster. World is bridge-only (live) or saved-file-only (`data.rs`) |
-| 4 | `src/actions.rs` teleport | Generic `teleport` (x,y,z) exists in the panel's field map, but **not** in the Hytale action list. Hytale only offers `teleport_player` | Add `teleport` to the Hytale list when the bridge can serve it (§6). Until then the panel keeps `teleport_player` only |
-| 5 | `src/actions.rs` `ban` | Panel shows a `reason` field for Hytale `ban`, but the Hytale command is `ban {t}` and drops the reason | Either pass the reason through the native API if the build supports it, or hide the field for Hytale. Decide per build |
-| 6 | `src/actions.rs` gamemode | Panel offers only `adventure` and `creative` for Hytale. The build may expose more | Report the build's real list through capabilities. Do not hard-code two values |
-| 7 | `src/data.rs` inventory | The panel hard-codes five saved-file containers (`HotbarInventory`, `StorageInventory`, `UtilityInventory`, `ToolInventory`, `ArmorInventory`) | Bridge reports actual ids and sizes (§5). Panel should read `containers` and not assume the five |
-| 8 | `src/data.rs` operators | Saved `permissions.json` `Users[id].Groups` with `operators` is the panel's operator signal. The live bridge may report permissions instead | Live `groups` (§4) is authoritative for online players. Saved file stays a fallback |
-| 9 | Manifest name | Community sources disagree: `manifest.json` (most) vs `hytale-plugin.json` (one mirror). Owner verified `manifest.json` | Use `manifest.json`. Re-check against the pinned API jar |
-| 10 | Official docs | `prerelease.server.docs.hytale.com` redirects to `pre-release.docs.hytale.com`. The page shows version selector **Pre-release 0.7.0-pre.5** and links to `/api/`, but does not document the Java API. The API names in §8 are therefore unconfirmed against an official source | Verify each name against the pinned API jar Javadoc before marking it documented |
-| 11 | Package names | Sources differ: `com.hypixel.hytale.server.core.plugin` (most) vs `com.hytale.api.plugin` (one guide). One IntelliJ page shows `onEnable()` | Use the package in the pinned API jar. Ignore `onEnable()`, which is not the current lifecycle |
+| # | Item | Kind |
+|---|---|---|
+| 1 | `ban` `reason`: the panel shows a `reason` field but the current Hytale command is `ban {t}` and drops it. Pass the reason through the native API if the build supports it, otherwise omit the `reason` field from the advertised ActionSpec. Decide per build. | bridge verify |
+| 2 | Manifest name: community sources disagree (`manifest.json` vs `hytale-plugin.json`). Owner verified `manifest.json`; re-check against the pinned API jar. | bridge verify |
+| 3 | Official docs (`pre-release.docs.hytale.com`, Pre-release 0.7.0-pre.5) do not document the Java API, so every API name in §8 is unconfirmed until checked against the pinned API jar Javadoc. | bridge verify |
+| 4 | Package names differ between sources (`com.hypixel.hytale.server.core.plugin` vs `com.hytale.api.plugin`; `onEnable()` is not the current lifecycle). Use the pinned API jar. | bridge verify |
+| 5 | Panel-side: read advertised `containers` and `gamemode` choices instead of the hard-coded five containers and two game modes, offer `teleport` for Hytale, prefer live `groups` over saved `permissions.json` for online operators. | panel, see `../panel-changes.md` |
 
 ## 11. Threading
 
@@ -266,4 +247,4 @@ These are gaps between this document, the panel's current code and the Hytale so
 - Community manifest notes: https://doctale.dev/getting-started/plugin-manifest/
 - Community plugin API overview: https://hytale-docs.com/docs/api/server-internals/plugins
 
-Community sources were not checked against the pinned server JAR. Treat them as hints until §10 items 9 to 11 are resolved.
+Community sources were not checked against the pinned server JAR. Treat them as hints until §10 items 2 to 4 are resolved.

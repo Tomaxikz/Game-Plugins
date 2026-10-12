@@ -12,37 +12,38 @@ Format for platform entries:
 
 ## 0. Lead decisions (binding for every bridge)
 
-Precedence used: `games/<game>.md` > `operations.md` / `items-and-assets.md` > `README.md`, **except**
-where `operations.md` states an explicit cross-game rule (D2, D5, D7) — those win because the game
-docs were written before `operations.md` existed (`hytale.md` §10 #1 and `fivem.md` §15 say so).
+Precedence: `games/<game>.md` > `operations.md` / `items-and-assets.md` > `README.md` where a game doc is more specific.
 
-| # | Topic | Conflict | Decision |
-|---|---|---|---|
-| D1 | Wire envelope | Game docs show `player.get` examples with only game keys. | Every `player.get` returns the **common section** of `operations.md` §4 (`id`, `name`, `online`, `world`, `position`, `health`, ...) **and** the `game` object. Values a game doc puts inside `game` that also exist in the common section (Hytale `world`/`position`/`health`, FiveM `ping`, Minecraft `food`/`game_mode`) are sent in **both** places, with the common section using the common shape (e.g. `health` number + `max_health`). |
-| D2 | Hello shape | `minecraft.md` §12 shows `capabilities.fields` and actions as strings. | `operations.md` §1 shape is used: `capabilities.ops`, `player_fields`, `events`, `actions` (full ActionSpec objects, `fields` always with `choices`, `min`, `max`), `features`; `limits`. |
-| D3 | Ops not in `operations.md` | `minecraft.md` mentions `ping`, `worlds.list`, `servers.list`, `chat.subscribe`, `inventory.get`. | Not implemented and never advertised. Worlds are in `server.info.worlds`; proxy backends are in `hello.game.backends` and `server.info.game.backends`; chat is `events.subscribe`. |
-| D4 | Numbered slot type | `operations.md` §5: int; `minecraft.md` §5: `"0"`…`"35"`; `items-and-assets.md` example `"hotbar:0"`. | **Output**: numbered slots are **ints**, named slots (`head`, `chest`, `legs`, `feet`, `offhand`, `mainhand`, `result`) are strings. **Input** (`item.get`, `action.run`, `expect`): accept an int **or** a decimal string for numbered slots. Never the `"hotbar:0"` form. `contents[].slot` is the int index in the parent. |
-| D5 | Teleport ids | `rust.md`/`hytale.md` list `teleport_player`. | `operations.md` §9: bridges advertise only `teleport` (with `to_player` where supported) and reject `teleport_player` as `unsupported`. |
-| D6 | Item record per game | `rust.md` §6.2 uses `shortname`/`amount`/`item_id`; `fivem.md` §7.2 uses ox `name`/`label`/`weight`. | The generic record (`id`, `count`, `hash`, `fingerprint`, ...) is always sent. Game extras are **added** as extra keys: Rust `shortname`, `item_id`, `amount`, `durability_percent`, `ammo_type`, `blueprint_target`; FiveM `label`, `weight`, `metadata`. FiveM's ox item name goes in `id` (the record's `name` key stays `{plain, json?}`, used only if the item metadata carries a custom label). Fingerprint covers the full record including the extras. |
-| D7 | Game-specific server keys | `rust.md` §3 says "under `platform` or top level"; `hytale.md` §3 shows top-level `universe`/`server`/`plugins`. | All game-specific `server.info` keys go under `server.info.game` (`operations.md` §2). Common keys (`name`, `max_players`, `online`, `worlds[]` with `world` = the game id) are always filled too. |
-| D8 | Sensitive address key | Rust export uses `address`, proxies `address`, operations `ip`. | `ip` is sent (only with `include_sensitive`). Rust and proxies additionally send `address` with the same value under the same condition. |
-| D9 | MC block slice | `operations.md` §6: `blocks:{origin:{x,y,z}, size:{x,y,z}, palette, data}`; `minecraft.md` §6: top-level `origin:[..]`, `indices`, `bits`, `order`. | Sent under `data.blocks` (operations envelope) with `minecraft.md` content: `origin` and `size` as **arrays** `[x,y,z]` (game doc authoritative), `palette`, `bits`, `order:"yzx"`, `indices` (bin, packing per `minecraft.md`), `y_min`, `y_max`, `world`, `dimension`, `block_entities`, `truncated`, optional `biomes`. `data` is **not** sent (avoid duplicating the bin). |
-| D10 | MC legacy item encoding | `minecraft.md` §8 mentions `nbt`/`encoding`/`meta`; `items-and-assets.md` defines `components` / `components.snbt`. | `items-and-assets.md` wins: 1.20.5+ → `components` map; < 1.20.5 → `components: {snbt}`; Spigot without NBT access → `components` omitted, `name`/`lore`/`enchantments`/`model` from `ItemMeta`. No `encoding`/`nbt`/`meta` keys. |
-| D11 | Minecraft extras in `game` | `game_mode`, `food`, `saturation`, `armor` appear in both common and `game`. | Sent in both (D1). Common `experience {level, progress, total}` and `game.xp_level/xp_progress/xp_total` both sent. |
-| D12 | Stream angles for FiveM | `fivem.md` §11 uses `heading`. | FiveM stream entries carry `yaw` = heading×100 (int) and omit `pitch`; the panel treats `yaw`/`pitch` as optional extras (`operations.md` §7.1). Rust omits both (`rust.md` §2). |
-| D13 | Confirmation flags | `rust.md` §7 "Destructive actions need `confirmed: true`". | Panel-side flow; bridges ignore `confirmed` (unknown args ignored). |
-| D14 | Version | — | One version for the repo in `/VERSION`. Builds read `BRIDGE_VERSION` env, else `/VERSION`. Release tag `v<ver>` must equal it (release workflow checks). |
-| D15 | Error on non-`hello` first request (Unix transport) | README only mandates `hello` first; consequence specified for TCP only. | Unix: any op before `hello` → `invalid_args` "hello required", connection stays open. TCP: `unauthorized` and close. |
-| D16 | `enabled_ops` / `disabled_actions` | README §7. | Ops not in `enabled_ops` (unless `"*"`) are removed from `capabilities.ops` and answer `unsupported`; same for `disabled_actions`. `hello` is always enabled. |
-| D17 | Hash test vector | `items-and-assets.md` §2 gives bytes `81 a2 69 64 ae …` → `027f2bef638386bd`. `minecraft:stone` is 15 bytes, so the fixstr header must be `af`; the documented bytes are malformed and the documented hash is over those malformed bytes. | The algorithm wins: correct bytes `81 a2 69 64 af 6d 69 6e 65 63 72 61 66 74 3a 73 74 6f 6e 65` → **`90d892ebcdb67d59`**. Every bridge tests the correct vector and also asserts the documented bytes hash to `027f2bef638386bd` (erratum check). **Panel action:** fix the vector in `items-and-assets.md` §2 and make sure the panel's own encoder writes `af`. |
-| D18 | `hello.game` defined twice | `operations.md` §1 lists `game` as the game id string **and** as an optional object of game-specific extras; a map cannot hold both. | `hello.game` is the **string** (panel `Game` enum, equals `bridge.json.game`). Game-specific hello extras (Minecraft proxies: `protocol_range`, `modded`, `backends`) go in **`hello.game_info`** (object) and are also sent in `server.info.game`, so a panel that does not know `game_info` loses nothing. **Panel action:** rename the object key in `operations.md` §1 and read `game_info`. |
+Contract revision: `docs/protocol/` was updated upstream on 2026-10-12 18:11–18:15 (after the first copy at 18:03). That revision resolved most of the original contradictions. Decisions below marked **(upstream)** now just restate the revised contract; **(superseded)** rows record what changed.
+
+| # | Topic | Decision |
+|---|---|---|
+| D1 | Common vs `game` keys | **(superseded by upstream)** Every `player.get` returns the common section of `operations.md` §4. Keys that are common (`world`, `dimension`, `position`, `health`, `max_health`, `armor`, `held_item`, `vehicle`, `game_mode`, `food`, `saturation`, `experience`, `ping`, `ip`) are **not repeated** under `game`. Inventories come only from `player.inventory`. |
+| D2 | Hello shape | `operations.md` §1 shape: `capabilities.ops`, `player_fields`, `events`, `actions` (full ActionSpec objects; `fields` always with `choices`, `min`, `max`), `features`; `limits`; `integrations`. |
+| D3 | Ops not in `operations.md` | **(upstream)** No `ping` op, `worlds.list`, `servers.list`, `chat.subscribe`, `inventory.get`. |
+| D4 | Slot type | **(upstream)** Output: int for numeric slots, names where the game doc says so. Input (`item.get`, `action.run` args, `expect`): ints; bridges also accept a decimal string for a numeric slot (lenient input, never produced). |
+| D5 | Teleport | **(upstream)** Only `teleport` is advertised (`to_player` form and coordinates form); `teleport_player` → `unsupported`. |
+| D6 | Game-specific item data | **(superseded by upstream)** Generic record only; platform data goes in `components`: Rust `uid`, `definition_id`, `blueprint_target`; FiveM `label`, `weight`, `metadata`. No top-level `shortname`/`amount`/`item_id`/`durability_percent`/`label`. Rust `skin` omitted when 0. |
+| D7 | Game-specific server keys | **(upstream)** Under `server.info.game`; common keys always filled. |
+| D8 | Sensitive address | **(superseded by upstream)** Only the common `ip` key (with `include_sensitive`). No `address` key anywhere in the socket protocol (the Rust legacy file export keeps its own shapes). |
+| D9 | MC block slice | **(superseded by upstream)** `data.blocks = {origin:{x,y,z}, size:{x,y,z}, palette, data:<bin>, bits, order:"yzx", world, dimension, block_entities:[{pos:{x,y,z}, id, text?}], biomes:{palette, data}?, truncated}`. Args `y_below`/`y_above` (default 8). |
+| D10 | MC item encoding | **(superseded by upstream)** Record carries `encoding`: `components` (1.20.5+, may be omitted), `nbt` (`components:{snbt}`), `bukkit_meta` (no `components`). `encoding` is fingerprint input, not render-hash input. |
+| D11 | MC `game` keys | **(superseded by upstream)** No `xp_*`, `game_mode`, `food`, `saturation`, `armor`, `world`, `dimension` in `game`. `effects[].duration_ticks`; `air_ticks`/`max_air_ticks`; `title` args `fade_in_ticks`/`stay_ticks`/`fade_out_ticks`; `offline_uuid`/`backend_id` in `game`. |
+| D12 | FiveM/Rust angles | **(upstream)** FiveM `position.yaw` = heading, stream `yaw` = heading×100, `pitch` omitted. Rust omits both. |
+| D13 | Confirmation flags | **(upstream)** Destructive confirmation is panel-side; bridges ignore `confirmed`. |
+| D14 | Version | One version in `/VERSION`. Builds read `BRIDGE_VERSION` env, else `/VERSION`. Release tag `v<ver>` must equal it on tag pushes. |
+| D15 | Request before `hello` on Unix | `invalid_args` "hello required", connection stays open. TCP: `unauthorized` and close. |
+| D16 | `enabled_ops` / `disabled_actions` | Ops not in `enabled_ops` (unless `"*"`) are dropped from `capabilities.ops` and answer `unsupported`; same for `disabled_actions`. `hello` is always enabled. |
+| D17 | Hash test vector (**still wrong upstream**) | `items-and-assets.md` §2 gives `81 a2 69 64 ae …` → `027f2bef638386bd`, but `minecraft:stone` is 15 bytes so the fixstr header is `af`. Correct: `81 a2 69 64 af 6d 69 6e 65 63 72 61 66 74 3a 73 74 6f 6e 65` → **`90d892ebcdb67d59`**. Bridges test the correct vector and assert the documented bytes hash to `027f2bef638386bd` (erratum check). **Panel action:** fix the vector; check the panel encoder writes `af`. |
+| D18 | `hello.game` (**still contradictory upstream**) | `operations.md` §1 and §11 define `hello.game` as the game-id string (panel `Game` enum) **and** as an extras object; `minecraft.md` §10 puts proxy `protocol_range`/`backends`/`modded` in `hello.game`. A map cannot hold both. Decision: `hello.game` = string; extras in **`hello.game_info`** and also in `server.info.game` (which the panel already reads for `backends`). **Panel action:** rename the object key or read `server.info.game`. |
+| D19 | Universal jar range | **(upstream)** `releases.md` now says `>=1.12` for the universal jar (`minecraft.md` §1: older than 1.12 best effort). The manifest uses `>=1.12`. |
 
 ## 1. Shared implementation rules (all bridges)
 
 - Canonical MessagePack + hash/fingerprint exactly per `items-and-assets.md` §2–3; test vector
   per D17 (`90d892ebcdb67d59`) is in every bridge's unit tests and in `conformance/`.
 - Floats that are integral are encoded as ints **only inside hash/fingerprint input**; on the wire,
-  floats for float-typed fields (positions, health) are float64.
+  float-typed fields (positions, health) are float64.
 - Per-op timeouts from `operations.md` §0; frames ≤ 4 MiB; ≥ 8 connections; idle close 120 s;
   60 s `ping` on quiet subscriptions; max one positions + one events subscription per connection.
 - `max_inflight` = 16 per connection; beyond → `busy`.

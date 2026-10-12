@@ -10,13 +10,15 @@ Every response that carries items (`player.inventory`, `player.get` held items, 
 |---|---|---|---|
 | `id` | string | yes | Minecraft/Hytale: `namespace:path` (lowercase). Rust: item shortname (`rifle.ak`). FiveM: item name (`water`, `WEAPON_PISTOL`). |
 | `count` | int | yes | Stack size. May exceed 99 (modded/Rust/FiveM). |
-| `slot` | string or int | when in a container | Same slot naming as `operations.md` (the panel's `InventoryItem.slot`). Omitted for items nested in `contents` only if the game has no slot concept for them. |
+| `slot` | int or string | only inside `contents` | Slot **relative to the parent item**, same typing rule as `operations.md` §5 (int for numeric slots). Omitted on top-level records: `player.inventory` carries it in `slots[].slot`, `held_item` and `item.get` have none. It is never part of `hash` or `fingerprint`. |
 | `name` | `{plain, json?}` | no | Custom display name only (not the default translated name). `plain` is colour-stripped text; `json` is the original component (README text convention). Omit if the item has no custom name. |
 | `lore` | `[{plain, json?}]` | no | One entry per lore line. |
 | `damage` | int | no | Durability used (MC `damage` component / Rust none). `max_damage` is the item's maximum. |
 | `max_damage` | int | no | Maximum durability. |
 | `enchantments` | `[{id, level}]` | no | `id` is `namespace:path` (`minecraft:sharpness`), `level` int >= 1. Includes stored enchantments of enchanted books. Order as stored. |
-| `components` | map | no | MC 1.20.5+: full serialized item components, keys namespaced (`minecraft:custom_data`, ...), values as plain MessagePack maps/arrays/scalars (NBT byte/short/long collapse to ints, booleans stay bool, NBT lists -> arrays, compounds -> maps, byte/int/long arrays -> arrays of ints). MC < 1.20.5: `{ "snbt": "{...}" }` holding the item `tag` as SNBT. Other games: omit, or platform-specific map documented in `games/*.md`. |
+| `components` | map | no | MC 1.20.5+ (`encoding: "components"`): full serialized item components, keys namespaced (`minecraft:custom_data`, ...), values as plain MessagePack maps/arrays/scalars (NBT byte/short/long collapse to ints, booleans stay bool, NBT lists -> arrays, compounds -> maps, byte/int/long arrays -> arrays of ints). MC < 1.20.5 (`encoding: "nbt"`): `{ "snbt": "{...}" }` holding the item `tag` as SNBT. Other games: omit, or platform-specific map documented in `games/*.md` (Rust: `uid`, `definition_id`, `blueprint_target`; FiveM: `label`, `weight`, `metadata`). |
+| `encoding` | string | no | Minecraft only: how `components` was produced. `components` (default when omitted): 1.20.5+ component map. `nbt`: pre-1.20.5, `components` is `{snbt}`. `bukkit_meta`: Spigot without component access; no `components` key, the record's `name`, `lore`, `enchantments`, `damage`, `model`, `tint` carry what `ItemMeta` exposes and edits rebuild the stack from those fields (lossy round trip). Part of the fingerprint input; not part of the render hash. |
+| `truncated` | bool | no | `true` when the bridge dropped nested detail to fit the frame limit (see notes); the full record is available from `item.get`. Excluded from `fingerprint`. |
 | `model` | string | no | MC `minecraft:item_model` key, else `custom_model_data` rendered as `"<id>#cmd:<value>"` (floats/strings/flags: first string if any, else first float formatted as integer). Hytale: model asset key. Omit when the item uses its default model. |
 | `tint` | `[int]` | no | Render-relevant colours as 0xRRGGBB ints, in model tint-index order (leather/dyed armor, potion colour, firework star, map colour, spawn egg overrides). |
 | `skin` | int | no | Rust skin id (workshop id). |
@@ -30,13 +32,13 @@ Notes:
 
 - Only keys the platform can supply are sent; keys not applicable to a game are omitted, not `null`. `null` is used only for `name`, `lore`, `model` when the bridge knows there is none *and* wants to say so; the default is to omit.
 - Bridges must not guess: if `components` cannot be serialized, omit it and still send `hash`/`fingerprint` over the data that is known.
-- Frame size: a bridge that would exceed 4 MiB drops `components` of items nested more than 1 level deep first, then sets `truncated: true` on the affected record (panel shows the item without nested details and may request `item.get`, see `operations.md`).
+- `id` is the human-stable item identifier of the game. Games that also have a numeric definition id or a per-instance id carry them in `components` (Rust), never in `id`.
+- Frame size: a bridge that would exceed 4 MiB drops `components` of items nested more than 1 level deep first, then sets `truncated: true` on the affected record (panel shows the item without nested details and may fetch the complete record with `item.get`, `operations.md` §6a).
 
 ```json
 {
   "id": "minecraft:diamond_sword",
   "count": 1,
-  "slot": "hotbar:0",
   "name": { "plain": "Excalibur", "json": { "text": "Excalibur", "color": "gold", "italic": false } },
   "lore": [{ "plain": "Forged in the Nether" }],
   "damage": 12,
@@ -55,7 +57,6 @@ Notes:
 {
   "id": "minecraft:leather_chestplate",
   "count": 1,
-  "slot": "equipment:1",
   "tint": [10511680],
   "components": { "minecraft:dyed_color": { "rgb": 10511680 }, "minecraft:trim": { "pattern": "minecraft:coast", "material": "minecraft:gold" } },
   "hash": "a0f4c2d1e7b93856",
@@ -67,9 +68,8 @@ Notes:
 {
   "id": "minecraft:shulker_box",
   "count": 1,
-  "slot": "main:4",
   "contents": [
-    { "id": "minecraft:cobblestone", "count": 64, "slot": "0", "hash": "1d2e3f4a5b6c7d8e", "fingerprint": "..." }
+    { "id": "minecraft:cobblestone", "count": 64, "slot": 0, "hash": "1d2e3f4a5b6c7d8e", "fingerprint": "..." }
   ],
   "hash": "9c8b7a6f5e4d3c2b",
   "fingerprint": "..."
@@ -77,23 +77,23 @@ Notes:
 ```
 
 ```json
-{ "id": "rifle.ak", "count": 1, "slot": "belt:0", "skin": 1234567890, "condition": 87.5, "max_condition": 100.0,
-  "ammo": { "id": "ammo.rifle", "count": 30 }, "hash": "3a4b5c6d7e8f9a0b", "fingerprint": "..." }
+{ "id": "rifle.ak", "count": 1, "skin": 1234567890, "condition": 87.5, "max_condition": 100.0,
+  "ammo": { "id": "ammo.rifle", "count": 30 }, "components": { "uid": 123456789, "definition_id": 1545779598 }, "hash": "3a4b5c6d7e8f9a0b", "fingerprint": "..." }
 ```
 
 ```json
-{ "id": "water", "count": 3, "slot": "5", "hash": "0123456789abcdef", "fingerprint": "..." }
+{ "id": "water", "count": 3, "components": { "label": "Water", "weight": 0.5, "metadata": {} }, "hash": "0123456789abcdef", "fingerprint": "..." }
 ```
 
 ```json
-{ "id": "hytale:iron_sword", "count": 1, "slot": "hotbar:1", "damage": 4, "max_damage": 250,
+{ "id": "hytale:iron_sword", "count": 1, "damage": 4, "max_damage": 250,
   "model": "hytale:weapons/iron_sword", "hash": "f1e2d3c4b5a69788", "fingerprint": "..." }
 ```
 
 Pre-1.20.5 Minecraft:
 
 ```json
-{ "id": "minecraft:stone", "count": 3, "components": { "snbt": "{display:{Name:'{\"text\":\"Rock\"}'}}" },
+{ "id": "minecraft:stone", "count": 3, "encoding": "nbt", "components": { "snbt": "{display:{Name:'{\"text\":\"Rock\"}'}}" },
   "hash": "...", "fingerprint": "..." }
 ```
 
@@ -131,17 +131,17 @@ Asset keys (section 4) use the same hash length: an asset's `hash` is the first 
 2. Canonical MessagePack as in section 2 (applied to the full record, including `components`, `name`, `lore`, `damage`, `enchantments`, `contents`...). Nested `contents` entries are included as full records (their own `hash` and `fingerprint` removed).
 3. `fingerprint` = **full 64 lowercase hex** SHA-256 of the bytes.
 
-Panel use: `action.run` carries the shown value back (see `operations.md`):
+Panel use: `action.run` carries the shown value back in `expect` (shape and `conflict` rule defined in `operations.md` §9):
 
 ```json
 { "id": 21, "op": "action.run", "args": {
-  "player": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "action": "item.remove",
-  "slot": "hotbar:0",
-  "expect": { "id": "minecraft:diamond_sword", "count": 1,
+  "action": "remove_item_live", "target": "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+  "args": { "container": "inventory", "slot": 0 },
+  "expect": { "container": "inventory", "slot": 0, "id": "minecraft:diamond_sword", "count": 1,
               "fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } }
 ```
 
-The bridge recomputes the fingerprint of the item currently in `slot` and answers `conflict` on any mismatch of `id`, `count` or `fingerprint`; nothing is changed. `fingerprint` is an opaque string to the panel.
+The bridge recomputes the fingerprint of the item currently in `container`/`slot` and answers `conflict` on any mismatch of `id`, `count` or `fingerprint`; nothing is changed. `fingerprint` is an opaque string to the panel.
 
 ## 4. Render modes
 
@@ -297,7 +297,7 @@ A single asset larger than 4 MiB is split across calls: the entry carries `chunk
 | Modded Minecraft (Fabric/NeoForge/Forge) | Mod jars: `assets/<ns>/textures/**`, `assets/<ns>/models/**`, `assets/<ns>/items/**` (1.21.4+), `.mcmeta` for animation. Mods present on the server are read from the jars in `mods/`. | Client-only mods are not on the server: those items are `unavailable` / `not_found`. |
 | Plugin custom items (Paper family) | The server resource pack file(s) and plugin pack folders: Nexo `plugins/Nexo/pack/`, Oraxen `plugins/Oraxen/pack/`, ItemsAdder `plugins/ItemsAdder/contents/*/resourcepack/` (generated pack `plugins/ItemsAdder/output/`), or a pack zip referenced by `resource-pack` in `server.properties` if it is a local file. | Resolve `custom_model_data` / `item_model` to model + textures from those files only. A remote-only pack URL is not downloaded: `unavailable` / `no_art_on_server`. |
 | Hytale | The operator's `Assets.zip` already on the server, read at runtime from its installed location; icons/models by asset key. | Nothing from it is copied into the bridge or panel distribution. |
-| Rust | No icons exist on the server. Bridge returns ids (+ `skin`) only and exposes **no** assets (manifest is empty; `assets.get` -> `unavailable` / `no_art_on_server`). | Panel resolves icons itself (currently `wiki.rustclash.com/img/items180/<shortname>.png` in `gameIcons.ts`); a separate research doc covers sources and skins. |
+| Rust | No icons exist on the server. Bridge returns ids (+ `skin`) only and exposes **no** assets (manifest is empty; `assets.get` -> `unavailable` / `no_art_on_server`). | Panel resolves icons itself, as decided in `research/rust-item-images.md`: server-side cached RustClash `items180/<shortname>.png`, then a generated category icon, then a shortname text badge; skins as a badge only. Today `gameIcons.ts` hotlinks the RustClash URL per view. |
 | FiveM | `ox_inventory/web/images/<item>.png` when the resource is running and the file exists (also `qb-inventory/html/images/`, `qs-inventory/html/images/` when present). Always `static`. | Missing file -> `unavailable` / `no_art_on_server`; the panel shows the item name with its fallback icon. Weapons use their `WEAPON_*` image if present. |
 
 ## 9. Licensing rule
@@ -310,5 +310,5 @@ Bridges serve assets **only from files already present on that game server** (mo
 |---|---|---|
 | Item shape | `InventoryItem { id, count, slot, container, data }` where `data` is raw NBT as JSON (`components` / `tag`) | Record above; `container` stays in the response envelope (`operations.md`); NBT-derived fields (`name`, `enchantments`, `tint`, `model`) are pre-extracted by the bridge; `components` is MessagePack, not JSON-from-NBT. The existing file/NBT path keeps working and is adapted in the panel to this record. |
 | Fingerprint | `player_manager_fingerprint` = SHA-256 (64 hex) over canonical **JSON** (sorted keys) of the NBT item (`data.rs::item_fingerprint`) | Bridge items use canonical **MessagePack** (section 3), same 64-hex length. The panel must treat the value as opaque and send back whatever the source that produced the item gave it; the two schemes never mix for one item. |
-| Icons | `GameIcon` tries a URL list per game (wiki, Prismarine, mcasset, Rust wiki, Hytale emoji category) | Bridge assets are tried first when the manifest lists the key; vanilla `minecraft:` and Rust keep the existing URL lists. |
+| Icons | `GameIcon` tries a URL list per game (wiki, Prismarine, mcasset, Rust wiki, Hytale emoji category) | Bridge assets are tried first when the manifest lists the key; vanilla `minecraft:` keeps the existing URL list; Rust follows the cached-icon chain in `research/rust-item-images.md` (no per-view hotlinking). |
 | Armor/leather tint | `leatherColor(item.data)` | `tint[0]` of the record. |

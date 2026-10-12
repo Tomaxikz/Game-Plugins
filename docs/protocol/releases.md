@@ -78,7 +78,7 @@ The panel downloads only `manifest.json`, picks the matching artifact, downloads
       "sha256": "…",
       "game": "minecraft_java",
       "platforms": ["paper", "spigot", "folia", "velocity", "bungeecord"],
-      "game_versions": ">=1.8.8",
+      "game_versions": ">=1.12",
       "java": ">=8",
       "install": { "path": "plugins/", "extract": false },
       "dependencies": []
@@ -127,6 +127,8 @@ Field rules:
 - `dependencies`: other things the bridge needs. `source` is `modrinth` (project slug/id) or `bundled`. The panel resolves Modrinth versions for the server's loader + game version. Bridges should avoid dependencies where possible (no Fabric API unless truly needed).
 
 ## 5. How the panel uses this (panel-side, for reference)
+
+The concrete panel work is tracked in `panel-changes.md` (section C).
 
 - Detection: the panel decides game + platform + game version from the egg/startup/image and server files, then picks the artifact whose `platforms` and `game_versions` match. No match → the panel shows "no bridge available for this version" and keeps using fallbacks.
 - Setting **Auto-install bridge** (panel admin):

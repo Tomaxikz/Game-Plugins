@@ -12,12 +12,12 @@ Status: the panel today ships the file-export plugin `game-plugins/PlayerManager
 | `bridge.json` `platform` | `oxide` or `carbon` (whichever loaded the plugin) |
 | Server runtime | Unity 6 Mono (not IL2CPP) |
 | Plugin file | `oxide/plugins/PlayerManagerRust.cs` or `carbon/plugins/PlayerManagerRust.cs`. One `.cs` file serves both frameworks. |
-| Plugin class name | `PlayerManagerRust` (the panel checks this name, see §13) |
+| Plugin class name | `PlayerManagerRust`. The class name equals the on-disk file name `PlayerManagerRust.cs` (Oxide and Carbon require it); `releases.md` installs the release asset `playermanager-bridge-rust-<ver>.cs` under that name. The panel's installer checks this class name (see §13). |
 | Bridge working dir | `.playermanager/` at the server root (`bridge.sock`, `bridge.json`, `config.json`) |
 | File-export fallback | `oxide/data/PlayerManagerRust.json` or `carbon/data/PlayerManagerRust.json` (written by the bridge too, §12) |
 | Plugin directories | `oxide/plugins/`, `carbon/plugins/` (the panel detects a framework by these directories) |
 
-Bridge operations available for Rust: the common set in `operations.md`, plus the Rust `game` object (§5), the Rust inventory containers (§6), and the Rust action ids (§7).
+Bridge operations available for Rust: the common set in `operations.md`, plus the Rust `game` objects in `server.info`, `players.list` and `player.get` (§3, §4, §5), the Rust inventory containers (§6), and the Rust action ids (§7).
 
 ## 2. Identifiers, units and axes
 
@@ -31,28 +31,27 @@ Bridge operations available for Rust: the common set in `operations.md`, plus th
 | Axes | `x` east/west, `y` up (height), `z` north/south. The game uses a left-handed world space; the bridge sends the raw Unity values. |
 | Panel map placement | The 2D map plots `x` horizontally and `z` vertically on screen. `y` is shown as altitude only. |
 | Map origin | The map is centred on `(0, 0)`, so it spans `-world_size/2` to `+world_size/2` on both `x` and `z`. This is the usual Rust convention. Confirm on the smoke-test server (§10). |
-| Angles | Not exported in v1. Yaw/pitch are omitted until a Rust field is verified. |
+| Angles | Not exported in v1. `yaw`/`pitch` are omitted from `position` and from position streams until a Rust field is verified. |
 | Time | Unix seconds. Durations in seconds. |
-| Item id | Instance id `item_id` = `Item.uid` (unsigned integer, unique for the item on this server run). |
-| Skin | Unsigned integer workshop skin id. `0` means no skin. |
-| Health | `health` and `max_health` are in the common section of `operations.md`. The `game` object does not repeat them. |
+| Item id | Record `id` = item shortname (`rifle.ak`), per `items-and-assets.md`. The numeric definition id (`ItemDefinition.itemid`) is `components.definition_id`; the per-instance id (`Item.uid`, unsigned, unique for the item on this server run) is `components.uid`. Neither is ever put in `id`. |
+| Skin | Unsigned integer workshop skin id, record key `skin`; omitted when there is no skin (`0`). |
+| Health | `health` and `max_health` are in the common section of `operations.md`. The `game` object does not repeat them. Likewise `ping`, `position`, `held_item` and `ip` are common keys. |
 
 ## 3. `server.info` (Rust extras)
 
-Common server fields (name, player counts, version) follow `operations.md`. Rust adds the keys below under `platform` or as Rust-only keys at the top of the object. The panel reads them by name.
+Common server fields follow `operations.md` (`name` = `server.hostname`, `max_players`, `online`, `performance.frame_ms`, `uptime`, `worlds[]`, `extensions[]`). Rust adds the keys below in the `server.info` `game` object. The panel reads them by name.
 
 | Key | Type | Required | Source (Oxide/Carbon API or ConVar) | Notes |
 |---|---|---|---|---|
-| `hostname` | string | yes | `server.hostname` | |
+| `hostname` | string | yes | `server.hostname` | Same value as the common `name`. |
 | `description` | string | yes | `server.description` | Empty string when unset. |
 | `url` | string | yes | `server.url` | Empty string when unset. |
 | `header_image` | string | yes | `server.headerimage` | Empty string when unset. |
-| `max_players` | integer | yes | `server.maxplayers` | |
 | `map_name` | string | yes | `server.level` | Procedural maps report `Procedural Map`. |
 | `world_size` | integer | yes | `server.worldsize` | Metres per side. |
-| `seed` | integer | yes | `server.seed` | 0 for custom maps. |
+| `seed` | integer | yes | `server.seed` | 0 for custom maps. The seed is also part of the procedural `world` id, so the common `worlds[].seed` may be sent. |
 | `entity_count` | integer | yes | Count of networked entities | Recount on each request. |
-| `fps` | number | yes | Server frame rate | |
+| `fps` | number | yes | Server frame rate | Also reported as common `performance.frame_ms` (1000 / fps). |
 | `save_interval` | integer | yes | `server.saveinterval` | Seconds. |
 | `wipe_time` | integer | optional | Map save time, if the bridge can read it | Omitted when unknown. |
 | `monuments` | array | optional | Terrain monuments | Each item `{ "name": string, "position": { "x", "y", "z" } }`. Omitted when the bridge cannot read them. |
@@ -73,7 +72,7 @@ Common server fields (name, player counts, version) follow `operations.md`. Rust
 
 Owners come from the server user list (`owner` group). Admins and moderators come from both the server user list and the permission groups `admin` and `moderator`, so a player in both sources appears once.
 
-Example:
+Example (`server.info.game`):
 
 ```json
 {
@@ -81,7 +80,6 @@ Example:
   "description": "",
   "url": "",
   "header_image": "",
-  "max_players": 100,
   "map_name": "Procedural Map",
   "world_size": 4500,
   "seed": 1234567,
@@ -102,13 +100,13 @@ Example:
 
 `players.list` entries use the common shape from `operations.md`. For Rust:
 
-- A sleeping player is listed with `"sleeping": true` and `"online": false`. Sleepers are not dropped from the list.
+- A sleeping player is listed with `"online": false` and `groups` containing `sleeping` (an allowed value in `operations.md`). Sleepers are not dropped from the list. `player.get` for that id reports `game.sleeping: true`.
 - `players.list` does not carry inventories or the `game` object. Those belong to `player.get`.
-- `address` is a sensitive key (`../README.md` §6). It is only sent when the request sets `include_sensitive: true`.
+- The player's IP address is the common `ip` key and, being sensitive (`../README.md` §6), is only sent when the request sets `include_sensitive: true`. There is no `address` key in the bridge protocol.
 
 ## 5. `player.get`: the `game` object
 
-Key names below are the bridge contract. Values are raw game values, not percentages. Absent keys are omitted. `null` means known and empty right now.
+The held item is the common `held_item` (encoded item record), not a `game` key. Key names below are the bridge contract. Values are raw game values, not percentages. Absent keys are omitted. `null` means known and empty right now.
 
 ### 5.1 Keys
 
@@ -120,14 +118,13 @@ Key names below are the bridge contract. Values are raw game values, not percent
 | `crawling` | boolean | Crawling state | Field name verified on smoke test; omitted if unavailable. |
 | `alive` | boolean | `IsAlive()` | |
 | `connected_seconds` | integer | Bridge clock | Seconds since the bridge saw the connect event. |
-| `connected_at` | integer | Bridge clock | Unix seconds of the connect event. Replaces the file export's `connected_at`, which was the export time (§13). |
-| `current_life_seconds` | integer | `lifeStory.secondsAlive` | Time in the current life. Not total play time. |
+| `connected_at` | integer | Bridge clock | Unix seconds of the connect event, recorded in `OnUserConnected`. Replaces the file export's `connected_at`, which was the export time (§12). |
+| `current_life_seconds` | integer | `lifeStory.secondsAlive` | Time in the current life. Not total play time: the panel must not present it as play time (see `../panel-changes.md`). |
 | `metabolism` | object | Metabolism fields (§5.2) | |
 | `team` | object or `null` | Team (§5.3) | `null` when not in a team. |
 | `clan` | object | Clans plugin or native clan system | Omitted when neither is present. `null` when present but the player has no clan. |
 | `building_privilege` | object | TC auth (§5.4) | |
 | `blueprints_learned` | integer | Unlocked blueprint count | Expensive (iterates all item definitions). Computed on `player.get` only, never on `players.list`. |
-| `active_item` | item record or `null` | Held item | Encoded item record (§6.2). |
 | `mounted_entity` | object or `null` | Mounted entity | `{ "shortname", "net_id", "position" }`. |
 | `owner` | boolean | Owner role | |
 | `admin` | boolean | Admin role (owner or `admin` group) | |
@@ -198,7 +195,6 @@ Each value is the raw metabolism value. Omit any key the bridge cannot read on t
   },
   "building_privilege": { "authorized": true, "cupboards": [ { "x": 120.5, "y": 3.0, "z": -44.2 } ] },
   "blueprints_learned": 312,
-  "active_item": { "shortname": "rifle.ak", "item_id": 123456789, "skin": 0, "amount": 1, "slot": 0, "condition": 100.0, "max_condition": 100.0, "durability_percent": 100.0, "ammo_type": "ammo.rifle", "ammo": 30, "contents": [] },
   "mounted_entity": null,
   "owner": false,
   "admin": false,
@@ -211,62 +207,58 @@ Each value is the raw metabolism value. Omit any key the bridge cannot read on t
 
 ### 6.1 Containers
 
-| Container key | Slots | Notes |
+`player.inventory` returns the containers below in the envelope of `operations.md` §5 (`{id, size, slots:[{slot, item}]}`, non-empty slots only, `slot` an int).
+
+| Container `id` | `size` | Notes |
 |---|---|---|
 | `main` | 24 | Main inventory. |
 | `belt` | 6 | Hotbar. |
 | `wear` | 8 | Worn items. The count is from the spec; confirm it on the smoke-test server (container capacity). |
 | `backpack` | Varies | Only when the Backpacks plugin is present and returns a container. Omitted otherwise. |
 
-Each container is an array of item records sorted by `slot`. Empty containers are `[]`, never `null`.
-
 ### 6.2 Rust item record
 
-The generic encoded item record is in `items-and-assets.md`. The Rust fields below are the Rust record. Keys not listed are not sent.
+Items are exactly the generic record of `items-and-assets.md`; there is no separate Rust record. Rust usage:
 
-| Key | Type | Notes |
-|---|---|---|
-| `shortname` | string | Item definition shortname, for example `rifle.ak`. |
-| `item_id` | integer | Instance id `Item.uid`. |
-| `name` | string | Custom item name when set. Omitted otherwise. |
-| `skin` | integer | Workshop skin id, `0` when none. |
-| `amount` | integer | Stack count. |
-| `slot` | integer | Container slot index. |
-| `condition` | number | Current condition. |
-| `max_condition` | number | Max condition. |
-| `durability_percent` | number | `condition / max_condition * 100`, one decimal. `100` when the item has no condition. |
-| `ammo_type` | string | Shortname of the loaded ammo, weapons only. Omitted otherwise. |
-| `ammo` | integer | Loaded ammo count, weapons only. |
-| `contents` | array | Weapon attachments (mods) for weapons, or items inside a container. Empty array when none. |
-| `blueprint_target` | string | Shortname of the item this blueprint unlocks. Blueprints only. |
+| Key | Rust meaning |
+|---|---|
+| `id` | Item shortname, e.g. `rifle.ak`. |
+| `count` | Stack size (Rust `amount`). |
+| `name` | `{plain}` custom item name when set; omitted otherwise. |
+| `skin` | Workshop skin id; omitted when none. |
+| `condition`, `max_condition` | Current and maximum condition. The panel computes durability percentages itself. |
+| `ammo` | `{id, count}` loaded ammunition, weapons only (`id` = ammo shortname). |
+| `contents` | Weapon attachments (mods) for weapons, or items inside a container. Same record, recursive. The panel tells attachments from container items by `id` (`weapon.mod.*`). `slot` inside is relative to the parent. |
+| `components` | Rust platform map: `uid` (`Item.uid`, instance id), `definition_id` (`ItemDefinition.itemid`), `blueprint_target` (shortname the blueprint unlocks, blueprints only). |
+| `hash`, `fingerprint` | As in `items-and-assets.md`. The render hash covers `id` + `skin`. |
 
-Attachments on a weapon and items in a container both use `contents`. The panel tells them apart by `shortname`.
-
-Example (container slot):
+Example (`player.inventory` slot entry):
 
 ```json
 {
-  "shortname": "rifle.ak",
-  "item_id": 123456789,
-  "skin": 0,
-  "amount": 1,
   "slot": 0,
-  "condition": 92.5,
-  "max_condition": 100.0,
-  "durability_percent": 92.5,
-  "ammo_type": "ammo.rifle",
-  "ammo": 27,
-  "contents": [
-    { "shortname": "weapon.mod.silencer", "item_id": 123456790, "skin": 0, "amount": 1, "slot": 0, "condition": 100.0, "max_condition": 100.0, "durability_percent": 100.0, "contents": [] }
-  ]
+  "item": {
+    "id": "rifle.ak",
+    "count": 1,
+    "skin": 1234567890,
+    "condition": 92.5,
+    "max_condition": 100.0,
+    "ammo": { "id": "ammo.rifle", "count": 27 },
+    "components": { "uid": 123456789, "definition_id": 1545779598 },
+    "contents": [
+      { "id": "weapon.mod.silencer", "count": 1, "slot": 0, "condition": 100.0, "max_condition": 100.0,
+        "components": { "uid": 123456790, "definition_id": 1815301988 }, "hash": "...", "fingerprint": "..." }
+    ],
+    "hash": "...", "fingerprint": "..."
+  }
 }
 ```
 
 ## 7. Actions
 
-Action ids are the ids in `src/actions.rs` (`Game::Rust`). The bridge implements the actions natively against the Oxide or Carbon API. The console equivalent is listed so the server owner can see the effect. Actions that change ban, owner or moderator state must persist the user lists (`server.writecfg` equivalent) before reporting success.
+Action ids are the ids in `src/actions.rs` (`Game::Rust`). The bridge implements the actions natively against the Oxide or Carbon API. The console equivalent is listed so the server owner can see the effect. The `pm.*` commands named there belong to the old file-export plugin and are **not** used or required by the bridge. Actions that change ban, owner or moderator state must persist the user lists (`server.writecfg` equivalent) before reporting success.
 
-Destructive actions need `confirmed: true` (the panel's existing confirmation flow).
+Destructive confirmation is the panel's job (`operations.md` §9); the bridge executes what it is asked.
 
 | Id | Target | Fields | Destructive | Bridge behaviour | Console equivalent |
 |---|---|---|---|---|---|
@@ -281,8 +273,7 @@ Destructive actions need `confirmed: true` (the panel's existing confirmation fl
 | `set_hydration` | player | `amount` 0 to 250 | no | Set hydration | `pm.setmetabolism <id> hydration <amount>` |
 | `give_item` | player | `item` (shortname), `amount` 1 to 64000 | no | Create and give item | `pm.give <id> <shortname> <amount>` |
 | `clear_inventory` | player | none | yes | Clear inventory | `inventory.clearinventory <id>` |
-| `teleport_player` | player | `destination` (player id) | no | Teleport to another player | `teleport <id> <destination>` |
-| `teleport` | player | `x`, `y`, `z` (metres) | no | Teleport to coordinates. Not in the panel's Rust list today (§13). | none |
+| `teleport` | player | either `to_player` (player id) or `x`, `y`, `z` (metres; optional `world`, which must equal the server's own world id) | no | Teleport to another player or to coordinates (`operations.md` §Teleport). The panel's `teleport_player` is a panel-side alias mapped to this action; it is never advertised. | `teleport <id> <destination>` / none |
 | `mute` | player | none | no | Mute | `mute <id>` |
 | `unmute` | player | none | no | Unmute | `unmute <id>` |
 | `make_owner` | player | none | yes | Add owner, persist | `ownerid <id>` + `server.writecfg` |
@@ -295,7 +286,7 @@ Rules:
 
 - `heal`, `hurt`, `sethealth`, `set_calories`, `set_hydration` and `give_item` are capabilities of this bridge. The panel only offers them when the bridge reports them in `hello`.
 - Target validation: a Rust target must be a 17-digit SteamID64 string.
-- `teleport` uses `x`, `y`, `z` in metres. The bridge must reject a position outside the map bounds with `invalid_args`.
+- `teleport` coordinates are in metres. The bridge must reject a position outside the map bounds with `invalid_args`.
 - `give_item` `item` must be a valid shortname. An unknown shortname returns `not_found`.
 - Each action returns `ok` when the game state changed on the game thread, not when the request was queued.
 
@@ -352,7 +343,7 @@ Rules:
 3. From a shell inside the container, a client connects to the socket, writes a 4-byte big-endian length and a 5-byte body, and expects the same 5 bytes echoed back.
 4. Repeat step 3 through the Wings tunnel: `GET /api/servers/{server}/ws/socket?path=.playermanager/smoke.sock`.
 5. Pass: the echo matches on both paths, no exception is logged, and the plugin deletes `smoke.sock` on unload.
-6. Record the result in the bridge repository's `NOTES.md`, per `../README.md` §5. Include the framework, the Rust build, and the assembly name printed in step 1.
+6. Record the result in the bridge repository's `NOTES.md`, per the `../README.md` introduction. Include the framework, the Rust build, and the assembly name printed in step 1.
 7. Fail (any step): ship TCP fallback. Bind `0.0.0.0:<port>` from `tcp_fallback_port`, write `.playermanager/token` (32 random bytes, lowercase hex, mode `0600`), require `hello` with the token as the first message (`../README.md` §2), and report `transport: "tcp"` in `bridge.json`.
 
 Also confirm during the same run: `Socket` resolves without an extra reference, the `NextTick` drain fires, and the `wear` container capacity is 8.
@@ -373,9 +364,9 @@ The bridge keeps writing `oxide/data/PlayerManagerRust.json` (or the Carbon path
 |---|---|---|
 | `generated_at` | `generated_at` on the file | Time the file was written. |
 | `plugin_version` | `bridge_version` in `bridge.json` | Value changes with the bridge. |
-| `server_info.*` | §3 keys | Same names except `header_image`, `max_players` (unchanged). |
+| `server_info.*` | `server.info` common keys + §3 `game` keys | `max_players` is the common key; the rest keep their names. |
 | `online_players` | `players.list` filtered by `online: true` | |
-| `sleeping_players` | `players.list` filtered by `sleeping: true` | |
+| `sleeping_players` | `players.list` filtered by `groups` containing `sleeping` | |
 | `all_players` | `players.list` | |
 | `banned_players` | `bans` | |
 | `admins` | `roles` where `role` is `owner` or `admin` | |
@@ -393,7 +384,7 @@ The bridge keeps writing `oxide/data/PlayerManagerRust.json` (or the Carbon path
 | `is_alive` | `game.alive` | |
 | `is_wounded` | `game.wounded` | |
 | `ping` | `ping` | Common section. |
-| `address` | `address` | Sensitive. Omitted unless `include_sensitive: true`. Export always sent it (§13). |
+| `address` | `ip` | Sensitive. The bridge sends it only with `include_sensitive: true`; the file export should omit it unless the panel needs it (the old export always sent it). |
 | `position` `{x,y,z}` | `position` `{x,y,z}` | Same. |
 | `stats.health` | `health` | Common section. |
 | `stats.max_health` | `max_health` | Common section. |
@@ -406,60 +397,46 @@ The bridge keeps writing `oxide/data/PlayerManagerRust.json` (or the Carbon path
 | `stats.bleeding` | `game.metabolism.bleeding` | |
 | `stats.oxygen` | `game.metabolism.oxygen` | |
 | `stats.wetness` | `game.metabolism.wetness` | |
-| `stats.play_time_seconds` | `game.current_life_seconds` | Renamed. Value is current-life time (§13). |
+| `stats.play_time_seconds` | `game.current_life_seconds` | Renamed. Value is current-life time (`secondsAlive`), not play time; `game.connected_seconds` is the session time. |
 | `inventory.main` | `inventory.main` | §6. |
 | `inventory.belt` | `inventory.belt` | §6. |
 | `inventory.wear` | `inventory.wear` | §6. |
 | `inventory.backpack` | `inventory.backpack` | §6. |
-| `active_item` (string shortname) | `game.active_item` (item record) | Changed type (§13). |
-| `team_id` (string) | `game.team.id` (integer) | Changed type. |
+| `active_item` (string shortname) | `held_item` (common, item record) | Changed type. The file export keeps the shortname string in `active_item`. |
+| `team_id` (string) | `game.team.id` (integer) | Changed type. The file export keeps the old string and names-only shapes. |
 | `team_members` (names) | `game.team.members` (objects) | Changed type. |
 | `has_building_privilege` | `game.building_privilege.authorized` | |
 | `blueprints_learned` | `game.blueprints_learned` | |
 | `is_banned` | `game.banned` | |
 | `is_admin` | `game.admin` | |
 | `is_moderator` | `game.moderator` | |
-| `connected_at` | `game.connected_at` | Semantics fixed (§13). |
+| `connected_at` | `game.connected_at` | Semantics fixed: real connect time, not export time. |
 
 ### 12.3 Item
 
 | Export key | Bridge key | Notes |
 |---|---|---|
-| `id` (shortname) | `shortname` | Renamed. `id` is not used for the instance id. |
-| (none) | `item_id` | New: instance id. |
-| `name` | `name` | Omitted when unset. |
-| `count` | `amount` | Renamed. |
-| `slot` | `slot` | |
-| `condition` | `condition` | |
-| `max_condition` | `max_condition` | |
-| `durability_percent` | `durability_percent` | |
-| `skin` | `skin` | |
-| `ammo` | `ammo` | Weapons only. `ammo_type` is new. |
+| `id` (shortname) | `id` | Same name and meaning (shortname). |
+| `count` | `count` | Same. |
+| `name` | `name` | Now `{plain}`; omitted when unset. |
+| `slot` | `slots[].slot` in `player.inventory` | |
+| `condition`, `max_condition` | `condition`, `max_condition` | |
+| `durability_percent` | (dropped) | Panel computes it from `condition` / `max_condition`. The file export keeps it. |
+| `skin` | `skin` | Omitted when `0`. |
+| `ammo` (integer) | `ammo.count` | `ammo.id` is new (was `ammo_type`). |
 | `contents` | `contents` | |
+| (none) | `components.uid`, `components.definition_id` | New: instance and numeric definition ids. |
 
-Transition rule: while the panel still reads the export, the file keeps both the export names and the bridge names on items (`id` and `shortname`, `count` and `amount`), so an older panel keeps working.
+The file export itself keeps writing the old shapes unchanged (including the string `active_item`, `team_id`, names-only `team_members`, flat item objects) for as long as the panel reads it; only the socket protocol uses the contract shapes. The file is written on the same schedule as today because the panel's `rust_snapshot` and roster code require `generated_at` no older than 30 s (`src/service.rs`).
 
-## 13. Conflicts and open items (panel side)
+## 13. Open items
 
-These are places where this contract and the current panel or the old export disagree. Each one needs a decision or a code change before the bridge is wired in.
+Everything else that used to be listed as a conflict between this document, the old export and the panel is resolved above. What remains:
 
-| # | Conflict | Where | Proposed resolution |
+| # | Item | Kind | Where |
 |---|---|---|---|
-| 1 | The panel marks the plugin as ready when `PlayerManagerRust.cs` contains the string `"pm.hurt"`. The bridge does not use `pm.*` commands. | `src/integrations.rs` (`ready` check) | Ready check must read the bridge's `hello` capability, or the bridge keeps a marker string. |
-| 2 | The installer checks for `class PlayerManagerRust` in the bundled source and writes to `<framework>/plugins/PlayerManagerRust.cs`. The bridge file must use the same class and file name. | `src/integrations.rs` lines around 144 to 230 | Keep class and file name. The installer should write the bridge file, not the old export file. |
-| 3 | The Rust action gate hides `heal`, `hurt`, `sethealth`, `set_calories`, `set_hydration` and `give_item` unless the plugin is ready. | `src/actions.rs` (`specs`) | Gate on bridge capability instead of the `ready` integration. |
-| 4 | `teleport` (x, y, z) exists for Minecraft only. Rust has only `teleport_player`. | `src/actions.rs` | Add a Rust `teleport` action in the panel, or hide it until the panel supports it. |
-| 5 | The export always sends `address` for online players. `../README.md` §6 says addresses need `include_sensitive: true`. | `game-plugins/PlayerManagerRust.cs` | Bridge follows the README. The file export should omit `address` unless the panel asks. |
-| 6 | `connected_at` in the export is the export time (`DateTime.UtcNow`), not the connect time. | `game-plugins/PlayerManagerRust.cs` | Bridge records the real connect time in `OnUserConnected` and reports it. |
-| 7 | `play_time_seconds` is `lifeStory.secondsAlive`, which is current-life time. The panel and the spec read it as a play-time figure. | `game-plugins/PlayerManagerRust.cs`, `src/data.rs` | Keep `current_life_seconds` and add `connected_seconds`. Do not present current-life time as total play time. |
-| 8 | Item key names differ: export `id` is the shortname; spec `item_id` is the instance id. | §12.3 | Use `shortname` and `item_id`. Keep the export aliases for older panels (§12). |
-| 9 | Export `active_item` is a shortname string. Spec uses an item record. | §12.2 | Bridge sends the record. The file keeps the string as `active_item_shortname` in the file export only. |
-| 10 | `team_id` is a string in the export and an integer in the spec. `team_members` is names only in the export. | §12.2 | Bridge sends the spec types. The file export keeps the old shapes. |
-| 11 | The panel's `rust_snapshot` and roster code require `generated_at` to be no older than 30 s. The bridge must not change that contract for the file fallback. | `src/service.rs` (lines near 400 and 473) | Keep writing the file on the same schedule while the panel reads it. |
-| 12 | `wear` capacity is 8 in the spec. The export does not state it. | §6.1 | Confirm during the smoke test (§10). |
-| 13 | `blueprints_learned` iterates every item definition. Running it for every player on every export is costly. | `game-plugins/PlayerManagerRust.cs` (`GetBlueprintCount`) | Bridge computes it only on `player.get`. |
-| 14 | `ping` and `address` are not in the Rust `game` object. They depend on the common section in `operations.md`. | §12.2 | Confirm the common section includes `ping` and `address`. |
-| 15 | `roles` and `bans` are not in the requested `server.info` extras list. They are needed to keep the file export working. | §3.1 | Kept in `server.info`. Confirm with `operations.md`. |
-| 16 | Socket support is unverified on Rust Mono. | §10 | Smoke test first. TCP fallback is ready. |
-| 17 | `crawling`, `wetness`, `heartrate`, `poison` and `monuments` are named from the spec. The Rust members behind them are not verified. | §5, §3 | Verify each against the game on the smoke-test server. Omit any that do not exist. |
-| 18 | The bridge file must cover both Oxide and Carbon. Its `platform` must report whichever framework loaded it. | §1 | Detect the framework at load time (`#if CARBON`). |
+| 1 | Socket support on Rust Mono is unverified. Smoke test first; TCP fallback is ready. | bridge verify | §10 |
+| 2 | `wear` capacity of 8 and the `NextTick` drain must be confirmed on a real server. | bridge verify | §6.1, §10 |
+| 3 | `crawling`, `wetness`, `heartrate`, `poison`, `monuments` and yaw/pitch fields are named from the spec; the Rust members behind them are not verified. Omit any that do not exist. | bridge verify | §2, §3, §5 |
+| 4 | The file export keeps being written on its current schedule while the panel reads it (30 s freshness rule). | bridge rule | §12.3 |
+| 5 | Panel-side changes: integration "ready" check no longer based on the string `"pm.hurt"`, installer writes the bridge file under the same class and file name, action gating on bridge capabilities instead of the `ready` integration, `teleport_player` to `teleport` mapping, not presenting `current_life_seconds` as play time. | panel | `../panel-changes.md` |

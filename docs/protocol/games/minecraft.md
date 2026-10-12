@@ -17,15 +17,16 @@ Short names used below: **Bukkit family** = paper, spigot, folia. **Mod loaders*
 | 26.1+ | 25 | Version scheme changes; bridge keys `game_version` as reported by the server |
 | Velocity (current) | 25 | Proxy has its own version, not the game's |
 
+- Supported Minecraft range is set by `releases.md` (`game_versions` of the universal jar: `>=1.8.8`); versions older than 1.12 are best effort and not covered by the tables below.
 - Java < 16 bridges use junixsocket (shaded) when possible, otherwise `transport: "tcp"` with `.playermanager/token` (README §2).
-- Proxies report `game_version` as the proxy's newest supported protocol version string (e.g. `"1.21.4"`), plus `protocol_range` in `hello` (see §10).
+- Proxies report `game_version` as the proxy's newest supported protocol version string (e.g. `"1.21.4"`), plus `protocol_range` in `hello.game` (see §10).
 
 ## 2. Ids
 
 | Thing | Rule |
 |---|---|
 | Player id | UUID string, lowercase, hyphenated. Bukkit: `Player#getUniqueId`. Mods: `ServerPlayer#getUUID`. Proxies: `ProxiedPlayer#getUniqueId` / `Player#getUniqueId`. |
-| Offline-mode UUIDs | Servers with `online-mode=false` derive UUID v3 from `"OfflinePlayer:" + name`. The bridge sets `offline_uuid: true` in `player.get`/`players.list` rows when the UUID's version nibble is `3` **and** equals that derivation for the player's name (false otherwise). Proxies with a different mode than the backend cause mismatched UUIDs: the proxy reports its own UUID as `id` and, when known, the backend's as `backend_id`. |
+| Offline-mode UUIDs | Servers with `online-mode=false` derive UUID v3 from `"OfflinePlayer:" + name`. The bridge sets `offline_uuid: true` in `game.offline_uuid` of `player.get` and of `players.list` rows when the UUID's version nibble is `3` **and** equals that derivation for the player's name (false otherwise). Proxies with a different mode than the backend cause mismatched UUIDs: the proxy reports its own UUID as `id` and, when known, the backend's as `game.backend_id`. |
 | Name | Current in-game name (`name`). Case preserved; panel compares case-insensitively. |
 | Item ids | Namespaced (`minecraft:diamond_sword`). Legacy (< 1.13) numeric/flattened names are mapped by the bridge to modern ids where a mapping exists; unknown ones are sent as `legacy:<MATERIAL>`. |
 | Effect ids / enchantment ids / dimension ids | Namespaced (`minecraft:speed`). |
@@ -62,7 +63,7 @@ Rules:
 - Every position object may therefore carry the extra informational key `environment` (`"normal"`, `"nether"`, `"the_end"`, `"custom"`) and `world_name` (the platform's name for the world, e.g. Bukkit `World#getName()`). The panel uses only `world` + `dimension` for map/terrain lookups.
 - Paper 1.21.x layouts that put nether/end under `world/dimensions/minecraft/...` are reported as a single `world` with the three vanilla dimensions.
 - Mods: `world` = `level-name` folder (from `MinecraftServer#getWorldPath(LevelResource.ROOT)` relative to the server root); `dimension` = `ServerLevel#dimension().location()`.
-- The bridge's `worlds.list` op (see `operations.md`) returns `[{ "world", "dimension", "environment", "name", "players": n }]` for every loaded level.
+- `server.info.worlds[]` (see `operations.md`) lists every loaded level as `{ "world", "dimension", "environment", "name", "players": n }`; there is no separate world-listing op.
 - If the bridge cannot determine a folder (rare on proxies), it omits `world` and sends `dimension: null`.
 
 Position object (used everywhere):
@@ -72,32 +73,26 @@ Position object (used everywhere):
   "world": "world", "dimension": "minecraft:overworld", "environment": "normal" }
 ```
 
-Yaw: 0 = south, 90 = west, -180/180 = north, 270/-90 = east (as the game reports). Stream positions follow README §6 quantization (`x,y,z` in 1/16 block, angles in 1/100 degree) with `d` = index into the stream's `dimensions` table when a stream header lists them.
+Yaw: 0 = south, 90 = west, -180/180 = north, 270/-90 = east (as the game reports). Stream positions follow README §6 quantization (`x,y,z` in 1/16 block, angles in 1/100 degree) and carry `world` + `dimension` strings as in `operations.md` §7.1.
 
 ## 4. `player.get` — `game` object
 
-`operations.md` defines the envelope (common section: `id`, `name`, `online`, `ping`, `position`, `health`, `max_health`, `inventory`, ...). The Minecraft-specific part is `data.game`. Absent key = unsupported (also listed in `capabilities`); `null` = known but unknown right now.
+`operations.md` defines the envelope (common section: `id`, `name`, `online`, `ping`, `world`, `dimension`, `position`, `health`, `max_health`, `armor`, `held_item`, `vehicle`, `game_mode`, `food`, `saturation`, `experience`, ...). Those common keys are **not repeated** under `game`. Inventories come from `player.inventory`. The Minecraft-specific part is `data.game`. Absent key = unsupported (also listed in `capabilities`); `null` = known but unknown right now.
 
 | Key | Type | Notes |
 |---|---|---|
 | `offline_uuid` | bool | See §2 |
-| `game_mode` | string | `survival` `creative` `adventure` `spectator` |
-| `previous_game_mode` | string\|null | |
-| `food` | int | 0–20 (`foodLevel`) |
-| `saturation` | float | |
-| `exhaustion` | float | |
+| `previous_game_mode` | string\|null | Common `game_mode` vocabulary (`survival`, `creative`, `adventure`, `spectator`) |
+| `exhaustion` | float | `food` (0–20 int) and `saturation` are the common-section keys |
 | `absorption` | float | Hearts × 2 |
-| `armor` | float | Computed armor points (`minecraft:armor` attribute) |
-| `armor_toughness` | float | |
-| `air` | int | Ticks of breath; max in `max_air` |
-| `max_air` | int | Default 300 |
+| `armor_toughness` | float | Armor points themselves are the common `armor` (`minecraft:armor` attribute) |
+| `air_ticks` | int | Ticks of breath; max in `max_air_ticks` |
+| `max_air_ticks` | int | Default 300 |
 | `fire_ticks` | int | -20 or less = not burning; >0 on fire |
 | `freeze_ticks` | int | 1.17+ |
-| `xp_level` | int | Panel HUD also accepts `experience_level` |
-| `xp_progress` | float | 0.0–1.0 bar fill |
-| `xp_total` | int | |
 | `score` | int | |
-| `effects` | array | `[{ "id": "minecraft:speed", "amplifier": 1, "duration": 600, "ambient": false, "particles": true, "icon": true }]`. `duration` in **ticks** (-1 = infinite). This is the one place ticks are used (matches NBT `ActiveEffects`). |
+| `xp_*` | — | XP: the common `experience {level, progress, total}` carries level/bar/total. The panel HUD also accepts the aliases `xp_level` and `experience_level`; the panel adapter (`operations.md` §11) maps `experience` to them, so bridges do not send them. |
+| `effects` | array | `[{ "id": "minecraft:speed", "amplifier": 1, "duration_ticks": 600, "ambient": false, "particles": true, "icon": true }]`. `duration_ticks` in **ticks** (-1 = infinite; matches NBT `ActiveEffects`; README allows the `_ticks` suffix). |
 | `flying` | bool | Currently flying (`abilities.flying`) |
 | `may_fly` | bool | |
 | `invulnerable` | bool | |
@@ -123,7 +118,6 @@ Yaw: 0 = south, 90 = west, -180/180 = north, 270/-90 = east (as the game reports
 | `first_played` | int | Unix seconds |
 | `last_login` | int | Unix seconds (this session's login when online) |
 | `play_time_seconds` | int | From `minecraft:play_time` statistic (ticks ÷ 20) |
-| `world` / `dimension` | string | Duplicated from `position` for panel convenience |
 | `statistics` | object | See below |
 | `advancements` | object | See below |
 
@@ -179,19 +173,19 @@ Shape compatible with `parseAdvancements` in `frontend/src/advancements.ts` (the
 - Mods: `PlayerAdvancements` / `ServerAdvancementManager` (`AdvancementHolder`), reading progress via `getOrStartProgress`.
 - `DataVersion` key is optional and ignored.
 
-> Conflict note: README §6 says timestamps are Unix seconds; the panel's advancement parser currently only accepts the vanilla string form. The bridge MUST send the string form here until the panel parser also accepts integers.
+> Timestamp exception: advancement criterion completion times are the one place that keeps the vanilla string form instead of Unix seconds (README §6 lists this exception). The panel parser (`frontend/src/advancements.ts`) accepts only this form; see `../panel-changes.md` for the later option of accepting integers.
 
 ## 5. Containers and slot numbering
 
-`player.get` (and `inventory.get`) return containers keyed by id. Container ids are the ones the panel already uses in `src/actions.rs`:
+`player.inventory` returns the containers below (envelope in `operations.md` §5; `slots[].slot` is an **int** for numeric slots, a name where the table says so). Container ids are the ones the panel already uses in `src/actions.rs`:
 
 | Container id | Slots | `slot` value | Notes |
 |---|---|---|---|
-| `inventory` | 36 | `"0"`…`"35"`: 0–8 hotbar (0 = leftmost), 9–35 main (9 = top-left, row-major) | Matches Bukkit `PlayerInventory#getItem` and NBT `Inventory` slots 0–35 |
-| `equipment` | 5 | `head`, `chest`, `legs`, `feet`, `offhand` (+ `mainhand` read-only) | Order for lists: head, chest, legs, feet, offhand. Armor hud pieces: helmet=head(0), chestplate=chest(1), leggings=legs(2), boots=feet(3) |
-| `ender_chest` | 27 | `"0"`…`"26"` | Row-major |
-| `cursor` | 1 | `"0"` | Item on the mouse cursor (online only) |
-| `crafting` | 4 (2×2) or 9 (3×3) | `"0"`…, result slot is `"result"` | Player's own crafting grid (online only), optional |
+| `inventory` | 36 | `0`…`35`: 0–8 hotbar (0 = leftmost), 9–35 main (9 = top-left, row-major) | Matches Bukkit `PlayerInventory#getItem` and NBT `Inventory` slots 0–35 |
+| `equipment` | 5 | `head`, `chest`, `legs`, `feet`, `offhand` (names) | Order for lists: head, chest, legs, feet, offhand. The held item is the common `held_item` (the main hand is a hotbar slot, so it is not repeated here). Armor hud pieces: helmet=head(0), chestplate=chest(1), leggings=legs(2), boots=feet(3) |
+| `ender_chest` | 27 | `0`…`26` | Row-major |
+| `cursor` | 1 | `0` | Item on the mouse cursor (online only) |
+| `crafting` | 4 (2×2) or 9 (3×3) | `0` = result, `1`… = grid (vanilla menu order) | Player's own crafting grid (online only), optional |
 | `open` | variable | vanilla container slot index from the top of the open menu | The container the player currently has open: `{ "type": "minecraft:chest", "title": "Chest", "size": 54, "slots": [...] }` (online only, optional, read-only by default) |
 | `backpack` / plugin containers | variable | plugin-defined | Optional; key `plugin_containers: [{ "id", "plugin", "slots" }]` |
 
@@ -199,50 +193,49 @@ Mapping to the three numbering schemes in the wild:
 
 | Slot | Bukkit `PlayerInventory` index | NBT (saved `.dat`) | Vanilla `item replace` slot | Bridge `container` / `slot` |
 |---|---|---|---|---|
-| Hotbar 0–8 | 0–8 | 0–8 | `hotbar.N` | `inventory` / `"0"…"8"` |
-| Main 9–35 | 9–35 | 9–35 | `inventory.(N-9)` (i.e. `container.N` in command syntax) | `inventory` / `"9"…"35"` |
+| Hotbar 0–8 | 0–8 | 0–8 | `hotbar.N` | `inventory` / `0…8` |
+| Main 9–35 | 9–35 | 9–35 | `inventory.(N-9)` (i.e. `container.N` in command syntax) | `inventory` / `9…35` |
 | Boots | 36 | 100 | `armor.feet` | `equipment` / `feet` |
 | Leggings | 37 | 101 | `armor.legs` | `equipment` / `legs` |
 | Chestplate | 38 | 102 | `armor.chest` | `equipment` / `chest` |
 | Helmet | 39 | 103 | `armor.head` | `equipment` / `head` |
 | Offhand | 40 | -106 (150 in some versions) | `weapon.offhand` | `equipment` / `offhand` |
-| Ender chest | `getEnderChest()` 0–26 | `EnderItems` 0–26 | `enderchest.N` | `ender_chest` / `"0"…"26"` |
+| Ender chest | `getEnderChest()` 0–26 | `EnderItems` 0–26 | `enderchest.N` | `ender_chest` / `0…26` |
 
-- **Bridges never expose NBT or Bukkit raw indices.** They always translate to the `container`/`slot` strings above. (The panel's *saved-data* path still uses NBT indices internally and is unchanged.)
-- Container section shape and the item record are defined in `items-and-assets.md`; here each entry is `{ "slot": "13", "item": <encoded item> }` and empty slots are omitted.
-- Compare-and-set ops (`expected_id`, `expected_count`, `expected_fingerprint`) use the fingerprint defined in `items-and-assets.md`; mismatch → `conflict`.
-- Nested containers (shulker boxes, bundles) are exposed through the item record's `contents`; slot numbering inside is 0-based in contents order.
-- Offline players: the Bukkit family and mods can load offline player data (`OfflinePlayer` via NMS / `PlayerDataStorage`); where not supported, `player.get` for an offline id returns `error: offline` for live-only keys and the panel keeps using saved `.dat` parsing.
+- **Bridges never expose NBT or Bukkit raw indices.** They always translate to the `container`/`slot` values above. (The panel's *saved-data* path still uses NBT indices internally and is unchanged.)
+- Container section shape and the item record are defined in `items-and-assets.md`; here each entry is `{ "slot": 13, "item": <encoded item> }` and empty slots are omitted.
+- Compare-and-set ops (`expected_id`, `expected_count`, `expected_fingerprint`) are the `expect` check of `operations.md` §9 (fingerprint from `items-and-assets.md`); mismatch → `conflict`. `slot` in their args has the same type as in `player.inventory`.
+- Nested containers (shulker boxes, bundles) are exposed through the item record's `contents`; slot numbering inside is 0-based in contents order (`item.get` with `path` reaches them).
+- Offline players: the Bukkit family and mods can load offline player data (`OfflinePlayer` via NMS / `PlayerDataStorage`); where not supported, `player.get` for an offline id returns `offline` for live-only keys and the panel keeps using saved `.dat` parsing.
 
 ## 6. `player.nearby` — block slice
 
-Request (`args`): `{ "id": "<uuid>", "radius": 16, "y_below": 8, "y_above": 8 }` or an explicit box `{ "world", "dimension", "x", "y", "z", "dx", "dy", "dz" }`. Limits: ≤ 64×64×64 blocks (262 144) per response; larger → `invalid_args`.
+Common args are in `operations.md` §6 (`id`, `radius` 1–32, `blocks`). Minecraft adds optional `y_below` / `y_above` (default 8 each, clamped to the world's build height) bounding the slice vertically. Limit: ≤ 262 144 blocks per slice (the raised Minecraft limit referenced in `operations.md` T3); a larger request → `invalid_args`.
 
-Response `data`:
+The slice is returned in the `blocks` object of the common `player.nearby` response (`{origin, size, palette, data}`) plus the Minecraft extras below:
 
 ```json
-{
+"blocks": {
+  "origin": {"x": -20, "y": 56, "z": 285},
+  "size": {"x": 41, "y": 17, "z": 41},
   "world": "world", "dimension": "minecraft:overworld",
-  "origin": [-20, 56, 285],
-  "size": [41, 17, 41],
-  "y_min": 56, "y_max": 72,
   "order": "yzx",
   "palette": ["minecraft:air", "minecraft:grass_block[snowy=false]", "minecraft:stone"],
   "bits": 2,
-  "indices": "<bin>",
-  "block_entities": [{ "pos": [-18, 60, 290], "id": "minecraft:chest" }],
-  "biomes": { "palette": ["minecraft:plains"], "indices": "<bin>" },
+  "data": "<bin>",
+  "block_entities": [{ "pos": {"x": -18, "y": 60, "z": 290}, "id": "minecraft:chest" }],
+  "biomes": { "palette": ["minecraft:plains"], "data": "<bin>" },
   "truncated": false
 }
 ```
 
 | Key | Rule |
 |---|---|
-| `origin` | Lowest corner `[x, y, z]` (block coordinates). `y_min` = `origin[1]`, `y_max` = `origin[1] + size[1] - 1`. Clamped to the world's build height; `size` reflects the clamp. |
-| `order` | Always `"yzx"`: index = `(y_rel * size[2] + z_rel) * size[0] + x_rel` (same as vanilla chunk section order, x fastest). |
+| `origin` | Lowest corner `{x, y, z}` (block coordinates). Clamped to the world's build height; `size` reflects the clamp. |
+| `order` | Always `"yzx"`: index = `(y_rel * size.z + z_rel) * size.x + x_rel` (same as vanilla chunk section order, x fastest). |
 | `palette` | Block states as `id` or `id[prop=value,...]` with **all** properties included, sorted alphabetically, so the same state always yields the same string. Index 0 is not guaranteed to be air. |
 | `bits` | Bits per index = `max(1, ceil(log2(len(palette))))`. |
-| `indices` | MessagePack `bin`: indices packed **big-endian bit order, tightly packed, no padding across entries** (entry *n* occupies bits `[n*bits, (n+1)*bits)` counted from the most significant bit of byte 0), final byte zero-padded. This is deliberately different from the vanilla long-array layout so decoders are trivial. |
+| `data` | MessagePack `bin`: indices packed **big-endian bit order, tightly packed, no padding across entries** (entry *n* occupies bits `[n*bits, (n+1)*bits)` counted from the most significant bit of byte 0), final byte zero-padded. This is deliberately different from the vanilla long-array layout so decoders are trivial. |
 | `block_entities` | Optional list of block entity positions/ids (chests, signs, spawners) with optional `text` for signs (plain lines) |
 | `biomes` | Optional; one entry per 4×4×4 cell, `yzx` order over `ceil(size/4)` cells anchored at `floor(origin/4)*4`. Same packing. |
 | `truncated` | `true` if unloaded chunks were skipped; unloaded blocks are palette entry `"minecraft:void_air"` (or the bridge omits the slice region and sets `truncated`). The bridge never force-loads chunks. |
@@ -267,7 +260,7 @@ Common: `target` is the player UUID (or name for the commands that require a nam
 | `op` / `deop` | — | ✓ | ✓ | – | – | |
 | `kill` | — | ✓ | ✓ | – | – | |
 | `gamemode` | `mode`: survival\|creative\|adventure\|spectator | ✓ | ✓ | – | – | |
-| `teleport` | `x`,`y`,`z` (±30000000, y ±2048); optional `world`,`dimension`,`yaw`,`pitch` | ✓ | ✓ | – | – | Cross-dimension: `teleportAsync` (Paper/Folia), `teleport` (Spigot), `teleportTo` (mods) |
+| `teleport` | either `to_player`, or `x`,`y`,`z` (±30000000, y ±2048) with optional `world`,`dimension`,`yaw`,`pitch` (`operations.md` §Teleport) | ✓ | ✓ | – | – | Cross-dimension: `teleportAsync` (Paper/Folia), `teleport` (Spigot), `teleportTo` (mods) |
 | `whisper` | `message` | ✓ | ✓ | ✓ | ✓ | Proxy: `sendMessage` |
 | `give_item` | `item` id, `amount` 1–64000 | ✓ | ✓ | – | – | |
 | `give_custom_item` | `item` = encoded item (`items-and-assets.md`) | ✓ | ✓ | – | – | |
@@ -282,11 +275,11 @@ Common: `target` is the player UUID (or name for the commands that require a nam
 | `set_scale` | `scale` 0.0625–16, `attribute`: `minecraft:scale`\|`minecraft:generic.scale` | p | p | – | – | 1.20.5+ only; bridge picks the right attribute and ignores `attribute` |
 | `reset_scale` | `attribute` | p | p | – | – | 1.20.5+ |
 | `heal` | — | ✓ | ✓ | – | – | |
-| `set_health` | `amount` 0–20 | ✓ | ✓ | – | – | Live when online; saved-data otherwise |
+| `set_health` | `amount` 0–20 | ✓ | ✓ | – | – | Online action (`offline:false`); the panel's saved-data path covers offline players |
 | `set_food` | `amount` 0–20 int | ✓ | ✓ | – | – | |
 | `set_saturation` | `amount` 0–20 | ✓ | ✓ | – | – | |
 | `set_experience` | `amount` levels 0–21863 | ✓ | ✓ | – | – | |
-| `apply_effect` | `effect` id, `duration` **seconds** 1–1000000, `amplifier` 0–255 | ✓ | ✓ | – | – | Bridge converts seconds→ticks |
+| `apply_effect` | `effect` id, `duration` **seconds** 1–1000000, `amplifier` 0–255 | ✓ | ✓ | – | – | Bridge converts seconds→ticks (reported back as `effects[].duration_ticks`) |
 | `clear_effects` | — | ✓ | ✓ | – | – | |
 | `wipe_data` | — (target UUID; player must be offline) | p | p | – | – | Bridge deletes playerdata/stats/advancements files natively; panel does it otherwise |
 | `time` | `amount` ticks 0–2147483647; optional `world` | ✓ | ✓ | – | – | |
@@ -302,7 +295,7 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 | Action id | Args | B | M | V | BC | Notes |
 |---|---|---|---|---|---|---|
 | `message` | `message` (plain or `{json}`) | ✓ | ✓ | ✓ | ✓ | |
-| `title` | `title`, `subtitle`, `fade_in`, `stay`, `fade_out` (ticks) | ✓ | ✓ | ✓ | ✓ | |
+| `title` | `title`, `subtitle`, `fade_in_ticks`, `stay_ticks`, `fade_out_ticks` | ✓ | ✓ | ✓ | ✓ | |
 | `actionbar` | `message` | ✓ | ✓ | ✓ | ✓ | |
 | `send_server` | `server` (backend name) | – | – | ✓ | ✓ | Proxy-only |
 | `broadcast` | `message`, optional `server` (limit to one backend) | ✓ | ✓ | ✓ | ✓ | No `target`. Proxies broadcast network-wide unless `server` is set |
@@ -312,11 +305,11 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 
 ## 8. Items on the wire
 
-- Item records are exactly those in `items-and-assets.md`. Minecraft specifics:
-  - 1.20.5+ (components): `components` is the registry-aware `ItemStack` codec output (data components). Bukkit family without a stable components API serialises via `ItemStack#serializeAsBytes`/NMS codec; the bridge may mark `encoding: "components"`.
-  - < 1.20.5: SNBT in `nbt` (`tag` compound), `encoding: "nbt"`.
-  - Bukkit/Spigot fallback: `ItemMeta` fields (display name, lore, enchantments, custom model data) in a normalised `meta` object, `encoding: "bukkit_meta"`; items round-trip lossy.
-- Custom model data (`custom_model_data`) and `item_model` (1.21.2+) are reported as record fields so `assets.*` can resolve textures (Paper `DataComponentTypes.ITEM_MODEL` / `CUSTOM_MODEL_DATA` are `@Experimental`: treat as optional and guard by reflection).
+- Item records are exactly those in `items-and-assets.md`, including its `encoding` key. Minecraft specifics:
+  - 1.20.5+: `components` is the registry-aware `ItemStack` codec output (data components), `encoding: "components"` (or omitted). Bukkit family without a stable components API serialises via `ItemStack#serializeAsBytes`/NMS codec.
+  - < 1.20.5: `components: { "snbt": "..." }` holding the `tag` compound, `encoding: "nbt"`.
+  - Spigot without component access: `encoding: "bukkit_meta"`; no `components`; `name`, `lore`, `enchantments`, `damage`, `model`, `tint` are filled from `ItemMeta`; items round-trip lossy.
+- Custom model data (`custom_model_data`) and `item_model` (1.21.2+) are reported as the record's `model` so `assets.*` can resolve textures (Paper `DataComponentTypes.ITEM_MODEL` / `CUSTOM_MODEL_DATA` are `@Experimental`: treat as optional and guard by reflection).
 
 ## 9. Capability matrix
 
@@ -324,7 +317,7 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 
 | Field / op / action | paper | spigot | folia | velocity | bungeecord | fabric | neoforge | forge | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| `hello`, `ping` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `hello`, `ping` keep-alive frames | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `players.list` (name, uuid, online) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | ping / latency | ✓ | partial | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Spigot: `Player.Spigot#getPing` 1.17+ |
 | client brand | ✓ | partial | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Spigot: plugin channel `minecraft:brand` |
@@ -350,7 +343,7 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 | encoded item (full components/NBT) | ✓ | partial | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | Spigot: ItemMeta only |
 | `player.nearby` | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | |
 | `positions.subscribe` | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | Folia: per-region schedulers; batched snapshot |
-| `chat.subscribe` / events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `events.subscribe` (incl. `chat`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `assets.*` (server pack / mod jars) | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | Resource pack via `getServerResourcePack`; Nexo/Oraxen/ItemsAdder packs on disk |
 | action: kick | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | action: ban / unban / ban_ip | ✓ | ✓ | ✓ | partial | partial | ✓ | ✓ | ✓ | Proxies need LiteBans/AdvancedBan |
@@ -364,7 +357,7 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 | action: broadcast | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | action: move_all | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
 | action: mute / unmute | partial | partial | partial | partial | partial | ✗ | ✗ | ✗ | Only through LiteBans/AdvancedBan |
-| `servers.list` (backends, player counts) | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
+| `backends` in `hello.game` / `server.info.game` (backend names, player counts) | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
 
 ## 10. Proxies
 
@@ -374,22 +367,22 @@ Proxy bridges (Velocity, BungeeCord; Waterfall is end-of-life and treated as Bun
 |---|---|
 | `id`, `name` | Proxy player |
 | `ping` | `Player#getPing` / `ProxiedPlayer#getPing` |
-| `protocol` | Client protocol version (int) |
+| `client.protocol` | Client protocol version (int) |
 | `server` | **Name of the backend server the player is on**, exactly as configured in the proxy (`velocity.toml [servers]` / BungeeCord `config.yml servers`); `null` while connecting |
 | `client` | `{ brand, locale, view_distance? , mods? }` as known to the proxy |
-| `address` | Only when `include_sensitive: true` |
+| `ip` | Only when `include_sensitive: true` (common key, `operations.md`) |
 | `virtual_host` | Optional |
 
 How the panel finds the backend bridge:
 
-1. The proxy bridge's `hello` response includes `backends: [{ "name": "lobby", "address": "10.0.0.5:25565", "players": 12 }]` (and `servers.list` returns the same).
+1. The proxy bridge's `hello.game` includes `backends: [{ "name": "lobby", "address": "10.0.0.5:25565", "players": 12 }]`, and `server.info.game.backends` returns the same list with live player counts. (`address` here is the backend's configured socket address, not a player IP, and is sent without `include_sensitive`.)
 2. Each backend is another panel-managed server (or not). The panel matches a proxy backend `name` to a panel server using the **Player Manager server alias** configured in the panel settings (default: the backend's panel server name, lower-cased), falling back to matching `address`. `server` in a player row is that same name.
 3. For `player.get` on a proxied player the panel calls the proxy bridge for network data **and** the bridge of the panel server mapped from `server` for world data (health, inventory, ...). Plugin messaging between proxy and backend is **not** used because it only works while a player is online; the panel aggregates the two bridges itself.
 4. If no backend bridge is mapped/available, the panel shows the network-level fields only (everything marked ✗ for proxies in §9 is omitted, not null).
 
-Proxy `hello` extras: `protocol_range: { "min": 340, "max": 769 }`, `backends` as above, `modded: bool` (forge handshake detected).
+Proxy `hello.game` extras: `protocol_range: { "min": 340, "max": 769 }`, `backends` as above, `modded: bool` (forge handshake detected).
 
-Proxy-native actions: `kick`, `send_server`, `message`, `title`, `actionbar`, `whisper`, `broadcast`, `move_all`. `ban`/`mute` and group changes work only if LiteBans / AdvancedBan / LuckPerms are installed (the bridge lists them under `integrations` in `hello`). Velocity bridges require Java 25; BungeeCord bridges target Java 8+ API.
+Proxy-native actions: `kick`, `send_server`, `message`, `title`, `actionbar`, `whisper`, `broadcast`, `move_all`. `ban`/`mute` and group changes work only if LiteBans / AdvancedBan / LuckPerms are installed (the bridge lists them in `hello.integrations`). Velocity bridges require Java 25; BungeeCord bridges target Java 8+ API.
 
 ## 11. Version and platform notes
 
@@ -414,17 +407,19 @@ Proxy-native actions: `kick`, `send_server`, `message`, `title`, `actionbar`, `w
 
 ## 12. JSON examples
 
-`hello` extras for a Paper bridge (envelope defined in `operations.md`):
+`hello` for a Paper bridge (envelope and keys defined in `operations.md`; abbreviated):
 
 ```json
 {
   "protocol": 1, "platform": "paper", "game": "minecraft_java", "game_version": "1.21.4",
   "capabilities": {
-    "ops": ["players.list", "player.get", "player.nearby", "positions.subscribe", "action.run", "assets.manifest", "assets.get"],
-    "fields": ["position", "health", "food", "xp", "effects", "attributes", "statistics", "advancements", "groups", "client"],
-    "actions": ["kick", "ban", "unban", "gamemode", "teleport", "give_item", "remove_item_live", "set_item_live", "apply_effect", "time", "weather"],
-    "integrations": ["luckperms"]
-  }
+    "ops": ["players.list", "player.get", "player.inventory", "item.get", "player.nearby", "positions.subscribe", "events.subscribe", "action.run", "assets.manifest", "assets.get"],
+    "player_fields": ["position", "health", "max_health", "game_mode", "food", "experience", "game"],
+    "events": ["join", "leave", "death", "chat", "advancement"],
+    "actions": [{"id": "kick", "label": "kick", "target": true, "destructive": true, "offline": false, "fields": []}],
+    "features": ["positions.stream", "inventory.write", "assets"]
+  },
+  "integrations": ["luckperms"]
 }
 ```
 
@@ -436,11 +431,9 @@ Proxy-native actions: `kick`, `send_server`, `message`, `title`, `actionbar`, `w
   "name": "Notch",
   "game": {
     "offline_uuid": false,
-    "game_mode": "survival",
-    "food": 18, "saturation": 4.2, "exhaustion": 0.8, "absorption": 0.0,
-    "air": 300, "max_air": 300, "fire_ticks": -20,
-    "xp_level": 12, "xp_progress": 0.43, "xp_total": 242,
-    "effects": [{ "id": "minecraft:speed", "amplifier": 1, "duration": 1200, "ambient": false, "particles": true }],
+    "exhaustion": 0.8, "absorption": 0.0,
+    "air_ticks": 300, "max_air_ticks": 300, "fire_ticks": -20,
+    "effects": [{ "id": "minecraft:speed", "amplifier": 1, "duration_ticks": 1200, "ambient": false, "particles": true }],
     "flying": false, "sneaking": false, "sprinting": true, "sleeping": false, "op": true,
     "groups": ["admin", "default"], "primary_group": "admin", "permission_provider": "luckperms",
     "spawn": { "position": [10, 64, -3], "world": "world", "dimension": "minecraft:overworld", "forced": false },
@@ -454,12 +447,12 @@ Proxy-native actions: `kick`, `send_server`, `message`, `title`, `actionbar`, `w
 Proxy player row:
 
 ```json
-{ "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "name": "Notch", "ping": 41, "protocol": 769, "server": "survival", "client": { "brand": "vanilla", "locale": "en_us" } }
+{ "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "name": "Notch", "online": true, "ping": 41, "server": "survival", "groups": [], "client": { "brand": "vanilla", "locale": "en_us", "protocol": 769 } }
 ```
 
 Action request (`action.run`):
 
 ```json
 { "id": 9, "op": "action.run", "args": { "action": "set_item_live", "target": "069a79f4-44e9-4726-a5be-fca90e38aaf5",
-  "args": { "container": "inventory", "slot": "4", "expected_id": "minecraft:air", "item": { "id": "minecraft:diamond", "count": 3 } } } }
+  "args": { "container": "inventory", "slot": 4, "expected_id": "minecraft:air", "item": { "id": "minecraft:diamond", "count": 3 } } } }
 ```
