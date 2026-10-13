@@ -1,0 +1,11 @@
+{
+  "required": false,
+  "package": "dev.playermanager.bridge.mod.mc.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "LevelChunkMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

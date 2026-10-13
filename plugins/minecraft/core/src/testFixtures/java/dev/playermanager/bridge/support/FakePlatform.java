@@ -23,6 +23,8 @@ public class FakePlatform implements Platform {
     private final PlatformInfo info;
     private final ActionRegistry registry = new ActionRegistry();
     public volatile String lastThread;
+    public final FakeChunks chunks = new FakeChunks(main);
+    public volatile boolean chunksEnabled = true;
 
     public FakePlatform(Path root) {
         info = PlatformInfo.builder("paper", root).platformVersion("1.21.4-test").gameVersion("1.21.4").bridgeVersion("1.0.0")
@@ -30,6 +32,10 @@ public class FakePlatform implements Platform {
                 .events("join", "leave", "death", "chat", "command", "advancement", "damage", "kick", "ban")
                 .features("offline_players", "sensitive", "inventory.write")
                 .integrations(Arrays.asList("luckperms")).build();
+        // Alice stands in chunk (0, -6): grass over stone, a pond and a plain-air column corner for the surface rules
+        FakeColumns land = new FakeColumns().fill(-64, 62, "minecraft:stone").fill(63, 63, "minecraft:dirt").fill(64, 64, "minecraft:grass_block");
+        land.fill(3, 3, 64, 64, "minecraft:water").fill(3, 3, 62, 63, "minecraft:sand");
+        chunks.load(chunks.overworld, 0, -6, land);
         positions.add(new PositionSample(ALICE, "Alice", "world", "minecraft:overworld", 12.5, 64, -80.25, 90f, 10f, "alive"));
         registry.register(ActionSpec.of("kick", true, true, Field.text("reason", "Reason")), req -> main("kick " + req.target + " " + req.args.get("reason")));
         registry.register(ActionSpec.of("gamemode", true, false, Field.select("mode", "Mode", "survival", "creative", "adventure", "spectator").required()),
@@ -185,6 +191,8 @@ public class FakePlatform implements Platform {
     @Override public PositionSource positions() { return () -> supply(() -> new ArrayList<>(positions)); }
 
     @Override public PackSourceProvider assets() { return () -> packs; }
+
+    @Override public ChunkSource chunks() { return chunksEnabled ? chunks : null; }
 
     @Override public ActionRegistry actions() { return registry; }
 }

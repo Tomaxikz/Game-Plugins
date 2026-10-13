@@ -3,6 +3,7 @@ package dev.playermanager.bridge.mod.mc;
 import dev.playermanager.bridge.BridgeCore;
 import dev.playermanager.bridge.spi.ActionRegistry;
 import dev.playermanager.bridge.spi.BridgeLog;
+import dev.playermanager.bridge.spi.ChunkSource;
 import dev.playermanager.bridge.spi.InventoryProvider;
 import dev.playermanager.bridge.spi.NearbyProvider;
 import dev.playermanager.bridge.spi.PackSourceProvider;
@@ -81,6 +82,10 @@ public final class McBridge {
             if (c != null) c.stop();
         } catch (Throwable ignored) { }
         try {
+            McChunks mc = McChunks.active;
+            if (mc != null) mc.detach();
+        } catch (Throwable ignored) { }
+        try {
             ctx.shutdown();
         } catch (Throwable ignored) { }
     }
@@ -109,6 +114,7 @@ public final class McBridge {
         private final McServerInfo serverInfo;
         private final McPacks packs;
         private final McActionSet actions;
+        private final McChunks chunks;
 
         ModPlatform(Ctx ctx, PlatformInfo info, McEvents events) {
             this.ctx = ctx;
@@ -120,6 +126,7 @@ public final class McBridge {
             this.serverInfo = new McServerInfo(ctx);
             this.packs = new McPacks(ctx);
             this.actions = new McActionSet(ctx, events);
+            this.chunks = new McChunks(ctx);
         }
 
         public PlatformInfo info() { return info; }
@@ -132,5 +139,6 @@ public final class McBridge {
         @Override public PositionSource positions() { return positions; }
         @Override public PackSourceProvider assets() { return packs; }
         @Override public ActionRegistry actions() { return actions.registry(); }
+        @Override public ChunkSource chunks() { return chunks; }
     }
 }

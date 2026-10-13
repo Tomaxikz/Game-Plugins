@@ -23,6 +23,7 @@ export class Subscription {
     this.op = op;
     this.nextSeq = 0;
     this.frames = []; // all frames received, in order
+    this.times = []; // Date.now() at receipt, parallel to frames
     this.gaps = []; // {expected, got} seq discontinuities
     this.unread = [];
     this.waiters = [];
@@ -34,6 +35,7 @@ export class Subscription {
     if (seq !== this.nextSeq) this.gaps.push({ expected: this.nextSeq, got: msg.seq });
     this.nextSeq = (typeof seq === 'number' ? seq : this.nextSeq) + 1;
     this.frames.push(msg);
+    this.times.push(Date.now());
     this.unread.push(msg);
     const w = this.waiters.shift();
     if (w) w.resolve(this.unread.shift());

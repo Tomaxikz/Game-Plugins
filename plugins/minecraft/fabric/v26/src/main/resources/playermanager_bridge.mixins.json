@@ -9,7 +9,8 @@
     "CommandsMixin",
     "PlayerAdvancementsMixin",
     "CommonPacketListenerMixin",
-    "ConfigurationPacketListenerMixin"
+    "ConfigurationPacketListenerMixin",
+    "LevelChunkLoadMixin"
   ],
   "injectors": {
     "defaultRequire": 0

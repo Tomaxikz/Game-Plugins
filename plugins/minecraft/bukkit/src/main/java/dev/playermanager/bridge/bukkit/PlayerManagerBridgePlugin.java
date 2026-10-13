@@ -68,6 +68,11 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
                     .javaMajor(Versions.javaMajor())
                     .build();
             BukkitPlatform platform = new BukkitPlatform(ctx, info, events);
+            try {
+                Bukkit.getPluginManager().registerEvents(new BukkitChunkEvents(platform.chunks), this);
+            } catch (Throwable t) {
+                log.warn("chunk surface events unavailable: " + t);
+            }
             final BridgeCore c = new BridgeCore(platform);
             core = c;
             events.attach(c);

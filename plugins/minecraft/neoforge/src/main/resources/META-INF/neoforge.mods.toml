@@ -22,3 +22,6 @@ Exposes live player data to the Calagopus Player Manager panel over a local sock
     versionRange="${mcRange}"
     ordering="NONE"
     side="SERVER"
+
+[[mixins]]
+config="playermanager_bridge_chunks.mixins.json"

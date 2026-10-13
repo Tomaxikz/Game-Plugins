@@ -5,7 +5,7 @@ import { Check, fail, Skip } from '../lib/check.mjs';
 import { KNOWN_OPS, NEVER_OPS, EVENT_TYPES, fakePlayerId } from '../lib/protocol.mjs';
 import { anyErr, errCode, describeResp } from './helpers.mjs';
 
-const SUBSCRIBE_OPS = ['positions.subscribe', 'events.subscribe'];
+const SUBSCRIBE_OPS = ['positions.subscribe', 'events.subscribe', 'chunks.subscribe'];
 
 /** Minimal probe requests for advertised ops. Each uses a fresh connection where subscriptions are involved. */
 function probeFor(op, ctx) {
@@ -30,6 +30,10 @@ function probeFor(op, ctx) {
       return { args: { sub: 999999 } };
     case 'events.unsubscribe':
       return { args: { sub: 999999 } };
+    case 'chunks.unsubscribe':
+      return { args: { sub: 999999 } };
+    case 'map.chunks':
+      return { args: { world: 'pm_conformance_no_such_world', chunks: [[0, 0]] } };
     case 'assets.manifest':
       return { args: { limit: 1 } };
     case 'assets.get':
@@ -52,11 +56,11 @@ export const tests = [
         if (op === 'hello' || op === 'action.run') continue; // action.run is tested in actions
         if (SUBSCRIBE_OPS.includes(op)) {
           const { client } = await ctx.open({ hello: true });
-          const args = op === 'positions.subscribe' ? { interval_ms: 1000 } : { types: [ctx.caps.events[0] ?? 'chat'] };
+          const args = op === 'positions.subscribe' ? { interval_ms: 1000 } : op === 'chunks.subscribe' ? { world: 'pm_conformance_no_such_world' } : { types: [ctx.caps.events[0] ?? 'chat'] };
           const { resp, sub } = await client.subscribe(op, args);
           if (resp.ok === false && resp.error?.code === 'unsupported') problems.push(`${op}: unsupported`);
           else if (resp.ok === true && sub) {
-            await client.request(op === 'positions.subscribe' ? 'positions.unsubscribe' : 'events.unsubscribe', { sub: sub.sub });
+            await client.request(op.replace('.subscribe', '.unsubscribe'), { sub: sub.sub });
           }
           checked.push(op);
           continue;

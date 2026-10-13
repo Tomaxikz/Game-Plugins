@@ -11,6 +11,7 @@ import dev.playermanager.bridge.proto.Capabilities;
 import dev.playermanager.bridge.proto.Ops;
 import dev.playermanager.bridge.spi.BridgeLog;
 import dev.playermanager.bridge.spi.Platform;
+import dev.playermanager.bridge.sub.ChunkService;
 import dev.playermanager.bridge.sub.CommandRedactor;
 import dev.playermanager.bridge.sub.EventBus;
 import dev.playermanager.bridge.sub.PositionService;
@@ -59,6 +60,7 @@ public final class BridgeCore {
     private EventBus events;
     private PositionService positions;
     private AssetService assets;
+    private ChunkService chunks;
     private Ops ops;
     private final Set<Connection> connections = java.util.Collections.newSetFromMap(new ConcurrentHashMap<Connection, Boolean>());
 
@@ -78,6 +80,7 @@ public final class BridgeCore {
     public EventBus events() { return events; }
     public PositionService positions() { return positions; }
     public AssetService assets() { return assets; }
+    public ChunkService chunks() { return chunks; }
     public Ops ops() { return ops; }
     public ExecutorService pool() { return pool; }
     public ScheduledExecutorService timer() { return timer; }
@@ -103,6 +106,7 @@ public final class BridgeCore {
             if (platform.positions() != null) {
                 positions = new PositionService(platform.positions(), timer, pool, log, subIds, config.positionsMinIntervalMs);
             }
+            if (platform.chunks() != null) chunks = new ChunkService(platform.chunks(), timer, pool, log, subIds);
             if (platform.assets() != null) assets = new AssetService(platform.assets(), files.cache, log, assetPool);
             ops = new Ops(this);
             if (!bind()) { stop(); return false; }
@@ -200,6 +204,7 @@ public final class BridgeCore {
         try { if (transport != null) transport.close(); } catch (Throwable ignored) { }
         for (Connection c : connections) c.close();
         connections.clear();
+        if (chunks != null) chunks.stop();
         if (pool != null) pool.shutdownNow();
         if (timer != null) timer.shutdownNow();
         if (assetPool != null) assetPool.shutdownNow();

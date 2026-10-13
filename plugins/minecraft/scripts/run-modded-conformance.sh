@@ -15,7 +15,11 @@
 #   conformance/bin/pm-conformance.mjs --profile minecraft-mod --allow-actions, stops the server.
 # Environment:
 #   PM_JAR=<path>        use this bridge jar (default: the jar in build/release whose name range covers <mc-version>; built with gradle if absent)
-#   PM_BOT=1             join an offline-mode mineflayer bot (npm-installed under $PM_WORK/bot) so player-scoped tests have a player
+#   PM_BOT=0|1           join an offline-mode mineflayer bot (npm-installed under $PM_WORK/bot) so player-scoped tests have a player (default 1;
+#                        the bot is what makes chunks.subscribe.frames and the other player-scoped tests run)
+#   PM_LEVEL_TYPE=<t>    world type: minecraft:flat (default) or minecraft:normal (water, caves, kelp for the map.chunks surfaces)
+#   PM_LEVEL_SEED=<s>    world seed for a normal world (default 1234)
+#   PM_CHUNKS_VERIFY=true  bridge debug aid: log a surface cross-check of every snapshot against a full scan of the live chunk
 #   PM_BOT_VERSION=<v>   mineflayer data version the bot uses (default: <mc-version>, else the newest mineflayer knows, translated by ViaProxy)
 #   PM_LOADER_VERSION=<v> force the NeoForge / Forge version (default: newest stable for <mc-version>)
 #   PM_JAVA_HOME=<dir>   JDK to run the server with (default: picked by Minecraft version)
@@ -30,6 +34,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MC_DIR="$(cd "$HERE/.." && pwd)"
 REPO="$(cd "$MC_DIR/../.." && pwd)"
 WORK="${PM_WORK:-/tmp/claude-1000/pm-bridge-work/B}"
+PM_BOT="${PM_BOT:-1}"
 
 LOADER="${1:-}"
 MC_VERSION="${2:-}"
@@ -174,6 +179,7 @@ mkdir -p "$DIR/.playermanager"
 echo '{"platform":{"asset_paths":["pm-test-pack"]}}' > "$DIR/.playermanager/config.json"
 
 printf 'eula=true\n' > "$DIR/eula.txt"
+PM_LEVEL_TYPE="${PM_LEVEL_TYPE:-minecraft:flat}"
 PORT="$(node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})')"
 cat > "$DIR/server.properties" <<PROPS
 online-mode=false
@@ -185,7 +191,8 @@ view-distance=4
 simulation-distance=4
 spawn-protection=0
 generate-structures=false
-level-type=minecraft\:flat
+level-type=${PM_LEVEL_TYPE//:/\\:}
+level-seed=${PM_LEVEL_SEED:-1234}
 enable-rcon=false
 white-list=false
 enable-query=false

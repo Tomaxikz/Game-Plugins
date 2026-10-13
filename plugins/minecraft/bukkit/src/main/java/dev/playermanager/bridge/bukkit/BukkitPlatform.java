@@ -2,6 +2,7 @@ package dev.playermanager.bridge.bukkit;
 
 import dev.playermanager.bridge.spi.ActionRegistry;
 import dev.playermanager.bridge.spi.BridgeLog;
+import dev.playermanager.bridge.spi.ChunkSource;
 import dev.playermanager.bridge.spi.InventoryProvider;
 import dev.playermanager.bridge.spi.NearbyProvider;
 import dev.playermanager.bridge.spi.PackSourceProvider;
@@ -23,6 +24,7 @@ final class BukkitPlatform implements Platform {
     private final BukkitServerInfo server;
     private final PackLocator packs;
     private final BukkitActions actions;
+    final BukkitChunks chunks;
 
     BukkitPlatform(Ctx ctx, PlatformInfo info, BukkitEvents events) {
         this.ctx = ctx;
@@ -34,6 +36,7 @@ final class BukkitPlatform implements Platform {
         this.server = new BukkitServerInfo(ctx);
         this.packs = new PackLocator(ctx);
         this.actions = new BukkitActions(ctx, events);
+        this.chunks = new BukkitChunks(ctx);
     }
 
     public PlatformInfo info() { return info; }
@@ -45,5 +48,6 @@ final class BukkitPlatform implements Platform {
     @Override public NearbyProvider nearby() { return nearby; }
     @Override public PositionSource positions() { return positions; }
     @Override public PackSourceProvider assets() { return packs; }
+    @Override public ChunkSource chunks() { return chunks; }
     @Override public ActionRegistry actions() { return actions.registry(); }
 }

@@ -25,13 +25,18 @@
     "events.unsubscribe",
     "action.run",
     "assets.manifest",
-    "assets.get"
+    "assets.get",
+    "map.chunks",
+    "chunks.subscribe",
+    "chunks.unsubscribe"
   ],
   "forbidden_ops": [],
   "required_features": [
     "positions.stream",
     "inventory.write",
-    "sensitive"
+    "sensitive",
+    "map.chunks",
+    "chunks.stream"
   ],
   "forbidden_features": [
     "proxy"

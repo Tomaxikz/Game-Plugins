@@ -435,4 +435,38 @@ final class Mc {
     }
 
     static String damageCause(net.minecraft.world.damagesource.DamageSource src) { return src.type().msgId(); }
+
+    // ------------------------------------------------------------------ map chunks
+
+    private static final java.util.concurrent.ConcurrentHashMap<net.minecraft.world.level.block.Block, String> BLOCK_IDS =
+            new java.util.concurrent.ConcurrentHashMap<net.minecraft.world.level.block.Block, String>();
+    private static final java.util.concurrent.ConcurrentHashMap<Holder<net.minecraft.world.level.biome.Biome>, String> BIOME_IDS =
+            new java.util.concurrent.ConcurrentHashMap<Holder<net.minecraft.world.level.biome.Biome>, String>();
+
+    /** Namespaced block id without state properties; cached per block, safe from any thread. */
+    static String blockId(net.minecraft.world.level.block.Block b) {
+        String id = BLOCK_IDS.get(b);
+        if (id == null) {
+            id = BuiltInRegistries.BLOCK.getKey(b).toString();
+            BLOCK_IDS.put(b, id);
+        }
+        return id;
+    }
+
+    /** Registry id of a biome holder (plains for an unregistered direct holder); cached, safe from any thread. */
+    static String biomeId(Holder<net.minecraft.world.level.biome.Biome> h) {
+        String id = BIOME_IDS.get(h);
+        if (id == null) {
+            id = h.unwrapKey().map(k -> k.identifier().toString()).orElse("minecraft:plains");
+            BIOME_IDS.put(h, id);
+        }
+        return id;
+    }
+
+    static int chunkX(net.minecraft.world.level.chunk.ChunkAccess c) { return c.getPos().x(); }
+
+    static int chunkZ(net.minecraft.world.level.chunk.ChunkAccess c) { return c.getPos().z(); }
+
+    /** Only an already loaded (FULL) chunk, never loads or generates. Server thread only. */
+    static net.minecraft.world.level.chunk.LevelChunk loadedChunk(ServerLevel l, int cx, int cz) { return l.getChunkSource().getChunkNow(cx, cz); }
 }

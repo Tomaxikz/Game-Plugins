@@ -32,7 +32,7 @@ tasks.withType<JavaCompile>().configureEach {
 
 sourceSets.main {
     java.srcDirs("../../common/src/mc/java", "../../common/src/mc-26/java", "../src/main/java")
-    resources.srcDirs("../src/main/resources", layout.buildDirectory.dir("generated/pm-version"))
+    resources.srcDirs("../src/main/resources", "../../common/src/mc-26/resources", layout.buildDirectory.dir("generated/pm-version"))
 }
 
 tasks.processResources {

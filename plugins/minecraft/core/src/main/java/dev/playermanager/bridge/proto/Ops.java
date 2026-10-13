@@ -15,6 +15,7 @@ import dev.playermanager.bridge.spi.Field;
 import dev.playermanager.bridge.spi.NearbyProvider;
 import dev.playermanager.bridge.spi.Platform;
 import dev.playermanager.bridge.spi.PlatformInfo;
+import dev.playermanager.bridge.sub.ChunkSubscription;
 import dev.playermanager.bridge.sub.EventSubscription;
 import dev.playermanager.bridge.sub.PositionSubscription;
 import dev.playermanager.bridge.sub.Subscription;
@@ -49,6 +50,7 @@ public final class Ops {
             if ("save".equals(a) || "reload".equals(a) || "wipe_data".equals(a)) return 10000;
             return 5000;
         }
+        if (op.equals("map.chunks")) return 5000;
         if (op.startsWith("assets.")) return 10000;
         return 2000;
     }
@@ -70,6 +72,9 @@ public final class Ops {
             case "positions.unsubscribe": return unsubscribe(c, args, "positions");
             case "events.subscribe": return eventsSubscribe(c, args);
             case "events.unsubscribe": return unsubscribe(c, args, "events");
+            case "map.chunks": return mapChunks(args, d);
+            case "chunks.subscribe": return chunksSubscribe(c, args);
+            case "chunks.unsubscribe": return unsubscribe(c, args, "chunks");
             case "action.run": return actionRun(args, d);
             case "assets.manifest": return assetsManifest(args);
             case "assets.get": return assetsGet(args);
@@ -296,6 +301,67 @@ public final class Ops {
         if (c.eventsSub != null) throw BridgeException.busy("this connection already has an events subscription");
         EventSubscription s = core.events().subscribe(c, set);
         c.eventsSub = s;
+        c.register(s);
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("sub", s.id);
+        return new Reply(m, s);
+    }
+
+    // ------------------------------------------------------------------ chunk surfaces
+
+    private static final long MAX_CHUNK_COORD = 1L << 26;
+
+    private static int chunkCoord(String k, Object v) {
+        if (!(v instanceof Number) || v instanceof Double || v instanceof Float) throw BridgeException.invalid("'" + k + "' must contain integers");
+        long l = ((Number) v).longValue();
+        if (l < -MAX_CHUNK_COORD || l > MAX_CHUNK_COORD) throw BridgeException.invalid("'" + k + "' chunk coordinate out of range");
+        return (int) l;
+    }
+
+    private Object mapChunks(Args a, Deadline d) {
+        String world = Args.safeText("world", a.str("world"), 256);
+        String dimension = a.has("dimension") ? Args.safeText("dimension", a.str("dimension"), 128) : null;
+        Object raw = a.raw().get("chunks");
+        if (!(raw instanceof List)) throw BridgeException.invalid("'chunks' must be an array of [cx, cz]");
+        List<?> list = (List<?>) raw;
+        if (list.size() > dev.playermanager.bridge.sub.ChunkService.MAX_REQUEST_CHUNKS) throw BridgeException.invalid("at most 256 chunks per request");
+        List<int[]> coords = new ArrayList<int[]>();
+        Set<Long> seen = new HashSet<Long>();
+        for (Object o : list) {
+            if (!(o instanceof List) || ((List<?>) o).size() != 2) throw BridgeException.invalid("'chunks' must be an array of [cx, cz]");
+            int cx = chunkCoord("chunks", ((List<?>) o).get(0));
+            int cz = chunkCoord("chunks", ((List<?>) o).get(1));
+            if (seen.add(((long) cx << 32) | (cz & 0xffffffffL))) coords.add(new int[] {cx, cz});
+        }
+        int cursor = 0;
+        String cur = a.str("cursor", null);
+        if (cur != null) {
+            try { cursor = Integer.parseInt(cur); } catch (NumberFormatException e) { throw BridgeException.invalid("bad cursor"); }
+            if (cursor < 0 || cursor > coords.size()) throw BridgeException.invalid("bad cursor");
+        }
+        return core.chunks().request(world, dimension, coords, cursor, d);
+    }
+
+    private Object chunksSubscribe(Connection c, Args a) {
+        String world = Args.safeText("world", a.str("world"), 256);
+        String dimension = a.has("dimension") ? Args.safeText("dimension", a.str("dimension"), 128) : null;
+        int[] area = null;
+        Map<String, Object> am = a.map("area");
+        if (am != null) {
+            Args aa = new Args(am);
+            long[] v = new long[4];
+            String[] keys = {"min_cx", "min_cz", "max_cx", "max_cz"};
+            for (int i = 0; i < 4; i++) {
+                v[i] = aa.integer(keys[i]);
+                if (v[i] < -MAX_CHUNK_COORD || v[i] > MAX_CHUNK_COORD) throw BridgeException.invalid("'area." + keys[i] + "' out of range");
+            }
+            if (v[0] > v[2] || v[1] > v[3]) throw BridgeException.invalid("'area' min must not exceed max");
+            area = new int[] {(int) v[0], (int) v[1], (int) v[2], (int) v[3]};
+        }
+        dev.playermanager.bridge.spi.ChunkWorld cw = core.chunks().source().resolve(world, dimension);
+        if (c.chunksSub != null) throw BridgeException.busy("this connection already has a chunks subscription");
+        ChunkSubscription s = core.chunks().subscribe(c, cw, area);
+        c.chunksSub = s;
         c.register(s);
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("sub", s.id);

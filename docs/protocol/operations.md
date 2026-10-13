@@ -18,7 +18,9 @@ Notation: `req` = required, `opt` = optional (omit the key to use the default). 
 | `positions.subscribe` | subscription | 2 s (to ack) | T1, T4 |
 | `positions.keyframe` | request | 2 s | T4 |
 | `events.subscribe` | subscription | 2 s (to ack) | T5 |
-| `positions.unsubscribe`, `events.unsubscribe` | request | 2 s | none |
+| `map.chunks` | request | 5 s | T1, T3, T7 |
+| `chunks.subscribe` | subscription | 2 s (to ack) | T7 |
+| `positions.unsubscribe`, `events.unsubscribe`, `chunks.unsubscribe` | request | 2 s | none |
 | `action.run` | request | 5 s (10 s for `save`, `reload`, `wipe_data`) | T1, T6 |
 | `assets.manifest`, `assets.get` | request | see `items-and-assets.md` | see `items-and-assets.md` |
 
@@ -32,6 +34,8 @@ Notation: `req` = required, `opt` = optional (omit the key to use the default). 
 | T4 | Position sampling runs on the game thread at most once per `interval_ms`, one task for all subscribers (not one per subscription). The bridge keeps the last sent state per subscription for delta computation. |
 | T5 | Event listeners run on the game thread and only enqueue a small immutable record to the writer; they must never block on the socket. Queue cap per subscription is 1024 frames; on overflow drop oldest and emit one `{"type":"overflow","dropped":N}` event. |
 | T6 | Actions run on the game thread (or the owning region thread). Never run blocking I/O (disk, network) there; `save`/`reload` may be dispatched via the platform's command dispatcher. |
+
+- **T7 (chunk surfaces):** take an immutable snapshot of each chunk on the owning thread (Bukkit `ChunkSnapshot`, Folia region thread, loader `server.execute`), compute surfaces off-thread. Never load or generate a chunk for the panel: only chunks the game already has loaded are read. Budget ≤ 2 ms game-thread time per tick for snapshots; spread larger requests over several ticks.
 
 ## 1. `hello`
 
@@ -88,6 +92,8 @@ Must be the first request on every connection. In TCP fallback mode a missing/wr
 | `sensitive` | `include_sensitive` is honoured (IPs) |
 | `assets` | `assets.manifest`/`assets.get` available |
 | `proxy` | Bridge is on a proxy; `players.list[].server` is populated, world data absent |
+| `map.chunks` | `map.chunks` works (surface of loaded chunks on request) |
+| `chunks.stream` | `chunks.subscribe` works (live surface updates) |
 
 ```json
 {
@@ -325,6 +331,49 @@ Errors: `not_found` (unknown player, container or empty slot), `offline` (platfo
 { "id": 8, "ok": true, "data": { "item": { "id": "minecraft:shulker_box", "count": 1, "contents": [ ], "hash": "9c8b7a6f5e4d3c2b", "fingerprint": "…" } } }
 ```
 
+## 6b. `map.chunks`
+
+Surfaces of **already loaded** chunks, so the panel's map can draw terrain that is newer than the saved region files. The panel keeps rendering region files for everything else.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | Game-doc world id |
+| `dimension` | string | opt | Game-doc dimension id (Minecraft: required when the world folder holds several dimensions) |
+| `chunks` | `[[cx, cz], …]` | req | Chunk coordinates, max **256** per request |
+
+**Response `data`**: `{ "chunks": [ ChunkSurface ], "missing": [[cx, cz], …] }` — `missing` lists requested chunks that are not loaded (the panel uses region files for them). Large responses are split per §2 of README (`more`/`cursor` as in `items-and-assets.md`); the panel requests at most 256 chunks at once, which fits in one 4 MiB frame.
+
+**ChunkSurface** — one column per block column, row-major `index = z * 16 + x` (local coordinates 0–15):
+
+| Key | Type | Notes |
+|---|---|---|
+| `cx`, `cz` | int | Chunk coordinates (block x = `cx * 16 + x`) |
+| `world`, `dimension` | string | As requested |
+| `palette` | string[] | Block ids used by `top` and `floor` (Minecraft: namespaced, e.g. `minecraft:grass_block`) |
+| `biomes` | string[] | Biome ids used by `biome` (Minecraft: `minecraft:plains`) |
+| `top` | bin, 256 × u16 LE | Index into `palette` of the highest non-air block (the visible surface; water counts as a block) |
+| `y` | bin, 256 × i16 LE | Y of that block |
+| `water_depth` | bin, 256 × u8 | Number of water blocks from the surface down to the floor; `0` = no water. Capped at 255 |
+| `floor` | bin, 256 × u16 LE | Index into `palette` of the first non-water block under water; `0xFFFF` when `water_depth` is 0 |
+| `biome` | bin, 256 × u16 LE | Index into `biomes` of the biome at the surface |
+| `hash` | string | First 16 hex of SHA-256 over the five arrays + palettes; the panel skips redraws when unchanged |
+| `void` | bool | opt; `true` when the chunk has no blocks at all (`top`/`y`/… then omitted) |
+
+"Air", "water" and the surface rules are defined exactly in the game doc (Minecraft: `games/minecraft.md` §6a) so live chunks render identically to the panel's region-file tiles. Errors: `not_found` (unknown world/dimension), `invalid_args` (> 256 chunks), `unsupported`, `timeout`.
+
+```json
+{ "id": 7, "ok": true, "data": {
+  "chunks": [{ "cx": 0, "cz": -1, "world": "world", "dimension": "minecraft:overworld",
+    "palette": ["minecraft:grass_block", "minecraft:water", "minecraft:sand"],
+    "biomes": ["minecraft:plains", "minecraft:river"],
+    "top": "<bin 512 B>", "y": "<bin 512 B>", "water_depth": "<bin 256 B>",
+    "floor": "<bin 512 B>", "biome": "<bin 512 B>", "hash": "3f1c0d9a77b2e410" }],
+  "missing": [[1, -1]]
+} }
+```
+
 ## 7. Subscriptions
 
 Common: the response to a `*.subscribe` is `{"id":N,"ok":true,"data":{"sub":S}}`; frames then arrive as `{"sub":S,"seq":n,"data":{...}}` with `seq` starting at 0 and +1 per frame. A connection may hold at most one positions and one events subscription (a second → `busy`). **Keep-alive (defined here, once):** when no frame has been sent on a subscription for 60 s, the bridge sends the `ping` frame `{"sub":S,"seq":n,"data":{"type":"ping"}}` on it, on both positions and events subscriptions. It consumes a `seq`, has no other keys, is never listed in `types` (it is always sent) and resets the 120 s idle timer. Any other frame also resets the 60 s timer, so a busy subscription needs no pings. Panels ignore `ping` frames apart from the `seq` check. Unsubscribing: `positions.unsubscribe` / `events.unsubscribe` with `{sub}` → `{}`; unknown `sub` → `not_found`. Closing the connection drops all subscriptions.
@@ -404,9 +453,35 @@ Rules: a keyframe is sent at subscribe, every 10 s, and on `positions.keyframe`.
 
 `time` = event `time`; `clock` = `HH:MM:SS` of `time` in the server's clock (or omitted → panel computes with `clock_offset_minutes`).
 
+### 7.3 `chunks.subscribe`
+
+Live terrain changes for the map.
+
+| Arg | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | |
+| `dimension` | string | opt | As in `map.chunks` |
+| `area` | `{min_cx, min_cz, max_cx, max_cz}` | opt | Only chunks inside (inclusive); default: every loaded chunk. The panel sends the visible map area and re-subscribes when the view moves far |
+
+Response `{sub}`. **Frame `data`**: `{ "chunks": [ ChunkSurface ] }` (same record as §6b) for chunks whose surface changed.
+
+Rules:
+- A chunk is sent when it is **loaded for the first time** after subscribing (newly generated or loaded by a player), and when a block change alters its surface (`top`, `y`, `water_depth`, `floor` or `biome` of any column). Changes below the surface are not reported.
+- **Coalescing:** at most one frame per chunk per **2 s**; batch up to 64 chunks per frame. Under load (e.g. pregeneration, explosions) drop to at most 16 chunks per second per subscription and set `"dropped": n` on the frame; the panel then refreshes from `map.chunks`/region files.
+- Unloading a chunk sends nothing (the panel keeps its last image).
+- No initial dump: the panel calls `map.chunks` for the visible area after subscribing.
+
+```json
+{"sub":5,"seq":3,"data":{"chunks":[{"cx":12,"cz":-4,"world":"world","dimension":"minecraft:overworld",
+  "palette":["minecraft:stone","minecraft:oak_log"],"biomes":["minecraft:forest"],
+  "top":"<bin>","y":"<bin>","water_depth":"<bin>","floor":"<bin>","biome":"<bin>","hash":"9a0e…"}]}}
+```
+
+`chunks.unsubscribe` `{sub}` → `{}` (see §8).
+
 ## 8. `*.unsubscribe`
 
-`positions.unsubscribe` / `events.unsubscribe`: args `{sub: int}` (req) → `{}`. Errors: `not_found`. Idempotent semantics are not required; the panel never unsubscribes twice.
+`positions.unsubscribe` / `events.unsubscribe` / `chunks.unsubscribe`: args `{sub: int}` (req) → `{}`. Errors: `not_found`. Idempotent semantics are not required; the panel never unsubscribes twice.
 
 ## 9. `action.run`
 

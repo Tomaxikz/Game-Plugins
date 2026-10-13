@@ -44,6 +44,7 @@ interface Platform {
   default NearbyProvider nearby();          // player.nearby
   default PositionSource positions();       // positions.subscribe / keyframe / unsubscribe
   default PackSourceProvider assets();      // assets.manifest / assets.get
+  default ChunkSource chunks();             // map.chunks, chunks.subscribe / unsubscribe (section 8a)
   default ActionRegistry actions();         // action.run (empty by default)
 }
 ```
@@ -153,6 +154,26 @@ default-case resolution (`condition` → `on_false`, `select`/`range_dispatch` �
 overrides, parent flattening (including a small built-in cube/`cube_all`/`cube_column`/`cube_bottom_top`/`block/block` family, authored in `BuiltinModels`), `.mcmeta`
 animation, asset hash (§6), manifest paging / `since_hash`, 4 MiB chunking, disk cache under `.playermanager/cache/assets/` keyed by pack fingerprint (mtime+size).
 `minecraft:` ids without pack data → `unavailable` / `vanilla_assets_panel_side`. Return an empty list if no pack exists; `assets.*` stay advertised only when you return a non-null provider.
+
+## 8a. Chunk surfaces (`map.chunks`, `chunks.subscribe`) — stable
+
+`spi.ChunkSource` (null = ops and features `map.chunks` / `chunks.stream` are not advertised):
+
+```java
+void attach(ChunkHub hub);                         // core hands you the hub once
+ChunkWorld resolve(String world, String dimension); // any thread; BridgeException notFound / invalid ("dimension required")
+CompletableFuture<List<LoadedChunk>> snapshot(ChunkWorld w, List<int[]> cxcz, Deadline d); // loaded chunks only, absent = not loaded
+```
+* `ChunkWorld(world, dimension, handle)`: one instance per level (`handle` = your ServerLevel/World; equality by world+dimension).
+* `snapshot` runs on the owning thread(s) within <= 2 ms game-thread time per tick (spread the list over ticks; check `d.expired()`), never loads/generates
+  a chunk, and returns `LoadedChunk(cx, cz, ColumnSource)`. `world.ColumnSource` is an **immutable, thread-safe** view: `minY()`, `maxYExclusive()`,
+  `scanStartY(x,z)` (inclusive upper bound where scanning can start; return `maxYExclusive()-1` if unsure, never lower than the real surface; a heightmap is only
+  a safe hint if it counts every non-air block), `blockId(x,y,z)` (namespaced id, no states), `biomeId(x,y,z)`. Core computes the surface off-thread (`SurfaceComputer`).
+* Dirty tracking: call `hub.dirty(chunkWorld, cx, cz, loaded)` from chunk-load events (`loaded=true`) and block-change hooks (`false`), **only while `hub.active()`**
+  (true iff a `chunks.subscribe` exists; test it first so an idle bridge costs nothing). Cheap, thread-safe, any thread. Core coalesces (>= 2 s per chunk snapshot,
+  one batch in flight), hashes, filters by world/area/last-sent hash, and applies the 250 ms flush / 64 per frame / 16 per second load-mode rules (D23).
+* Tests: `support.FakeChunks` + `support.FakeColumns` (testFixtures) and `FakePlatform.chunks`; `sub.ChunkService` takes a fake clock (`tick(nowMs)`).
+* Bukkit reference: `bukkit/BukkitChunks`, `BukkitChunkEvents`, `SnapshotColumns`.
 
 ## 9. Configuration (`.playermanager/config.json`)
 

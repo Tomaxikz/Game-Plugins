@@ -101,4 +101,22 @@ final class BukkitScheduler implements Scheduler {
         }
         return f;
     }
+
+    /** Folia: region scheduler for a chunk, delayed by {@code delayTicks} (>= 1). Elsewhere: the main thread, delayed likewise. */
+    <T> CompletableFuture<T> forRegionDelayed(World w, int chunkX, int chunkZ, long delayTicks, final Callable<T> task) {
+        final CompletableFuture<T> f = new CompletableFuture<T>();
+        try {
+            final long delay = Math.max(1, delayTicks);
+            if (!folia) {
+                Bukkit.getScheduler().runTaskLater(plugin, new Runnable() { public void run() { BukkitScheduler.run(f, task); } }, delay);
+                return f;
+            }
+            Object rs = Reflect.callStatic("org.bukkit.Bukkit", "getRegionScheduler");
+            Consumer<Object> c = new Consumer<Object>() { public void accept(Object t) { run(f, task); } };
+            if (Reflect.call(rs, "runDelayed", plugin, w, chunkX, chunkZ, c, delay) == null) throw new IllegalStateException("region scheduler unavailable");
+        } catch (Throwable t) {
+            f.completeExceptionally(t);
+        }
+        return f;
+    }
 }

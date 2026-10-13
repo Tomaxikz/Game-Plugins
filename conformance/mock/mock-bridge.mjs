@@ -3,7 +3,7 @@
 // docs/protocol (Minecraft Java, Paper-like, fake data) over a unix socket or TCP+token.
 //
 //   node conformance/mock/mock-bridge.mjs --root <dir> [--tcp [--port N]] [--fast-timers]
-//                                         [--moving] [--break <name>[,<name>...]]
+//                                         [--moving] [--chunk-churn] [--break <name>[,<name>...]]
 //
 // --break switches make the mock deliberately non-conformant so the suite can prove it detects
 // the problem. See BREAKS below. Writes <root>/.playermanager/bridge.json (atomically) once
@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync, renameSync, unlinkSync, existsSync, chmodSync
 import { join, resolve } from 'node:path';
 import { FrameReader, encodeFrame, FrameError } from '../lib/framing.mjs';
 import { decode, num } from '../lib/msgpack.mjs';
+import { buildSurface, surfaceHash, MAX_CHUNKS_FRAME, COOLDOWN_MS } from '../lib/chunks.mjs';
 import { canonicalBytes, hash16, fingerprintOf, renderSubsetOf, assetHash, manifestHash, sha256Hex } from '../lib/canonical.mjs';
 
 // ------------------------------------------------------------------ options
@@ -51,10 +52,17 @@ const BREAKS = {
   'max-connections-4': 'bridge refuses connections beyond 4 (config max_connections below the 8 minimum)',
   'bad-block-data': 'player.nearby blocks.data is one byte short',
   'block-index-oob': 'player.nearby blocks indices exceed the palette',
+  'chunk-bad-length': 'ChunkSurface top is 510 bytes instead of 512',
+  'chunk-wrong-hash': 'ChunkSurface hash is computed without the palette',
+  'chunk-initial-dump': 'chunks.subscribe sends every loaded chunk right after the ack',
+  'chunk-no-coalesce': 'chunks.subscribe sends every chunk a second time 500 ms after the first frame',
+  'chunk-oversize-frame': 'chunks.subscribe frames carry all ready chunks (more than 64), no load mode',
+  'chunk-missing-wrong': 'map.chunks answers unloaded (far) chunks as if they were loaded',
+  'chunk-waterlogged-as-water': 'waterlogged blocks are reported as water (water_depth 1 under a non-water top)',
 };
 
 function parseArgs(argv) {
-  const o = { root: null, tcp: false, port: 0, fast: false, moving: false, breaks: new Set() };
+  const o = { root: null, tcp: false, port: 0, fast: false, moving: false, churn: false, breaks: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--root') o.root = argv[++i];
@@ -62,6 +70,7 @@ function parseArgs(argv) {
     else if (a === '--port') o.port = Number(argv[++i]);
     else if (a === '--fast-timers') o.fast = true;
     else if (a === '--moving') o.moving = true;
+    else if (a === '--chunk-churn') o.churn = true;
     else if (a === '--break') for (const b of argv[++i].split(',')) o.breaks.add(b.trim());
     else if (a === '--list-breaks') {
       for (const [k, v] of Object.entries(BREAKS)) console.log(`${k}\t${v}`);
@@ -213,8 +222,8 @@ if (BRK.has('teleport-player-advertised')) {
   ACTIONS.push({ id: 'teleport_player', label: 'teleport player', target: true, destructive: false, offline: false, fields: [{ key: 'destination', label: 'Destination', kind: 'target', choices: [], min: null, max: null }] });
 }
 
-const OPS = ['hello', 'server.info', 'players.list', 'player.get', 'player.inventory', 'player.nearby', 'item.get', 'positions.subscribe', 'positions.keyframe', 'positions.unsubscribe', 'events.subscribe', 'events.unsubscribe', 'action.run', 'assets.manifest', 'assets.get'];
-const FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets'];
+const OPS = ['hello', 'server.info', 'players.list', 'player.get', 'player.inventory', 'player.nearby', 'item.get', 'positions.subscribe', 'positions.keyframe', 'positions.unsubscribe', 'events.subscribe', 'events.unsubscribe', 'action.run', 'assets.manifest', 'assets.get', 'map.chunks', 'chunks.subscribe', 'chunks.unsubscribe'];
+const FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets', 'map.chunks', 'chunks.stream'];
 const EVENTS = ['join', 'leave', 'death', 'chat', 'command', 'advancement', 'damage', 'kick', 'ban'];
 const PLAYER_FIELDS = ['position', 'health', 'max_health', 'armor', 'held_item', 'vehicle', 'game_mode', 'experience', 'food', 'game'];
 
@@ -345,6 +354,111 @@ function slotKey(raw, container) {
   return null;
 }
 
+
+// ------------------------------------------------------------------ fake chunk terrain
+
+const CHUNK_WORLD = 'world';
+const CHUNK_DIMS = ['minecraft:overworld', 'minecraft:the_nether'];
+const LOAD_RADIUS = 4; // chunks loaded around each online player
+const loaded = new Set(); // `${dim}|${cx},${cz}`
+const chunkMods = new Map(); // key -> change counter (the churn hook)
+const chunkListeners = new Set(); // (dim, cx, cz) => void
+
+const ckey = (dim, cx, cz) => `${dim}|${cx},${cz}`;
+const mod = (n, m) => ((n % m) + m) % m;
+
+function fakeColumns(dim, cx, cz) {
+  const cols = [];
+  const kind = dim === 'minecraft:overworld' ? mod(cx + cz, 7) : -1;
+  const rev = chunkMods.get(ckey(dim, cx, cz)) ?? 0;
+  const wl = BRK.has('chunk-waterlogged-as-water');
+  for (let z = 0; z < 16; z++) {
+    for (let x = 0; x < 16; x++) {
+      let c;
+      if (kind === -1) c = { top: 'minecraft:bedrock', y: 127, depth: 0, floor: null, biome: 'minecraft:nether_wastes' };
+      else if (kind === 0) c = { top: 'minecraft:air', y: -64, depth: 0, floor: null, biome: 'minecraft:plains' };
+      else if (kind === 1) {
+        c = { top: 'minecraft:grass_block', y: 64 + ((x + z) % 3), depth: 0, floor: null, biome: 'minecraft:plains' };
+        if (x === 3 && z === 5) c = { top: 'minecraft:air', y: -64, depth: 0, floor: null, biome: 'minecraft:plains' };
+      } else if (kind === 2) {
+        if (x === 15 && z === 15) c = { top: 'minecraft:water', y: 62, depth: 127, floor: null, biome: 'minecraft:river' };
+        else if (x === 8 && z === 0) c = { top: 'minecraft:kelp', y: 62, depth: 3, floor: 'minecraft:sand', biome: 'minecraft:river' };
+        else if (x < 8) c = { top: 'minecraft:water', y: 62, depth: 1 + (x % 4), floor: z % 2 === 0 ? 'minecraft:sand' : 'minecraft:gravel', biome: 'minecraft:river' };
+        else c = { top: 'minecraft:grass_block', y: 65, depth: 0, floor: null, biome: 'minecraft:plains' };
+      } else if (kind === 3) {
+        if (x < 8) c = { top: 'minecraft:oak_stairs', y: 63, depth: wl ? 1 : 0, floor: wl ? 'minecraft:sand' : null, biome: 'minecraft:forest' };
+        else c = { top: 'minecraft:stone', y: 70, depth: 0, floor: null, biome: 'minecraft:forest' };
+      } else if (kind === 4) c = { top: x === 2 && z === 2 ? 'minecraft:oak_log' : 'minecraft:oak_leaves', y: 80, depth: 0, floor: null, biome: 'minecraft:forest' };
+      else if (kind === 5) c = { top: 'minecraft:grass_block', y: 64, depth: 0, floor: null, biome: 'minecraft:plains' };
+      else c = { top: 'minecraft:stone', y: 100, depth: 0, floor: null, biome: x < 8 ? 'minecraft:forest' : 'minecraft:plains' };
+      if (rev > 0 && x === 0 && z === 0 && c.top !== 'minecraft:air') c = { ...c, y: c.y + (rev % 5) + 1 };
+      cols.push(c);
+    }
+  }
+  return cols;
+}
+
+function fakeSurface(dim, cx, cz) {
+  const s = buildSurface({ cx, cz, world: CHUNK_WORLD, dimension: dim, columns: fakeColumns(dim, cx, cz) });
+  if (s.void) return s;
+  if (BRK.has('chunk-bad-length')) s.top = s.top.subarray(0, 510);
+  if (BRK.has('chunk-wrong-hash')) s.hash = surfaceHash({ ...s, palette: [] });
+  return s;
+}
+
+function resolveChunkTarget(args) {
+  if (typeof args.world !== 'string') return { error: ['invalid_args', 'world required'] };
+  if (args.dimension !== undefined && typeof args.dimension !== 'string') return { error: ['invalid_args', 'dimension must be a string'] };
+  if (args.world !== CHUNK_WORLD) return { error: ['not_found', `unknown world ${args.world}`] };
+  if (args.dimension === undefined) return { error: ['invalid_args', 'dimension is required: the world has several dimensions'] };
+  if (!CHUNK_DIMS.includes(args.dimension)) return { error: ['not_found', `unknown dimension ${args.dimension}`] };
+  return { dim: args.dimension };
+}
+
+/** Recomputes the loaded set: radius LOAD_RADIUS around every online player. Fires listeners for new chunks. */
+function refreshLoaded() {
+  const next = new Set();
+  for (const p of PLAYERS) {
+    if (!p.online) continue;
+    const pcx = Math.floor(p.pos.x / 16);
+    const pcz = Math.floor(p.pos.z / 16);
+    for (let dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) for (let dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) next.add(ckey(p.dimension, pcx + dx, pcz + dz));
+  }
+  const fresh = [];
+  for (const k of next) if (!loaded.has(k)) fresh.push(k);
+  loaded.clear();
+  for (const k of next) loaded.add(k);
+  for (const k of fresh) {
+    const [dim, rest] = k.split('|');
+    const [cx, cz] = rest.split(',').map(Number);
+    for (const l of chunkListeners) l(dim, cx, cz);
+  }
+}
+
+function isLoaded(dim, cx, cz) {
+  return BRK.has('chunk-missing-wrong') ? true : loaded.has(ckey(dim, cx, cz));
+}
+
+function teleportPlayer(p, x, y, z) {
+  p.pos.x = x;
+  p.pos.y = y;
+  p.pos.z = z;
+  refreshLoaded();
+}
+
+refreshLoaded();
+if (OPT.churn) {
+  setInterval(() => {
+    const p = PLAYERS.find((x) => x.online && x.dimension === 'minecraft:overworld');
+    if (!p) return;
+    const cx = Math.floor(p.pos.x / 16);
+    const cz = Math.floor(p.pos.z / 16);
+    const k = ckey(p.dimension, cx, cz);
+    chunkMods.set(k, (chunkMods.get(k) ?? 0) + 1);
+    for (const l of chunkListeners) l(p.dimension, cx, cz);
+  }, 400).unref();
+}
+
 // ------------------------------------------------------------------ positions
 
 function quant(p) {
@@ -384,6 +498,7 @@ class Conn {
     this.inflight = 0;
     this.pos = null; // { sub, interval, worlds, lastKeys, seq, lastSentAt, timer }
     this.ev = null; // { sub, types, seq, lastSentAt }
+    this.chk = null; // chunks subscription, see chunksSubscribe()
     this.nextSub = 1;
     this.lastActivity = Date.now();
     this.reader = new FrameReader({ maxFrame: BRK.has('accept-oversize') ? Infinity : MAX_FRAME });
@@ -407,16 +522,17 @@ class Conn {
     clearInterval(this.maintenance);
     if (this.pos?.timer) clearInterval(this.pos.timer);
     if (this.pos?.keyTimer) clearInterval(this.pos.keyTimer);
+    this.dropChunks();
     this.socket.destroy();
   }
 
   hasSub() {
-    return Boolean(this.pos || this.ev);
+    return Boolean(this.pos || this.ev || this.chk);
   }
 
   tick() {
     const now = Date.now();
-    for (const s of [this.pos, this.ev]) {
+    for (const s of [this.pos, this.ev, this.chk]) {
       if (!s || BRK.has('no-ping')) continue;
       if (now - s.lastSentAt >= TIMERS.ping) {
         const frame = { sub: s.sub, seq: s.seq++, data: { type: 'ping' } };
@@ -611,6 +727,15 @@ class Conn {
         this.ev = null;
         return ok({});
       }
+      case 'map.chunks':
+        return this.mapChunks(args);
+      case 'chunks.subscribe':
+        return this.chunksSubscribe(args);
+      case 'chunks.unsubscribe': {
+        if (!this.chk || this.chk.sub !== args.sub) return err('not_found', 'unknown sub');
+        this.dropChunks();
+        return ok({});
+      }
       case 'action.run':
         return this.actionRun(args);
       case 'assets.manifest':
@@ -683,7 +808,16 @@ class Conn {
       const mismatch = !it || (args.expect.id !== undefined && it.id !== args.expect.id) || (args.expect.count !== undefined && it.count !== args.expect.count) || (args.expect.fingerprint !== undefined && it.fingerprint !== args.expect.fingerprint);
       if (mismatch) return { body: errorBody('conflict', 'expected item changed') };
     }
-    // The mock never modifies game state.
+    if (a.id === 'teleport' && !args.expect) {
+      const x = subArgs.x;
+      const z = subArgs.z;
+      if (typeof x !== 'number' || typeof z !== 'number') return { body: errorBody('invalid_args', 'teleport needs x and z (the mock has no to_player)') };
+      const p = PLAYERS.find((q) => q.id === args.target);
+      if (!p.online) return { body: errorBody('offline', 'player is offline') };
+      teleportPlayer(p, x, typeof subArgs.y === 'number' ? subArgs.y : p.pos.y, z);
+      return { body: { ok: true, data: { ok: true, message: 'teleported' } } };
+    }
+    // The mock never modifies any other game state.
     return { body: { ok: true, data: { ok: false, message: 'mock: action recognised, not executed' } } };
   }
 
@@ -726,6 +860,135 @@ class Conn {
     });
     if (BRK.has('reversed-assets')) out = out.reverse();
     return { body: { ok: true, data: { assets: out, more: false } } };
+  }
+
+
+  // ---------------------------------------------------------- chunks
+
+  mapChunks(args) {
+    const bad = (code, msg) => ({ body: errorBody(code, msg) });
+    if (!Array.isArray(args.chunks)) return bad('invalid_args', 'chunks must be an array');
+    if (args.chunks.length > 256) return bad('invalid_args', 'at most 256 chunks');
+    if (!args.chunks.every((c) => Array.isArray(c) && c.length === 2 && Number.isInteger(num(c[0])) && Number.isInteger(num(c[1])))) return bad('invalid_args', 'chunks must be [[cx, cz], ...]');
+    const t = resolveChunkTarget(args);
+    if (t.error) return bad(...t.error);
+    const chunks = [];
+    const missing = [];
+    for (const c of args.chunks) {
+      const cx = num(c[0]);
+      const cz = num(c[1]);
+      if (isLoaded(t.dim, cx, cz)) chunks.push(fakeSurface(t.dim, cx, cz));
+      else missing.push([cx, cz]);
+    }
+    return { body: { ok: true, data: { chunks, missing } } };
+  }
+
+  chunksSubscribe(args) {
+    const bad = (code, msg) => ({ body: errorBody(code, msg) });
+    const t = resolveChunkTarget(args);
+    if (t.error) return bad(...t.error);
+    let area = null;
+    if (args.area !== undefined) {
+      const a = args.area;
+      const keys = ['min_cx', 'min_cz', 'max_cx', 'max_cz'];
+      if (!a || typeof a !== 'object' || Array.isArray(a) || !keys.every((k) => Number.isInteger(num(a[k])))) return bad('invalid_args', 'area must be {min_cx, min_cz, max_cx, max_cz}');
+      area = Object.fromEntries(keys.map((k) => [k, num(a[k])]));
+    }
+    if (this.chk) return bad('busy', 'chunks subscription already active');
+    const sub = this.nextSub++;
+    const s = { sub, dim: t.dim, area, seq: 0, lastSentAt: Date.now(), pending: new Set(), lastHash: new Map(), lastSent: new Map(), loadUntil: 0, loadRemaining: 0, dropped: 0, timer: null, listener: null };
+    s.listener = (dim, cx, cz) => {
+      if (dim !== s.dim) return;
+      if (area && (cx < area.min_cx || cx > area.max_cx || cz < area.min_cz || cz > area.max_cz)) return;
+      s.pending.add(`${cx},${cz}`);
+    };
+    chunkListeners.add(s.listener);
+    s.timer = setInterval(() => this.chunksFlush(), 250);
+    this.chk = s;
+    if (BRK.has('chunk-initial-dump')) {
+      setImmediate(() => {
+        if (this.closed || this.chk !== s) return;
+        const all = [];
+        for (const k of loaded) {
+          const [dim, rest] = k.split('|');
+          if (dim !== s.dim) continue;
+          const [cx, cz] = rest.split(',').map(Number);
+          if (!area || (cx >= area.min_cx && cx <= area.max_cx && cz >= area.min_cz && cz <= area.max_cz)) all.push(fakeSurface(dim, cx, cz));
+        }
+        for (let i = 0; i < all.length; i += MAX_CHUNKS_FRAME) this.emitChunks({ chunks: all.slice(i, i + MAX_CHUNKS_FRAME) });
+      });
+    }
+    return { body: { ok: true, data: { sub } } };
+  }
+
+  dropChunks() {
+    if (!this.chk) return;
+    clearInterval(this.chk.timer);
+    chunkListeners.delete(this.chk.listener);
+    this.chk = null;
+  }
+
+  /** D23 flush: every 250 ms, chunks whose 2 s cooldown passed, <= 64 per frame, load mode above 64 waiting. */
+  chunksFlush() {
+    const s = this.chk;
+    if (this.closed || !s) return;
+    const now = Date.now();
+    const ready = [];
+    for (const k of [...s.pending]) {
+      const [cx, cz] = k.split(',').map(Number);
+      if (!loaded.has(ckey(s.dim, cx, cz))) {
+        s.pending.delete(k);
+        continue;
+      }
+      const last = s.lastSent.get(k);
+      if (last === undefined || now - last >= COOLDOWN_MS) ready.push(k);
+    }
+    if (ready.length === 0 && s.dropped === 0) return;
+    let send = ready;
+    if (!BRK.has('chunk-oversize-frame')) {
+      if (ready.length > MAX_CHUNKS_FRAME && now >= s.loadUntil) {
+        s.loadUntil = now + 1000;
+        s.loadRemaining = 16;
+      }
+      if (now < s.loadUntil) {
+        send = ready.slice(0, s.loadRemaining);
+        s.loadRemaining -= send.length;
+        for (const k of ready.slice(send.length)) s.pending.delete(k);
+        s.dropped += ready.length - send.length;
+      }
+    }
+    const out = [];
+    for (const k of send) {
+      s.pending.delete(k);
+      const [cx, cz] = k.split(',').map(Number);
+      const c = fakeSurface(s.dim, cx, cz);
+      if (s.lastHash.get(k) === c.hash) continue;
+      s.lastHash.set(k, c.hash);
+      s.lastSent.set(k, now);
+      out.push(c);
+    }
+    if (out.length === 0 && s.dropped === 0) return;
+    const per = BRK.has('chunk-oversize-frame') ? Infinity : MAX_CHUNKS_FRAME;
+    const frames = [];
+    for (let i = 0; i < Math.max(out.length, 1); i += per) frames.push({ chunks: out.slice(i, i + per) });
+    if (s.dropped > 0) {
+      frames[0].dropped = s.dropped;
+      s.dropped = 0;
+    }
+    for (const f of frames) this.emitChunks(f);
+    if (BRK.has('chunk-no-coalesce') && out.length > 0) {
+      setTimeout(() => {
+        if (!this.closed && this.chk === s) for (const f of frames) this.emitChunks({ chunks: f.chunks });
+      }, 500);
+    }
+  }
+
+  emitChunks(data) {
+    const s = this.chk;
+    const frame = { sub: s.sub, seq: s.seq, data };
+    s.seq += 1;
+    s.lastSentAt = Date.now();
+    this.send(frame);
   }
 
   // ---------------------------------------------------------- stream sampling

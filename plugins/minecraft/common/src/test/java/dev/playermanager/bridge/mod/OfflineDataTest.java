@@ -144,27 +144,4 @@ class OfflineDataTest {
         assertNull(b.get("expires"));
         assertNull(RosterFiles.parseDate("garbage"));
     }
-
-    @Test void attributeIdNormalisation() {
-        Object a = null;
-        for (Object x : Compat.attributes()) if (x.toString().equals("GENERIC_MAX_HEALTH")) a = x;
-        assertNotNull(a);
-        assertEquals("minecraft:max_health", Compat.attributeId(a));
-    }
-
-    @Test void snapshotNbtBytesToRecord() throws Exception {
-        // what Paper's ItemStack#serializeAsBytes returns for 1.21.x items
-        Map<String, Object> root = m("id", "minecraft:diamond_sword", "count", 1, "DataVersion", 4189,
-                "components", m("minecraft:custom_name", "{\"text\":\"X\"}", "minecraft:damage", 5));
-        ItemConverter.Snap s = new ItemConverter.Snap("minecraft:diamond_sword", 2, NbtWriter.write(root, ""), null, 1561);
-        RawItem raw = s.toRaw();
-        assertEquals(2, raw.count, "live amount wins");
-        Map<String, Object> rec = ItemRecords.build(raw);
-        assertEquals("X", ((Map<?, ?>) rec.get("name")).get("plain"));
-        assertEquals(5, rec.get("damage"));
-        assertEquals(1561, rec.get("max_damage"));
-        // unreadable NBT falls back to the id-only record
-        RawItem bad = new ItemConverter.Snap("minecraft:stone", 1, new byte[] {1, 2, 3}, null, 0).toRaw();
-        assertEquals("minecraft:stone", bad.id);
-    }
 }

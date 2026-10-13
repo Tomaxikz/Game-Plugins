@@ -12,6 +12,7 @@
 # * Spigot: build spigot-<ver>.jar with BuildTools yourself and pass PM_SPIGOT_JAR=/path/to/it.
 # * Optional: PM_BOT=1 joins an offline-mode test bot (mineflayer, npm-installed under $PM_WORK/bot) so the
 #   player-scoped tests have a player. PM_JAR=<path> uses a prebuilt universal jar. PM_JAVA_HOME overrides the JDK.
+#   PM_LEVEL_TYPE=minecraft:normal generates real terrain instead of the default flat world.
 # Exit codes: 0 pass, 1 conformance failure, 2 usage/setup error, 3 EULA not accepted (run pending), 4 server did not start.
 set -u
 set -o pipefail
@@ -117,6 +118,8 @@ if [[ "${PM_VIA:-}" == "1" ]]; then
 fi
 printf 'eula=true\n' > "$DIR/eula.txt"
 PORT="$(node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})')"
+# PM_LEVEL_TYPE overrides the world type (default flat; e.g. PM_LEVEL_TYPE=minecraft:normal for real terrain).
+LEVEL_TYPE="${PM_LEVEL_TYPE:-minecraft\\:flat}"
 cat > "$DIR/server.properties" <<PROPS
 online-mode=false
 server-port=$PORT
@@ -127,7 +130,7 @@ view-distance=4
 simulation-distance=4
 spawn-protection=0
 generate-structures=false
-level-type=minecraft\:flat
+level-type=$LEVEL_TYPE
 enable-rcon=false
 white-list=false
 enable-query=false
@@ -135,7 +138,7 @@ enable-command-block=false
 allow-nether=true
 sync-chunk-writes=false
 PROPS
-ver_ge "$MC_VERSION" "1.16" || sed -i 's/^level-type=.*/level-type=FLAT/' "$DIR/server.properties"
+[[ -n "${PM_LEVEL_TYPE:-}" ]] || ver_ge "$MC_VERSION" "1.16" || sed -i 's/^level-type=.*/level-type=FLAT/' "$DIR/server.properties"
 echo '[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Notch","level":4,"bypassesPlayerLimit":false}]' > "$DIR/ops.json"
 
 CONSOLE="$DIR/console.in"

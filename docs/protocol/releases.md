@@ -130,8 +130,8 @@ Field rules:
 
 - Bridges are published only as GitHub releases of **`Tomaxikz/Game-Plugins`** (public repository).
 - The panel fetches `https://github.com/Tomaxikz/Game-Plugins/releases/latest/download/manifest.json`, then downloads assets from the same release (`…/releases/download/<tag>/<file>`). "Latest" = newest non-prerelease, non-draft release; pre-releases are ignored unless the panel admin enables a "pre-release channel".
-- The repository is a panel admin setting (default above), so forks/self-hosted mirrors can be used. Any source must serve the same `manifest.json` + asset layout.
-- The panel checks for a new release at most every **6 hours** (and on demand from the admin page), honouring GitHub rate limits (unauthenticated: send `If-None-Match` with the previous ETag).
+- The repository and the auto-install switch are panel-wide settings on **Admin → Player Manager** (default repository above), so forks/self-hosted mirrors can be used. Any source must serve the same `manifest.json` + asset layout.
+- The panel caches `manifest.json` for **6 hours**; "Check for new release" on Admin → Player Manager and every install/update preview fetch it fresh. With auto-install on, a background pass every **30 minutes** installs or updates bridges on every supported server (running servers load it on their next restart).
 - Never delete or replace assets of an already published release; fix by publishing a new version. The panel caches downloaded assets by `sha256`.
 
 ## 6. How the panel uses this (panel-side, for reference)
@@ -140,7 +140,7 @@ The concrete panel work is tracked in `panel-changes.md` (section C).
 
 - Detection: the panel decides game + platform + game version from the egg/startup/image and server files, then picks the artifact whose `platforms` and `game_versions` match. No match → the panel shows "no bridge available for this version" and keeps using fallbacks.
 - Setting **Auto-install bridge** (panel admin):
-  - **On**: the bridge is installed on server creation (`.playermanager/` and the install directory are created even before first start) and updated when a newer release appears and the server is stopped.
+  - **On**: the bridge is installed on server creation (`.playermanager/` and the install directory are created even before first start) and updated when a newer release appears (a running server loads it on its next restart).
   - **Off**: users see an "Install bridge" prompt on the Players page; nothing is written until they accept.
 - Updates replace the file in place and never touch `.playermanager/config.json` or `token`.
 - The panel shows the installed version from `bridge.json` and compares it with the latest `manifest.json`.

@@ -17,5 +17,6 @@ public interface Platform {
     default NearbyProvider nearby() { return null; }          // player.nearby
     default PositionSource positions() { return null; }       // positions.subscribe / keyframe
     default PackSourceProvider assets() { return null; }      // assets.manifest / assets.get
+    default ChunkSource chunks() { return null; }             // map.chunks, chunks.subscribe / unsubscribe
     default ActionRegistry actions() { return new ActionRegistry(); }
 }

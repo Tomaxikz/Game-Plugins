@@ -40,6 +40,7 @@ Contract revision: `docs/protocol/` was updated upstream on 2026-10-12 18:11–1
 | D20 | FiveM working directory (user decision 2026-10-12) | FXServer's `node_version '22'` runtime allows fs writes only inside resource folders (`citizen-scripting-core/src/FilesystemPermissions.cpp` `ScriptingFilesystemAllowWrite`, `citizen-scripting-node/src/NodeScriptRuntime.cpp` `NodePermissionCallback`; Lua `io` likewise), so `<root>/.playermanager/` cannot be created. The bridge tries the server root first and otherwise uses `resources/[playermanager]/playermanager_bridge/.playermanager/`; `bridge.json` gains `dir` (the directory used, relative to the server root) and its `socket` path stays relative to the server root. **Panel action:** for `fivem`, if `<root>/.playermanager/bridge.json` is absent, read it from the resource directory; send `config.json` edits to the directory actually used. |
 | D21 | Hytale item ids | `items-and-assets.md` §1 expects lowercase `namespace:path`; Hytale 0.7.0 item ids are CamelCase asset ids without namespace (`Weapon_Sword_Iron`), and `give_item` needs exactly that id. | The Hytale bridge sends the game's own id unchanged (no invented namespace, no case change) so ids round-trip into actions. **Panel action:** treat Hytale ids as opaque, case-sensitive strings. |
 | D22 | Bukkit minimum version (deviation) | `releases.md` sets the universal jar to `>=1.12`. | The Bukkit half supports **1.13+**: pre-flattening ids would need an untestable legacy table (worker A, NOTES §2). On 1.12.2 the bridge disables itself with a clear log line and the server is unaffected. Manifest `game_versions` for the universal jar is `>=1.13`. **Panel action:** none; 1.12 servers fall back to RCON/console. |
+| D23 | Chunk surfaces: details `operations.md` §6b/§7.3 and `minecraft.md` §6a leave open | (a) `hash`: byte layout unspecified. (b) A column with no surface block (all air, e.g. End void columns in a non-void chunk). (c) Water that reaches the bottom of the world. (d) When "under load" starts. (e) Palette entries: ids or full block states. | (a) `hash` = first 16 hex of SHA-256 over **canonical MessagePack** (`items-and-assets.md` §2 rules) of the map `{biome, biomes, floor, palette, top, water_depth, y}` (bins as `bin`); a void chunk hashes `{void: true}`. (b) Such a column uses palette entry `minecraft:air` as `top`, `y` = the world's minimum Y, `water_depth` 0, `floor` 0xFFFF, `biome` = biome at (x, min Y, z). A chunk where every column is like that is sent as `void: true` with only `cx`, `cz`, `world`, `dimension`, `hash`. (c) `floor` = 0xFFFF and `water_depth` counts down to the bottom (capped at 255). Otherwise `floor` is the first non-water block below the water, whatever it is (air included). (d) Per subscription: normally a flush every 250 ms sends every dirty chunk whose 2 s cooldown has passed, ≤ 64 per frame. If more than 64 chunks are waiting, the subscription enters load mode for that second: it sends at most 16 chunks in that second, discards the rest, and puts `"dropped": n` (the count discarded since the last frame) on its next frame. (e) Palette entries are block **ids** without state properties (`minecraft:oak_stairs`), as the region renderer uses. Surfaces are compared by `hash` and a chunk is only sent when its hash differs from the last one sent on that subscription (first load always sends). **Panel action:** confirm (a) and (b) match `src/terrain.rs`. |
 
 ## 1. Shared implementation rules (all bridges)
 
@@ -90,9 +91,40 @@ Entries for the lead to merge into `NOTES.md` §2. Format: **topic** — what di
 
 > **Test tooling (not shipped)** — `scripts/run-paper-conformance.sh` can start a mineflayer bot (`PM_BOT=1`, npm `mineflayer` installed under the work directory) and, for servers newer than mineflayer knows, ViaVersion + ViaBackwards (`PM_VIA=1`, downloaded from Modrinth into the work directory only). Nothing from either is bundled in a release artifact. Spigot has no official download API (BuildTools compiles it), so the script supports `paper` and `folia`.
 
-## 3. Minecraft — mod loaders (worker B)
 
-_(entries)_
+### Map chunk surfaces (core + Bukkit family)
+
+> **Block changes need a known surface to compare against** — core keeps a global bounded (100k) last-computed hash per chunk. A block event on a chunk with no known hash only records it (nothing is sent); `map.chunks` requests also record the hashes they return, and chunk loads always send. So a block change is reported once the panel has asked for that chunk or the bridge has seen it load. Why: operations.md 7.3 reports only surface changes, and without a baseline background events (fluids, leaves, snow) sent unchanged chunks right after subscribing on normal terrain. Lead fix after a real-terrain run (Paper 1.21.4 normal world: 95/0, 462 chunks cross-checked, 0 mismatches). Capability effect: none.
+
+> **`load` of an already-sent chunk with an identical hash is not resent** on the same subscription (D23: "only sent when the hash differs from the last sent; first load always sends" read as first load per subscription). Capability effect: none.
+
+> **Load mode discards are permanent** — chunks dropped in a 16/s window are not retried (spec: the panel refreshes via `map.chunks`); the count rides on the next frame, or on an empty `{chunks:[],dropped:n}` frame once the 1 s window ended.
+
+> **Bukkit scan start = highest non-empty section, not the heightmap** — `ChunkSnapshot#getHighestBlockYAt` is the MOTION_BLOCKING heightmap on Paper (ignores plants, cane, carpets, torches...), so it can lie below the real surface; `isSectionEmpty` is safe on 1.13+. Verified with `PM_CHUNKS_VERIFY=true` (full top-down scan vs hinted scan, 0 mismatches on Paper 1.21.4 flat). Source: CraftBukkit `CraftChunk#getChunkSnapshot`. Capability effect: none.
+
+> **Bukkit biome ids on 1.13-1.15** come from the `Biome` enum name (`minecraft:<name lowercase>`) since `Biome#getKey` and `ChunkSnapshot#getBiome(x,y,z)` are newer; a few legacy names differ from the id. Datapack biomes on <= 1.20 report `Biome.CUSTOM` -> `minecraft:custom`. Capability effect: none.
+
+> **Bukkit dirty events** are exactly the listed ones plus nothing else: falling blocks (`EntityChangeBlockEvent`), pistons and physics-only changes are not hooked, so they appear on the next chunk load / listed event. Folia region snapshots are staggered 6 chunks per tick; non-Folia uses a 1.5 ms per tick time slice.
+
+> **Dimension resolution on Bukkit** — `world` matches the WorldMap folder (or the Bukkit world name); omitting `dimension` when the folder maps to several Bukkit worlds is `invalid_args`.
+
+## 3. Minecraft — mod loaders
+
+### Map chunk surfaces (Fabric / NeoForge / Forge)
+
+> **Scan start = highest section that is not air-only, not a heightmap** — same finding as M1 (MOTION_BLOCKING ignores plants). "Air-only" = the section's block palette holds only the six ids of minecraft.md 6a (`LevelChunkSection#maybeHas`), so a modded `isAir()` block outside that list is still a surface block. Capability effect: none.
+
+> **Snapshot = copy of the palettised containers** (`PalettedContainer#copy` of block states for non-air sections and of biomes for all sections), not a per-block copy; block/biome ids are resolved off-thread from the copies (cached per Block / Holder). Batches: <= 1.5 ms game-thread time, next batch about one tick (50 ms) later via a delayed `server.execute` (a plain re-`execute` would run in the same tick). Only `ServerChunkCache#getChunkNow` (FULL chunks, never loads).
+
+> **Dirty hooks** — block changes: a Mixin on `LevelChunk#setBlockState` (returns non-null = state really changed) on all three loaders, config `playermanager_bridge_chunks.mixins.json` (`required:false`). Fabric declares it in `fabric.mod.json`, NeoForge in `neoforge.mods.toml` `[[mixins]]`, **Forge via the jar manifest attribute `MixinConfigs`** (a `[[mixins]]` table in `mods.toml` is ignored by Forge 26.x; verified headless). Chunk loads: Fabric (no Fabric API) a Mixin on `LevelChunk#setLoaded` (what `ChunkStatusTasks#full` calls); NeoForge/Forge `ChunkEvent.Load`. Block changes pass `loaded=false`, loads `loaded=true`. Not hooked: nothing beyond `setBlockState` (all vanilla/modded block writes go through it; direct section writes by mods bypass it).
+
+> **World/dimension** — `world` = the save folder (same as positions), `dimension` = `ServerLevel#dimension()` id; omitting `dimension` is `invalid_args` while the server has more than one level (always on a vanilla server).
+
+> **Verification aid** — `PM_CHUNKS_VERIFY=true` (or `-Dplayermanager.chunks.verify=true`) compares every snapshot with a full top-down scan of the live chunk (`chunk surface verify ok|MISMATCH`) and logs once when the setBlockState hook fires. Headless normal-world runs: 0 mismatches on all three loaders.
+
+> **Pre-existing test fix** — `common` `OfflineDataTest` called Bukkit-only classes (`Compat`, `ItemConverter`); the two tests (still present in `bukkit`) were removed from `common`.
+
+> **Live-frame test on 26.x mod loaders barely exercises loads** — the headless bot (mineflayer) cannot follow a teleport on Minecraft 26.3, so the server never loads the area around the teleported player (1 of 81 chunks loaded after 12 s). The bridge itself streams loads correctly: loading 7x7 chunks with the console `forceload` command streamed them on Fabric, NeoForge and Forge, with load mode and `dropped` as in D23 (d). `chunks.subscribe.frames` now checks that every chunk loaded at the destination was streamed (or `dropped` was reported) and says in its result when too few loaded to judge. Paper 1.21.4 (bot works): 49 of 49 streamed. Capability effect: none.
 
 ## 4. Minecraft — proxies (worker C)
 
@@ -414,3 +446,25 @@ the FiveM source tree at `citizenfx/fivem` (HEAD, fetched read-only) and the fra
 > **FiveM slot base** — FiveM `main` slots are 1-based ints (ox_inventory); the suite checks 1..size. Source: `docs/protocol/games/fivem.md` §7.2. Capability effect: none.
 
 > **`node --test 'conformance/test/*.test.mjs'`** — use a quoted glob; Node 22 does not accept a bare directory. Source: Node test runner (glob-based file discovery). Capability effect: none.
+
+### Map chunk surfaces (conformance interpretations)
+
+Format: **topic** — interpretation. Why.
+
+> **No initial dump tolerance** — `chunks.subscribe.ack` waits 2.5 s after subscribing and fails when more chunks arrive than max(4, half the chunks `map.chunks` returns around the player); the test calls `map.chunks` right after subscribing, as the panel does (a real server can report a few genuine changes in that window; an initial dump is every loaded chunk). The contract says "no initial dump" without a number.
+
+> **All-air column Y** — the suite cannot know the world's minimum Y, so it accepts a `minecraft:air` top whose `y` is a multiple of 16 (-64, 0, -2048...), with `water_depth` 0, `floor` 0xFFFF. Any other air-list id (`cave_air`, `void_air`, `light`, `structure_void`, `barrier`) as `top` fails. A non-void chunk in which every column is the all-air case fails ("must be void:true").
+
+> **Water to the bottom** — `water_depth` > 0 with `floor` 0xFFFF is accepted (D23 c). `floor` pointing at a water-list id is a failure (floor is the first non-water block). `floor` may be an air-list id.
+
+> **Load mode is not measured** — D23 d (≤ 16 chunks in a load second, `dropped` on "the next frame") cannot be asserted from arrival times without flakiness. The suite checks only: ≤ 64 chunks per frame, `dropped` is a positive int, an empty `chunks` list only with `dropped`, no chunk twice within 2 s (receipt time, 250 ms slack), no resend with an unchanged hash. The mock implements D23 d exactly (first flush with > 64 ready: send 16, discard the rest, `dropped` on that same frame; later flushes in the same second are capped by the remaining budget).
+
+> **Empty frame with `dropped`** — if chunks were discarded and nothing else is sent, the mock emits `{chunks: [], dropped: n}`. The tests accept this; a bridge may instead hold `dropped` until its next non-empty frame.
+
+> **`player.get` without `fields`** — the chunk tests read world, dimension and position with a plain `player.get {id}` (not `fields: ["position"]`), because it is unspecified whether `fields` keeps `world`/`dimension`.
+
+> **`dimension` argument** — the tests always pass `dimension` when the player/world reports one. The mock requires it (invalid_args) because its `world` holds two dimensions, matching "required when the world folder holds several dimensions".
+
+> **Teleport test is invasive** — `chunks.subscribe.frames` (only with `--allow-actions`) moves the online player +3000 X, then -3000 X, then back to the original coordinates with the same Y. Fall damage or suffocation is possible on a real server. It needs the `teleport` action (`x`, `y`, `z` args) and a bridge that actually moves the player.
+
+> **Unloading** — the mock unloads chunks that are no longer near a player at each teleport so reruns see new loads. A real server may keep the destination chunks loaded for a while; if a second run against the same server sees no frames, wait for the chunks to unload.

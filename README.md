@@ -10,6 +10,12 @@ and richer data and lets it run actions natively instead of through console comm
 The bridge is always optional. If it is missing or crashes, the panel falls back to the old methods,
 and the game server keeps running.
 
+## Live map terrain
+
+Minecraft bridges (Paper/Spigot/Folia and Fabric/NeoForge/Forge, not proxies) also send the surface of loaded chunks
+(`map.chunks`) and stream surface changes (`chunks.subscribe`), so the panel's map shows terrain newer than the saved
+region files. Only chunks the game already has loaded are read; the bridge never loads or generates a chunk.
+
 ## How it works
 
 ```
@@ -34,7 +40,7 @@ panel's contract. Places where the contract is ambiguous or can't be met on a pl
 | Game | Platforms | Artifact | Status |
 |---|---|---|---|
 | Minecraft Java | Paper, Spigot, Folia (1.13+), Velocity, BungeeCord/Waterfall | `playermanager-bridge-minecraft-universal-<ver>.jar` (one jar for all five) | Built. Conformance passes on real Paper 1.13.2–26.1.2 (26.3 without a joined player), Folia 1.21.4, Spigot 1.21.4, Velocity 4.2.0, BungeeCord |
-| Minecraft Java | Fabric, NeoForge, Forge (server-side only) | `playermanager-bridge-minecraft-<loader>-<mc_range>-<ver>.jar` | **In progress**, not yet committed |
+| Minecraft Java | Fabric, NeoForge, Forge (server-side only) | `playermanager-bridge-minecraft-<loader>-<mc_range>-<ver>.jar` | Built for 26.1–26.3; conformance passes headless on 26.3 (26.1 and 26.2 not run) |
 | Rust | Oxide (uMod), Carbon | `playermanager-bridge-rust-<ver>.cs`, installed as `PlayerManagerRust.cs` | Built, compile-checked and unit-tested. Not yet run on a real server; see the smoke test |
 | Hytale | Hytale server 0.7.0 | `playermanager-bridge-hytale-<build>-<ver>.jar` | Built against the public 0.7.0 server API. Not yet run on a live server |
 | FiveM / RedM | FXServer (`node_version '22'`) | `playermanager-bridge-fivem-<ver>.zip` (resource `playermanager_bridge`) | Built and tested against a simulated FXServer. Not yet run on a live server |

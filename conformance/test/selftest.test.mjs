@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { encode, decode, PmFloat, isInt, isFloat, toHex } from '../lib/msgpack.mjs';
 import { canonicalBytes, hash16, TEST_VECTOR, sha256Hex, renderSubsetOf } from '../lib/canonical.mjs';
 import { encodeFrame, FrameReader, frameHeader, FrameError, MAX_FRAME } from '../lib/framing.mjs';
+import { buildSurface, chunkSurfaceErrors, surfaceHash, voidHash, packU16LE, packI16LE, unpackU16LE, unpackI16LE, NO_FLOOR } from '../lib/chunks.mjs';
 import { itemErrors, containersErrors, blocksErrors, findKeyPaths, gameSectionErrors } from '../lib/schema.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -191,6 +192,85 @@ describe('contract rules (schema)', () => {
   });
 });
 
+
+describe('chunk surfaces (D23)', () => {
+  const col = (o = {}) => ({ top: 'minecraft:stone', y: 64, depth: 0, floor: null, biome: 'minecraft:plains', ...o });
+  const build = (f) => buildSurface({ cx: 1, cz: 2, world: 'world', dimension: 'minecraft:overworld', columns: Array.from({ length: 256 }, (_, i) => col(f ? f(i) : {})) });
+  const errs = (s, mut) => {
+    const c = { ...s };
+    mut(c);
+    return chunkSurfaceErrors(c, {});
+  };
+
+  test('hash vectors: void {void:true} and a uniform stone chunk (bytes cross-checked with an independent encoder)', () => {
+    assert.equal(toHex(canonicalBytes({ void: true })), '81a4766f6964c3');
+    assert.equal(voidHash(), '11e5dda2e5e537e8');
+    const s = build();
+    assert.equal(s.hash, 'ef2a5e5db2918792');
+    assert.equal(surfaceHash(s), 'ef2a5e5db2918792');
+  });
+
+  test('hash input is exactly {biome, biomes, floor, palette, top, water_depth, y}; coordinates and world are not hashed', () => {
+    const a = build();
+    const b = { ...a, cx: 99, cz: -3, world: 'other', dimension: 'minecraft:the_end' };
+    assert.equal(surfaceHash(b), a.hash);
+    assert.notEqual(surfaceHash({ ...a, palette: ['minecraft:dirt'] }), a.hash);
+  });
+
+  test('u16/i16 little-endian helpers round-trip (negative y)', () => {
+    assert.deepEqual(unpackU16LE(packU16LE([0, 1, 255, 256, 0xffff])), [0, 1, 255, 256, 0xffff]);
+    assert.deepEqual(unpackI16LE(packI16LE([-64, 0, 319, -32768, 32767])), [-64, 0, 319, -32768, 32767]);
+    assert.deepEqual([...packI16LE([-64])], [0xc0, 0xff]);
+    assert.equal(packU16LE(new Array(256).fill(1)).length, 512);
+  });
+
+  test('a good surface passes; an all-air chunk becomes the void form and passes', () => {
+    assert.deepEqual(chunkSurfaceErrors(build(), {}), []);
+    const v = buildSurface({ cx: 0, cz: 0, world: 'w', dimension: 'minecraft:overworld', columns: Array.from({ length: 256 }, () => col({ top: 'minecraft:air', y: -64 })) });
+    assert.deepEqual(Object.keys(v).sort(), ['cx', 'cz', 'dimension', 'hash', 'void', 'world']);
+    assert.deepEqual(chunkSurfaceErrors(v, {}), []);
+    assert.ok(chunkSurfaceErrors({ ...v, hash: '0'.repeat(16) }, {}).some((m) => /void chunk hash/.test(m)));
+    assert.ok(chunkSurfaceErrors({ ...v, top: new Uint8Array(512) }, {}).some((m) => /must not carry top/.test(m)));
+  });
+
+  test('an all-air column in a non-void chunk is minecraft:air / min Y / depth 0 / floor 0xFFFF and passes', () => {
+    const s = build((i) => (i === 17 ? { top: 'minecraft:air', y: -64 } : {}));
+    assert.deepEqual(chunkSurfaceErrors(s, {}), []);
+    const withCaveAir = build((i) => (i === 17 ? { top: 'minecraft:cave_air' } : {}));
+    assert.ok(chunkSurfaceErrors(withCaveAir, {}).some((m) => /air block/.test(m)));
+    const air2 = build((i) => (i === 17 ? { top: 'minecraft:air', y: -63 } : {}));
+    assert.ok(chunkSurfaceErrors(air2, {}).some((m) => /all-air column/.test(m)));
+  });
+
+  test('water rules: top must be water when depth > 0; waterlogged surface is not water; floor 0xFFFF with depth 0; water to bottom allowed', () => {
+    const ok = build((i) => (i === 0 ? { top: 'minecraft:water', y: 62, depth: 3, floor: 'minecraft:sand' } : {}));
+    assert.deepEqual(chunkSurfaceErrors(ok, {}), []);
+    const bottom = build((i) => (i === 0 ? { top: 'minecraft:water', y: 62, depth: 127, floor: null } : {}));
+    assert.deepEqual(chunkSurfaceErrors(bottom, {}), []);
+    const waterlogged = build((i) => (i === 0 ? { top: 'minecraft:oak_stairs', depth: 1, floor: 'minecraft:sand' } : {}));
+    assert.ok(chunkSurfaceErrors(waterlogged, {}).some((m) => /not a water block/.test(m)));
+    const floorNoWater = build((i) => (i === 0 ? { floor: 'minecraft:sand' } : {}));
+    assert.ok(chunkSurfaceErrors(floorNoWater, {}).some((m) => /floor must be 0xFFFF/.test(m)));
+    const waterFloor = build((i) => (i === 0 ? { top: 'minecraft:water', y: 62, depth: 2, floor: 'minecraft:kelp' } : {}));
+    assert.ok(chunkSurfaceErrors(waterFloor, {}).some((m) => /floor .* is a water block/.test(m)));
+  });
+
+  test('shape violations are reported: bin sizes, index ranges, states in palette, hash, extra keys, world echo', () => {
+    const s = build();
+    assert.ok(errs(s, (c) => (c.top = c.top.subarray(0, 510))).some((m) => /exactly 512 bytes/.test(m)));
+    assert.ok(errs(s, (c) => (c.water_depth = new Uint8Array(255))).some((m) => /exactly 256 bytes/.test(m)));
+    assert.ok(errs(s, (c) => (c.biome = packU16LE(new Array(256).fill(5)))).some((m) => /biome index/.test(m)));
+    assert.ok(errs(s, (c) => (c.top = packU16LE(new Array(256).fill(9)))).some((m) => /top index/.test(m)));
+    assert.ok(errs(s, (c) => (c.floor = packU16LE(new Array(256).fill(7)))).some((m) => /floor/.test(m)));
+    assert.ok(errs(s, (c) => (c.palette = ['minecraft:stone[x=1]'])).some((m) => /block states/.test(m)));
+    assert.ok(errs(s, (c) => (c.palette = ['stone'])).some((m) => /namespaced/.test(m)));
+    assert.ok(errs(s, (c) => (c.hash = 'f'.repeat(16))).some((m) => /recomputed/.test(m)));
+    assert.ok(errs(s, (c) => (c.extra = 1)).some((m) => /unexpected key/.test(m)));
+    assert.ok(chunkSurfaceErrors(s, { world: 'x' }).some((m) => /requested/.test(m)));
+    assert.equal(NO_FLOOR, 0xffff);
+  });
+});
+
 // ------------------------------------------------------------------ mock + CLI
 
 function tempRoot() {
@@ -326,6 +406,41 @@ describe('mock bridge end to end', () => {
   });
 });
 
+
+describe('chunk surfaces against the mock', () => {
+  const IDS = 'chunks.capability-consistency,map.chunks.schema,map.chunks.missing,map.chunks.args,chunks.subscribe.ack,chunks.subscribe.args,chunks.subscribe.frames';
+  for (const [name, extra, cli] of [
+    ['unix', [], []],
+    ['unix with --chunk-churn (changed chunks resent only after the 2 s cooldown)', ['--chunk-churn'], []],
+    ['tcp', ['--tcp'], []],
+  ]) {
+    test(`${name}: all chunk tests pass (frames test with --allow-actions)`, async () => {
+      const root = tempRoot();
+      const mock = await startMock(root, extra);
+      try {
+        const r = await cliReport(root, ['--root', root, '--allow-actions', '--only', IDS, ...cli], 'chunks');
+        for (const id of IDS.split(',')) assert.equal(r.byId.get(id)?.status, 'pass', `${id}: ${r.byId.get(id)?.reason}`);
+        assert.equal(r.code, 0, r.out);
+      } finally {
+        await mock.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('without --allow-actions the frames test is skipped', async () => {
+    const root = tempRoot();
+    const mock = await startMock(root);
+    try {
+      const r = await cliReport(root, ['--root', root, '--only', 'chunks.subscribe.frames'], 'noactions');
+      assert.equal(r.byId.get('chunks.subscribe.frames').status, 'skip');
+    } finally {
+      await mock.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // Each break must make the named test(s) fail. Transport decides which breaks apply.
 const BREAK_CASES = [
   { brk: 'no-hello-check', mode: 'unix', fail: ['hello.required-first'] },
@@ -357,6 +472,13 @@ const BREAK_CASES = [
   { brk: 'mainhand-slot', mode: 'unix', fail: ['profile.mc.containers'] },
   { brk: 'bad-block-data', mode: 'unix', fail: ['player.nearby.blocks-mc'] },
   { brk: 'block-index-oob', mode: 'unix', fail: ['player.nearby.blocks-mc'] },
+  { brk: 'chunk-bad-length', mode: 'unix', fail: ['map.chunks.schema'] },
+  { brk: 'chunk-wrong-hash', mode: 'unix', fail: ['map.chunks.schema'] },
+  { brk: 'chunk-waterlogged-as-water', mode: 'unix', fail: ['map.chunks.schema'] },
+  { brk: 'chunk-missing-wrong', mode: 'unix', fail: ['map.chunks.missing'] },
+  { brk: 'chunk-initial-dump', mode: 'unix', fail: ['chunks.subscribe.ack'] },
+  { brk: 'chunk-no-coalesce', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
+  { brk: 'chunk-oversize-frame', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
   { brk: 'max-connections-4', mode: 'unix', fail: ['conn.eight-concurrent'] },
 ];
 if (SLOW_OK) BREAK_CASES.push({ brk: 'no-ping', mode: 'unix', slow: true, fail: ['ping.keepalive-60s'] });
@@ -370,6 +492,7 @@ describe('mock breaks are detected', () => {
       try {
         const args = ['--root', root, '--only', [...c.fail, ...(c.slow ? [] : [])].join(',')];
         if (c.slow) args.push('--slow');
+        if (c.actions) args.push('--allow-actions');
         const r = await cliReport(root, args, c.brk);
         for (const id of c.fail) {
           const rec = r.byId.get(id);

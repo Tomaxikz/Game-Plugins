@@ -242,6 +242,23 @@ The slice is returned in the `blocks` object of the common `player.nearby` respo
 
 Threading: collected via a thread-safe `ChunkSnapshot` (Bukkit family, captured on the main/region thread — `RegionScheduler` on Folia) or on the server thread for mods; proxies return `unsupported`.
 
+## 6a. Map chunk surfaces (`map.chunks`, `chunks.subscribe`)
+
+Required on Paper/Spigot/Folia and Fabric/NeoForge/Forge; proxies do not support them. Surfaces must match the panel's region-file renderer (`src/terrain.rs` in the panel), column by column:
+
+| Rule | Value |
+|---|---|
+| Surface block | Highest block in the column that is not air. Air = exactly: `minecraft:air`, `minecraft:cave_air`, `minecraft:void_air`, `minecraft:light`, `minecraft:structure_void`, `minecraft:barrier`. Everything else (plants, snow layers, glass, modded blocks) is a surface block |
+| Water | Water = exactly: `minecraft:water`, `minecraft:bubble_column`, `minecraft:kelp`, `minecraft:kelp_plant`, `minecraft:seagrass`, `minecraft:tall_seagrass`. Waterlogged blocks are **not** water (they are surface blocks). `water_depth` counts consecutive water blocks from the surface down; `floor` = the first non-water block below |
+| Biome | Biome at the surface block (`getBiome(x, y, z)`), namespaced id |
+| Nether / End / custom | Same rules, no special cases (the Nether shows its bedrock roof, as in the region renderer) |
+| Dimension ids | As in §3 (`minecraft:overworld`, `minecraft:the_nether`, `minecraft:the_end`, modded) |
+
+Implementation notes:
+- Bukkit/Paper: `Chunk#getChunkSnapshot(true, true, false)` (heightmap + biomes) on the main/region thread for every chunk in a `ChunkLoadEvent` (`isNewChunk` or not) and for chunks touched by block events (`BlockPlaceEvent`, `BlockBreakEvent`, `BlockFormEvent`, `BlockFadeEvent`, `BlockBurnEvent`, `BlockExplodeEvent`/`EntityExplodeEvent`, `BlockFromToEvent` for flowing water, `StructureGrowEvent`, `LeavesDecayEvent`); mark the chunk dirty and snapshot it at most every 2 s. Compute surfaces asynchronously from the snapshot.
+- Fabric/NeoForge/Forge: chunk load events plus a mixin/hook on `LevelChunk#setBlockState` (server side) to mark dirty; read on `server.execute`, compute off-thread.
+- Only loaded chunks. Never force-load or generate.
+
 ## 7. Actions
 
 `actions` lists what the bridge supports (the panel offers an action only when present). Ids and `args` are the exact ones in `src/actions.rs`. Where the panel currently implements an action through console commands or saved-data editing, a bridge executes it **natively** and returns the same result envelope (`operations.md` → `action.run`).

@@ -24,7 +24,10 @@
     "player.inventory",
     "item.get",
     "assets.manifest",
-    "assets.get"
+    "assets.get",
+    "map.chunks",
+    "chunks.subscribe",
+    "chunks.unsubscribe"
   ],
   "required_features": [
     "proxy"
@@ -32,7 +35,9 @@
   "forbidden_features": [
     "positions.stream",
     "inventory.write",
-    "assets"
+    "assets",
+    "map.chunks",
+    "chunks.stream"
   ],
   "required_player_fields": [],
   "required_containers": [],

@@ -1,5 +1,6 @@
 package dev.playermanager.bridge.mod.neoforge;
 
+import dev.playermanager.bridge.mod.mc.ChunkHooks;
 import dev.playermanager.bridge.mod.mc.McBridge;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.api.distmarker.Dist;
@@ -12,6 +13,7 @@ import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
@@ -35,6 +37,11 @@ public final class NeoForgeEntry {
         } catch (Throwable t) {
             System.err.println("[playermanager-bridge] could not start: " + t);
         }
+    }
+
+    @SubscribeEvent
+    public void onChunkLoad(ChunkEvent.Load e) {
+        if (e.getLevel() instanceof net.minecraft.world.level.Level l) ChunkHooks.chunkLoaded(l, e.getChunk());
     }
 
     @SubscribeEvent

@@ -35,7 +35,7 @@ node conformance/bin/pm-conformance.mjs --list                     # all test id
 | `--only <id,...>` | Run only these ids. Unknown ids exit 2. |
 | `--player <id>` | Known online player for player-scoped tests. Default: the first online player from `players.list`. If none, those tests are skipped with "no online player". |
 | `--slow` | Enables `ping.keepalive-60s` and `conn.idle-close-120s` (about 3 minutes). |
-| `--allow-actions` | Enables `action.run.expect-conflict`. This is the only probe that touches inventory, and it only sends an `expect` that must answer `conflict`. |
+| `--allow-actions` | Enables `action.run.expect-conflict` (sends an `expect` that must answer `conflict`) and `chunks.subscribe.frames`, which **teleports the online player** about 3000 blocks away twice and back (needs the `teleport` action). Do not use it on a server where a player must not be moved; the player lands at the same Y, so fall or suffocation damage is possible. |
 | `--json <file>` | Writes the full report (bridge.json, hello, every result). |
 | `--list` | Prints the test ids. |
 
@@ -43,7 +43,7 @@ Output is one line per test: `PASS id — reason`, `FAIL id — reason`, `SKIP i
 Exit code 0 only when no test failed (skips do not count). Exit 1 on any failure, including no
 usable `hello`. Exit 2 on usage errors.
 
-**Safety.** The suite never runs a state-changing action. Action probes are limited to
+**Safety.** The suite never runs a state-changing action (the one exception is `chunks.subscribe.frames` with `--allow-actions`, see above). Action probes are limited to
 argument-validation requests (rejected before execution) and, with `--allow-actions`, an `expect`
 mismatch that must answer `conflict`. Frames are sent only to the bridge you point it at. Token
 values are never printed.
@@ -58,10 +58,11 @@ values are never printed.
 | `lib/canonical.mjs` | canonical msgpack, render hash, fingerprint, manifest hash, asset hash (items-and-assets.md section 2, 3, 5, 6) |
 | `lib/client.mjs` | request/response by id, out-of-order responses, subscriptions with seq tracking, raw frames |
 | `lib/schema.mjs`, `lib/protocol.mjs`, `lib/check.mjs` | validators and vocabularies |
+| `lib/chunks.mjs` | map chunk surfaces: air/water id lists, D23 hash, u16/i16 helpers, surface builder (mock) and validator (tests) |
 | `lib/context.mjs`, `lib/runner.mjs` | run context (transport, hello, player, requirements) and the runner |
 | `tests/*.mjs` | the suite, registered in `tests/index.mjs` |
 | `profiles/*.json` | per-game expectations (sources cited inside each file) |
-| `mock/mock-bridge.mjs` | reference mock bridge with fake Minecraft data; `--break <name>` switches make it non-conformant (`--list-breaks`) |
+| `mock/mock-bridge.mjs` | reference mock bridge with fake Minecraft data; `--break <name>` switches make it non-conformant (`--list-breaks`); `--chunk-churn` modifies the chunk under the first overworld player every 400 ms |
 | `test/selftest.test.mjs` | selftest: codec, hash vectors, mock end to end in unix and tcp mode, each break |
 
 ## Running the selftest
@@ -73,7 +74,7 @@ node --test 'conformance/test/*.test.mjs'
 Covers: the codec round-trips, the hash test vector (D17), the item and render-hash rules, the
 Rust/FiveM/Minecraft block rules (unit level), the mock passing the whole suite in unix and tcp
 modes, `--slow` tests against a fast-timer mock, and one failing-test check per `--break`. About
-20 seconds, 57 tests.
+95 seconds, 75 tests (the chunk frame tests take 14 s each).
 
 Run it with `node --test 'conformance/test/*.test.mjs'` (quote the glob so Node expands it; a bare directory argument fails on Node 22. Files are named
 `selftest.test.mjs`; the runner picks up `*.test.mjs`). The ping break (`no-ping`) takes
@@ -117,6 +118,13 @@ tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) 
 | `bad-block-data` | unix | player.nearby.blocks-mc |
 | `block-index-oob` | unix | player.nearby.blocks-mc |
 | `max-connections-4` | unix | conn.eight-concurrent |
+| `chunk-bad-length` | unix | map.chunks.schema |
+| `chunk-wrong-hash` | unix | map.chunks.schema |
+| `chunk-waterlogged-as-water` | unix | map.chunks.schema |
+| `chunk-missing-wrong` | unix | map.chunks.missing |
+| `chunk-initial-dump` | unix | chunks.subscribe.ack |
+| `chunk-no-coalesce` | unix, `--allow-actions` | chunks.subscribe.frames |
+| `chunk-oversize-frame` | unix, `--allow-actions` | chunks.subscribe.frames |
 | `no-ping` | unix | ping.keepalive-60s (slow, `PM_SELFTEST_SLOW=1`) |
 
 
@@ -190,6 +198,13 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `events.frames.shape` | events | op:events.subscribe | events frames carry a known type, time and seq from 0 (if any arrive within 2 s) | pass |
 | `events.unsubscribe.unknown` | events | op:events.unsubscribe, hello | events.unsubscribe with an unknown sub is not_found | pass |
 | `events.subscribe.types-unknown-rejected` | events | op:events.subscribe | events.subscribe with a non-contract type is refused (covered by args.events.subscribe-unknown-type) | pass |
+| `chunks.capability-consistency` | chunks | hello | features map.chunks <=> map.chunks op; chunks.stream <=> chunks.subscribe + chunks.unsubscribe | pass |
+| `map.chunks.schema` | chunks | op:map.chunks, hello | map.chunks around an online player (or [0,0] of the first world): ChunkSurface shape, bin sizes 512/512/256/512/512, index ranges, floor/water/air rules, D23 hash, void form | pass |
+| `map.chunks.missing` | chunks | op:map.chunks, hello | far chunks (1000000) are in `missing`, never in `chunks`; each requested chunk is in exactly one list | pass |
+| `map.chunks.args` | chunks | op:map.chunks, hello | 257 chunks, missing/malformed `chunks`, missing world: invalid_args; unknown world: not_found | pass |
+| `chunks.subscribe.ack` | chunks | op:chunks.subscribe, op:chunks.unsubscribe, hello | ack `{sub}`, no initial dump within 2.5 s (at most 4 organic chunks tolerated), second chunks subscription busy, unsubscribe `{}`, unknown sub not_found | pass |
+| `chunks.subscribe.args` | chunks | op:chunks.subscribe, hello | missing world invalid_args, unknown world not_found, malformed area invalid_args | pass |
+| `chunks.subscribe.frames` | chunks | op:chunks.subscribe, op:chunks.unsubscribe, op:action.run, actions, player, hello | (--allow-actions, teleport advertised) teleports the player ~3000 blocks and back; frames: schema, <= 64 chunks, no chunk twice within 2 s, no unchanged resend, seq, `dropped` positive int; area subscription gets only chunks inside the area | skip |
 | `conn.eight-concurrent` | connection | hello | at least 8 concurrent connections are accepted and answered | pass |
 | `conn.max-inflight-busy` | connection | hello | max_inflight+4 requests sent at once: all answered, extras may be busy and nothing else | pass |
 | `conn.frame-oversize-rejected` | connection | hello | a frame header announcing more than 4 MiB is rejected or the connection closed; no ok response | pass |

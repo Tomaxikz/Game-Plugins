@@ -1,11 +1,13 @@
 package dev.playermanager.bridge.mod.forge;
 
 import net.minecraftforge.eventbus.api.listener.ObjBooleanBiConsumer;
+import dev.playermanager.bridge.mod.mc.ChunkHooks;
 import dev.playermanager.bridge.mod.mc.McBridge;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.CommandEvent;
 import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.entity.living.LivingDamageEvent;
+import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.AdvancementEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -32,6 +34,11 @@ public final class ForgeEntry {
         ServerChatEvent.BUS.addListener(this::onChat);
         CommandEvent.BUS.addListener(this::onCommand);
         AdvancementEvent.AdvancementEarnEvent.BUS.addListener(this::onAdvancement);
+        ChunkEvent.Load.BUS.addListener(this::onChunkLoad);
+    }
+
+    private void onChunkLoad(ChunkEvent.Load e) {
+        if (e.getLevel() instanceof net.minecraft.world.level.Level l) ChunkHooks.chunkLoaded(l, e.getChunk());
     }
 
     private void onStarted(ServerStartedEvent e) {

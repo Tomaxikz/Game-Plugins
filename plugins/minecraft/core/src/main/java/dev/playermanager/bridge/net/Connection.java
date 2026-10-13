@@ -7,6 +7,7 @@ import dev.playermanager.bridge.proto.BridgeException;
 import dev.playermanager.bridge.proto.ErrorCode;
 import dev.playermanager.bridge.proto.Reply;
 import dev.playermanager.bridge.spi.Deadline;
+import dev.playermanager.bridge.sub.ChunkSubscription;
 import dev.playermanager.bridge.sub.EventSubscription;
 import dev.playermanager.bridge.sub.PositionSubscription;
 import dev.playermanager.bridge.sub.Subscription;
@@ -46,6 +47,7 @@ public final class Connection implements SubscriptionSink {
     private final Set<Subscription> subs = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<Subscription, Boolean>());
     public volatile PositionSubscription positionsSub;
     public volatile EventSubscription eventsSub;
+    public volatile ChunkSubscription chunksSub;
 
     public Connection(BridgeCore core, Conn conn, boolean tcp, int id) {
         this.core = core; this.conn = conn; this.tcp = tcp; this.id = id;
@@ -102,6 +104,7 @@ public final class Connection implements SubscriptionSink {
         subs.remove(s);
         if (s == positionsSub) positionsSub = null;
         if (s == eventsSub) eventsSub = null;
+        if (s == chunksSub) chunksSub = null;
         s.close();
     }
 
