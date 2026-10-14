@@ -30,18 +30,31 @@ final class Reflect {
 
     static boolean hasClass(String name) { return cls(name) != null; }
 
+    /** Per class: method name -> resolved method per parameter count (index = count; null = not looked up yet). No allocation on a hit. */
+    private static final ClassValue<ConcurrentHashMap<String, Object[]>> BY_COUNT = new ClassValue<ConcurrentHashMap<String, Object[]>>() {
+        @Override protected ConcurrentHashMap<String, Object[]> computeValue(Class<?> type) { return new ConcurrentHashMap<String, Object[]>(); }
+    };
+
     /** Finds a public method by name and parameter count (first match; stable for the overloads we use). */
     static Method method(Class<?> c, String name, int params) {
-        String key = c.getName() + "#" + name + "/" + params;
-        Object m = METHODS.get(key);
-        if (m == null) {
-            m = MISSING;
-            try {
-                for (Method x : c.getMethods()) {
-                    if (x.getName().equals(name) && x.getParameterTypes().length == params) { x.setAccessible(true); m = x; break; }
-                }
-            } catch (Throwable ignored) { }
-            METHODS.put(key, m);
+        ConcurrentHashMap<String, Object[]> byName = BY_COUNT.get(c);
+        Object[] arr = byName.get(name);
+        if (arr != null && params < arr.length && arr[params] != null) {
+            Object m = arr[params];
+            return m == MISSING ? null : (Method) m;
+        }
+        Object m = MISSING;
+        try {
+            for (Method x : c.getMethods()) {
+                if (x.getName().equals(name) && x.getParameterTypes().length == params) { x.setAccessible(true); m = x; break; }
+            }
+        } catch (Throwable ignored) { }
+        synchronized (byName) {
+            Object[] cur = byName.get(name);
+            Object[] next = new Object[Math.max(params + 1, cur == null ? 0 : cur.length)];
+            if (cur != null) System.arraycopy(cur, 0, next, 0, cur.length);
+            next[params] = m;
+            byName.put(name, next);
         }
         return m == MISSING ? null : (Method) m;
     }

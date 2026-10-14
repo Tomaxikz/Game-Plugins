@@ -29,30 +29,19 @@ final class BukkitInventories implements InventoryProvider {
     public CompletableFuture<List<Map<String, Object>>> containers(final String playerId, final Deadline deadline) {
         final UUID uuid = UUID.fromString(playerId);
         final CompletableFuture<List<Map<String, Object>>> out = new CompletableFuture<List<Map<String, Object>>>();
-        CompletableFuture<Player> found = ctx.scheduler.global(new Callable<Player>() {
-            public Player call() { return Bukkit.getPlayer(uuid); }
-        });
-        found.whenComplete(new BiConsumer<Player, Throwable>() {
-            public void accept(final Player p, Throwable err) {
-                if (err != null) { out.completeExceptionally(err); return; }
-                if (p == null) {
-                    ctx.async.execute(new Runnable() {
-                        public void run() {
-                            try { out.complete(players.offlineContainers(uuid)); } catch (Throwable t) { out.completeExceptionally(t); }
-                        }
-                    });
-                    return;
+        ctx.withPlayer(uuid, new Ctx.PlayerWork<List<Map<String, Object>>>() {
+            public List<Map<String, Object>> run(Player p) { return p == null ? null : snapshot(p); }
+        }).whenCompleteAsync(new BiConsumer<List<Map<String, Object>>, Throwable>() {
+            public void accept(List<Map<String, Object>> l, Throwable e) {
+                try {
+                    if (e != null) out.completeExceptionally(e);
+                    else if (l == null) out.complete(players.offlineContainers(uuid));     // not online: saved data
+                    else out.complete(ctx.<List<Map<String, Object>>>resolve(l));
+                } catch (Throwable t) {
+                    out.completeExceptionally(t);
                 }
-                ctx.scheduler.forPlayer(p, new Callable<List<Map<String, Object>>>() {
-                    public List<Map<String, Object>> call() { return snapshot(p); }
-                }).whenCompleteAsync(new BiConsumer<List<Map<String, Object>>, Throwable>() {
-                    public void accept(List<Map<String, Object>> l, Throwable e) {
-                        if (e != null) out.completeExceptionally(e);
-                        else out.complete(ctx.<List<Map<String, Object>>>resolve(l));
-                    }
-                }, ctx.async);
             }
-        });
+        }, ctx.async);
         return out;
     }
 

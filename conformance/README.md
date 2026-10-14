@@ -35,7 +35,7 @@ node conformance/bin/pm-conformance.mjs --list                     # all test id
 | `--only <id,...>` | Run only these ids. Unknown ids exit 2. |
 | `--player <id>` | Known online player for player-scoped tests. Default: the first online player from `players.list`. If none, those tests are skipped with "no online player". |
 | `--slow` | Enables `ping.keepalive-60s` and `conn.idle-close-120s` (about 3 minutes). |
-| `--allow-actions` | Enables `action.run.expect-conflict` (sends an `expect` that must answer `conflict`) and `chunks.subscribe.frames`, which **teleports the online player** about 3000 blocks away twice and back (needs the `teleport` action). Do not use it on a server where a player must not be moved; the player lands at the same Y, so fall or suffocation damage is possible. |
+| `--allow-actions` | Enables the `move.*` tests (they **write to the online player's inventory**: two free inventory slots, plus the head slot for the armor tests, are filled and restored, see below), `action.run.expect-conflict` (sends an `expect` that must answer `conflict`) and `chunks.subscribe.frames`, which **teleports the online player** about 3000 blocks away twice and back (needs the `teleport` action). Do not use it on a server where a player must not be moved; the player lands at the same Y, so fall or suffocation damage is possible. |
 | `--json <file>` | Writes the full report (bridge.json, hello, every result). |
 | `--list` | Prints the test ids. |
 
@@ -43,7 +43,7 @@ Output is one line per test: `PASS id — reason`, `FAIL id — reason`, `SKIP i
 Exit code 0 only when no test failed (skips do not count). Exit 1 on any failure, including no
 usable `hello`. Exit 2 on usage errors.
 
-**Safety.** The suite never runs a state-changing action (the one exception is `chunks.subscribe.frames` with `--allow-actions`, see above). Action probes are limited to
+**Safety.** The suite never runs a state-changing action without `--allow-actions`. With it, `chunks.subscribe.frames` teleports the player and the `move.*` tests edit the player's inventory: they need `set_item_live`, `remove_item_live` and the move action advertised, put dirt/stone/helmets into the two highest free inventory slots (normally 34 and 35), and clear them in a `finally` block; the head slot is only touched by `move.armor-*` and is swapped back. A failed cleanup fails the test and says so. Run them only against a player whose inventory may be edited (not holding anything in those slots is enough). Action probes are limited to
 argument-validation requests (rejected before execution) and, with `--allow-actions`, an `expect`
 mismatch that must answer `conflict`. Frames are sent only to the bridge you point it at. Token
 values are never printed.
@@ -118,6 +118,10 @@ tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) 
 | `bad-block-data` | unix | player.nearby.blocks-mc |
 | `block-index-oob` | unix | player.nearby.blocks-mc |
 | `max-connections-4` | unix | conn.eight-concurrent |
+| `move-no-swap` | unix, `--allow-actions` | move.swap, move.swap.item, move.stack-full(.item), move.stack-remainder(.item), move.full-destination-swaps(.item), move.armor-fit, move.item.destination-checks |
+| `move-overstack` | unix, `--allow-actions` | move.stack-remainder(.item), move.full-destination-swaps(.item) |
+| `move-armor-unchecked` | unix, `--allow-actions` | move.armor-mismatch |
+| `move-stale-ok` | unix, `--allow-actions` | move.empty-destination(.item), move.stale-destination(.item), move.no-destination-expectation(.item), move.item.destination-checks |
 | `chunk-bad-length` | unix | map.chunks.schema |
 | `chunk-wrong-hash` | unix | map.chunks.schema |
 | `chunk-waterlogged-as-water` | unix | map.chunks.schema |
@@ -226,6 +230,19 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `action.run.target-injection` | actions | op:action.run, hello | selector and newline targets are rejected with invalid_args (no command execution) | pass |
 | `action.run.bad-args` | actions | player, op:action.run | an advertised action with a value of the wrong kind is invalid_args (rejected before execution) | pass |
 | `action.run.expect-conflict` | actions | actions, player, op:action.run, op:player.inventory | (--allow-actions) an expect that does not match the slot returns conflict and nothing changes | skip |
+| `move.advertised` | move | hello | move_item / move_item_live advertise the destination_expected_* fields with the right kinds (D24); skip when neither is advertised | pass |
+| `move.empty-destination` | move | actions, player, op:action.run, op:player.inventory, op:item.get | (--allow-actions, move_item_live) move onto an empty slot: `{op: move, moved: n}`; a destination_expected_id other than minecraft:air is a conflict | skip |
+| `move.swap` | move | same | dirt onto stone swaps (`op: swap`) | skip |
+| `move.stack-full` | move | same | dirt x10 onto dirt x20: x30, source empty (`op: stack`, moved 10) | skip |
+| `move.stack-remainder` | move | same | dirt x40 onto dirt x50: destination 64, source 26 (moved 14) | skip |
+| `move.full-destination-swaps` | move | same | dirt x10 onto dirt x64 swaps | skip |
+| `move.stale-destination` | move | same | wrong destination_expected_id / destination expected empty / wrong source id: conflict, both slots unchanged | skip |
+| `move.no-destination-expectation` | move | same | occupied destination without destination_expected_id: conflict, unchanged | skip |
+| `move.same-slot` | move | same | source = destination: invalid_args, unchanged | skip |
+| `move.armor-mismatch` | move | same | dirt into `equipment`/`head` (empty or holding a helmet): conflict, unchanged (move_item_live only; skip if equipment is not addressable) | skip |
+| `move.armor-fit` | move | same | iron helmet (diamond if iron is worn) into `head`: `move` when empty, `swap` when a helmet is worn, then back; head restored (skip if head holds a non-helmet or is not writable) | skip |
+| `move.item.destination-checks` | move | same | (move_item) wrong destination_expected_count, wrong fingerprint and `none` on an occupied slot are conflicts; the full expectation swaps | skip |
+| `move.<name>.item` | move | same | the same cases as above for `move_item` (inside the `inventory` container); the plain ids are `move_item_live` | skip |
 | `profile.platform` | profile | hello | hello.game and hello.platform match the active profile | pass |
 | `profile.required-ops` | profile | hello | profile required ops are advertised and forbidden ops are not | pass |
 | `profile.required-features` | profile | hello | profile required features are advertised and forbidden features are not | pass |

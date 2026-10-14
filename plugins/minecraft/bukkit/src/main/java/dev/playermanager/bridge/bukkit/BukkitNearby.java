@@ -38,23 +38,23 @@ final class BukkitNearby implements NearbyProvider {
     public CompletableFuture<Map<String, Object>> nearby(final Request req) {
         final UUID uuid = UUID.fromString(req.playerId);
         final CompletableFuture<Map<String, Object>> out = new CompletableFuture<Map<String, Object>>();
-        CompletableFuture<Player> found = ctx.scheduler.global(new Callable<Player>() {
-            public Player call() { return Bukkit.getPlayer(uuid); }
-        });
-        found.whenComplete(new BiConsumer<Player, Throwable>() {
-            public void accept(final Player p, Throwable err) {
-                if (err != null) { out.completeExceptionally(err); return; }
-                if (p == null) { out.completeExceptionally(BridgeException.offline("Player is not online")); return; }
-                ctx.scheduler.forPlayer(p, new Callable<Map<String, Object>>() {
-                    public Map<String, Object> call() { return collect(p, req); }
-                }).whenCompleteAsync(new BiConsumer<Map<String, Object>, Throwable>() {
-                    public void accept(Map<String, Object> m, Throwable e) {
-                        if (e != null) out.completeExceptionally(e);
-                        else out.complete(ctx.<Map<String, Object>>resolve(m));
-                    }
-                }, ctx.async);
+        ctx.withPlayer(uuid, new Ctx.PlayerWork<Map<String, Object>>() {
+            public Map<String, Object> run(Player p) {
+                if (p == null) throw BridgeException.offline("Player is not online");
+                return collect(p, req);
             }
-        });
+        }).whenCompleteAsync(new BiConsumer<Map<String, Object>, Throwable>() {
+            public void accept(Map<String, Object> m, Throwable e) {
+                if (e != null) { out.completeExceptionally(e); return; }
+                try {
+                    Object pending = m.get("blocks");
+                    if (pending instanceof PendingSlice) m.put("blocks", ((PendingSlice) pending).build());     // the 70k-cell loop runs here, not on the game thread
+                    out.complete(ctx.<Map<String, Object>>resolve(m));
+                } catch (Throwable t) {
+                    out.completeExceptionally(t);
+                }
+            }
+        }, ctx.async);
         return out;
     }
 
@@ -168,7 +168,58 @@ final class BukkitNearby implements NearbyProvider {
         return best;
     }
 
-    private Map<String, Object> slice(Player p, World w, Location loc, Request req) {
+    /** Game-thread capture of a block slice: the chunk snapshots (copies) and the geometry. {@link #build} converts them off-thread. */
+    private final class PendingSlice {
+        final int ox, y0, oz, sx, sy, sz;
+        final int cx0, cz0, cx1, cz1;
+        final ChunkSnapshot[] snaps;        // [(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)], null = not loaded / not ours
+        final WorldMap.Info world;
+
+        PendingSlice(int ox, int y0, int oz, int sx, int sy, int sz, int cx0, int cz0, int cx1, int cz1, ChunkSnapshot[] snaps, WorldMap.Info world) {
+            this.ox = ox; this.y0 = y0; this.oz = oz; this.sx = sx; this.sy = sy; this.sz = sz;
+            this.cx0 = cx0; this.cz0 = cz0; this.cx1 = cx1; this.cz1 = cz1; this.snaps = snaps; this.world = world;
+        }
+
+        Map<String, Object> build() {
+            BlockSlice s = new BlockSlice(ox, y0, oz, sx, sy, sz);
+            int y1 = y0 + sy - 1;
+            int voidId = -1;
+            Map<BlockData, Integer> ids = new HashMap<BlockData, Integer>();
+            int ncz = cz1 - cz0 + 1;
+            for (int cx = cx0; cx <= cx1; cx++) {
+                for (int cz = cz0; cz <= cz1; cz++) {
+                    ChunkSnapshot snap = snaps[(cx - cx0) * ncz + (cz - cz0)];
+                    int xa = Math.max(ox, cx << 4), xb = Math.min(ox + sx - 1, (cx << 4) + 15);
+                    int za = Math.max(oz, cz << 4), zb = Math.min(oz + sz - 1, (cz << 4) + 15);
+                    if (snap == null) s.markTruncated();
+                    for (int z = za; z <= zb; z++) {
+                        for (int x = xa; x <= xb; x++) {
+                            for (int y = y0; y <= y1; y++) {
+                                int id;
+                                if (snap == null) { if (voidId < 0) voidId = s.paletteId(VOID); id = voidId; }
+                                else {
+                                    BlockData bd = snap.getBlockData(x & 15, y, z & 15);
+                                    Integer c = ids.get(bd);
+                                    if (c == null) {
+                                        c = Integer.valueOf(s.paletteId(BlockSlice.normalizeState(bd.getAsString())));
+                                        ids.put(bd, c);
+                                    }
+                                    id = c.intValue();
+                                }
+                                s.setPaletteId(x - ox, y - y0, z - oz, id);
+                            }
+                        }
+                    }
+                }
+            }
+            Map<String, Object> m = s.toMap();
+            m.put("world", world.world);
+            m.put("dimension", world.dimension);
+            return m;
+        }
+    }
+
+    private Object slice(Player p, World w, Location loc, Request req) {
         int rad = (int) Math.floor(req.radius);
         int bx = loc.getBlockX(), by = loc.getBlockY(), bz = loc.getBlockZ();
         Object mh = Reflect.call(w, "getMinHeight");
@@ -180,45 +231,19 @@ final class BukkitNearby implements NearbyProvider {
         int sx = rad * 2 + 1, sz = rad * 2 + 1, sy = y1 - y0 + 1;
         if ((long) sx * sz * sy > BlockSlice.MAX_CELLS) throw BridgeException.invalid("block slice exceeds 262144 cells");
         int ox = bx - rad, oz = bz - rad;
-        BlockSlice s = new BlockSlice(ox, y0, oz, sx, sy, sz);
-        int voidId = -1;
-        Map<BlockData, Integer> ids = new HashMap<BlockData, Integer>();
+        int cx0 = ox >> 4, cx1 = (ox + sx - 1) >> 4, cz0 = oz >> 4, cz1 = (oz + sz - 1) >> 4;
+        ChunkSnapshot[] snaps = new ChunkSnapshot[(cx1 - cx0 + 1) * (cz1 - cz0 + 1)];
         boolean folia = ctx.env.folia;
-        for (int cx = ox >> 4; cx <= (ox + sx - 1) >> 4; cx++) {
-            for (int cz = oz >> 4; cz <= (oz + sz - 1) >> 4; cz++) {
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
                 boolean ok = w.isChunkLoaded(cx, cz);
                 if (ok && folia) {
                     Object owned = Reflect.callStatic("org.bukkit.Bukkit", "isOwnedByCurrentRegion", w, cx, cz);
                     ok = !Boolean.FALSE.equals(owned);
                 }
-                ChunkSnapshot snap = ok ? w.getChunkAt(cx, cz).getChunkSnapshot() : null;
-                int xa = Math.max(ox, cx << 4), xb = Math.min(ox + sx - 1, (cx << 4) + 15);
-                int za = Math.max(oz, cz << 4), zb = Math.min(oz + sz - 1, (cz << 4) + 15);
-                if (snap == null) s.markTruncated();
-                for (int z = za; z <= zb; z++) {
-                    for (int x = xa; x <= xb; x++) {
-                        for (int y = y0; y <= y1; y++) {
-                            int id;
-                            if (snap == null) { if (voidId < 0) voidId = s.paletteId(VOID); id = voidId; }
-                            else {
-                                BlockData bd = snap.getBlockData(x & 15, y, z & 15);
-                                Integer c = ids.get(bd);
-                                if (c == null) {
-                                    c = Integer.valueOf(s.paletteId(BlockSlice.normalizeState(bd.getAsString())));
-                                    ids.put(bd, c);
-                                }
-                                id = c.intValue();
-                            }
-                            s.setPaletteId(x - ox, y - y0, z - oz, id);
-                        }
-                    }
-                }
+                snaps[(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)] = ok ? w.getChunkAt(cx, cz).getChunkSnapshot() : null;
             }
         }
-        Map<String, Object> m = s.toMap();
-        WorldMap.Info wi = ctx.worlds.of(w);
-        m.put("world", wi.world);
-        m.put("dimension", wi.dimension);
-        return m;
+        return new PendingSlice(ox, y0, oz, sx, sy, sz, cx0, cz0, cx1, cz1, snaps, ctx.worlds.of(w));
     }
 }

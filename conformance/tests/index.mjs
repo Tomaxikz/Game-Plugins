@@ -9,6 +9,7 @@ import { tests as connection } from './connection.mjs';
 import { tests as chunks } from './chunks.mjs';
 import { tests as assets } from './assets.mjs';
 import { tests as actions } from './actions.mjs';
+import { tests as move } from './move.mjs';
 import { tests as profile } from './profile.mjs';
 
 export const ALL_TESTS = [
@@ -21,5 +22,6 @@ export const ALL_TESTS = [
   ...connection,
   ...assets,
   ...actions,
+  ...move,
   ...profile,
 ];

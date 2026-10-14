@@ -39,16 +39,21 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
                 return;
             }
             Path root = Bukkit.getWorldContainer().toPath().toAbsolutePath().normalize();
+            dev.playermanager.bridge.util.TaskStats.startReporter(log);
             ctx = new Ctx(this, env, log, root);
             ctx.refreshWorlds();
             ctx.items.probe();
-            ctx.roster.refreshNow();
             BukkitEvents events = new BukkitEvents(ctx);
             Bukkit.getPluginManager().registerEvents(events, this);
             try {
                 Bukkit.getMessenger().registerIncomingPluginChannel(this, "minecraft:brand", events);
             } catch (Throwable t) {
                 log.debug("brand channel unavailable: " + t);
+            }
+            try {
+                Bukkit.getPluginManager().registerEvents(new ReloadListener(), this);
+            } catch (Throwable t) {
+                log.debug("reload listener unavailable: " + t);
             }
             for (Player p : Bukkit.getOnlinePlayers()) ctx.joinedAt.put(p.getUniqueId(), Long.valueOf(System.currentTimeMillis()));
 
@@ -69,7 +74,7 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
                     .build();
             BukkitPlatform platform = new BukkitPlatform(ctx, info, events);
             try {
-                Bukkit.getPluginManager().registerEvents(new BukkitChunkEvents(platform.chunks), this);
+                platform.chunks.setBlockListener(new BukkitChunkEvents(platform.chunks));       // registered on the first chunks.subscribe
             } catch (Throwable t) {
                 log.warn("chunk surface events unavailable: " + t);
             }
@@ -80,7 +85,8 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
             ctx.async.execute(new Runnable() {
                 public void run() {
                     try {
-                        if (c.start()) ctx.config = c.config();
+                        ctx.roster.refreshNow();            // ops/whitelist/ban/usercache files: read here, never on the server thread
+                        if (c.start()) { ctx.config = c.config(); events.bindBus(c.events()); }
                     } catch (Throwable t) {
                         ctx.log.error("bridge start failed", t);
                     }

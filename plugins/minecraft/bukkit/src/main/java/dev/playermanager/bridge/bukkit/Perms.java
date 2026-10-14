@@ -37,6 +37,17 @@ final class Perms {
         return vault(p);
     }
 
+    /** True when LuckPerms answers {@link #luckPerms} (its API is thread-safe, so the lookup can leave the game thread). */
+    boolean luckPermsActive() { return !lpFailed && hasLuckPerms(); }
+
+    /** Game-thread part of a lookup: the Vault path (Vault providers are not guaranteed thread-safe). Null when LuckPerms handles it. */
+    Result lookupOnGameThread(Player p) {
+        return luckPermsActive() ? null : vault(p);
+    }
+
+    /** Any thread: the LuckPerms path; null when LuckPerms is absent or does not know the user. */
+    Result lookupLuckPerms(UUID id) { return luckPerms(id); }
+
     private Result luckPerms(UUID id) {
         if (lpFailed || !hasLuckPerms()) return null;
         try {

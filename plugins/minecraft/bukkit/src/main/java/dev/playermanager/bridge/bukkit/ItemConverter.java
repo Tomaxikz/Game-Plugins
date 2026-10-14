@@ -105,9 +105,16 @@ final class ItemConverter {
         return s.getAmount() <= 0 || n.equals("AIR") || n.equals("CAVE_AIR") || n.equals("VOID_AIR") || n.equals("LEGACY_AIR");
     }
 
+    private static final java.util.concurrent.ConcurrentHashMap<Material, String> MATERIAL_IDS = new java.util.concurrent.ConcurrentHashMap<Material, String>();
+
     static String idOf(Material m) {
-        String k = Reflect.keyOf(m);
-        return k != null ? k : "minecraft:" + m.name().toLowerCase(Locale.ROOT);
+        String id = MATERIAL_IDS.get(m);
+        if (id == null) {
+            String k = Reflect.keyOf(m);
+            id = k != null ? k : "minecraft:" + m.name().toLowerCase(Locale.ROOT);
+            MATERIAL_IDS.put(m, id);
+        }
+        return id;
     }
 
     /** Game-thread snapshot; null for empty stacks. */

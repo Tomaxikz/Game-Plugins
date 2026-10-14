@@ -35,7 +35,19 @@ final class Compat {
         eff("DARKNESS", "darkness");
     }
 
+    private static final java.util.concurrent.ConcurrentHashMap<Object, String> EFFECT_IDS = new java.util.concurrent.ConcurrentHashMap<Object, String>();
+    private static final java.util.concurrent.ConcurrentHashMap<Object, String> ATTR_IDS = new java.util.concurrent.ConcurrentHashMap<Object, String>();
+    private static final java.util.concurrent.ConcurrentHashMap<Object, String> ENTITY_IDS = new java.util.concurrent.ConcurrentHashMap<Object, String>();
+    private static final java.util.concurrent.ConcurrentHashMap<String, Object> ATTR_BY_NAME = new java.util.concurrent.ConcurrentHashMap<String, Object>();
+    private static final Object NO_ATTR = new Object();
+
     static String effectId(PotionEffectType t) {
+        String id = EFFECT_IDS.get(t);
+        if (id == null) { id = effectId0(t); EFFECT_IDS.put(t, id); }
+        return id;
+    }
+
+    private static String effectId0(PotionEffectType t) {
         String k = Reflect.keyOf(t);
         if (k != null) return k;
         String n = t.getName();
@@ -84,6 +96,12 @@ final class Compat {
 
     /** {@code minecraft:max_health} style id (no {@code generic.} prefix). */
     static String attributeId(Object attr) {
+        String id = ATTR_IDS.get(attr);
+        if (id == null) { id = attributeId0(attr); ATTR_IDS.put(attr, id); }
+        return id;
+    }
+
+    private static String attributeId0(Object attr) {
         String k = Reflect.keyOf(attr);
         if (k != null) {
             String path = k.substring(k.indexOf(':') + 1);
@@ -100,9 +118,14 @@ final class Compat {
     }
 
     static Object attribute(String shortName) {
-        String want = "minecraft:" + shortName;
-        for (Object a : attributes()) if (attributeId(a).equals(want)) return a;
-        return null;
+        Object r = ATTR_BY_NAME.get(shortName);
+        if (r == null) {
+            String want = "minecraft:" + shortName;
+            r = NO_ATTR;
+            for (Object a : attributes()) if (attributeId(a).equals(want)) { r = a; break; }
+            ATTR_BY_NAME.put(shortName, r);
+        }
+        return r == NO_ATTR ? null : r;
     }
 
     static Object instance(LivingEntity e, Object attr) {
@@ -124,6 +147,12 @@ final class Compat {
     // ---------------------------------------------------------------- entities
 
     static String entityTypeId(EntityType t) {
+        String id = ENTITY_IDS.get(t);
+        if (id == null) { id = entityTypeId0(t); ENTITY_IDS.put(t, id); }
+        return id;
+    }
+
+    private static String entityTypeId0(EntityType t) {
         String k = Reflect.keyOf(t);
         if (k != null) return k;
         String n = t.getName();

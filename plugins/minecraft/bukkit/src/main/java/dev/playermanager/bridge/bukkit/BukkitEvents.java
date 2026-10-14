@@ -5,7 +5,9 @@ import java.net.InetSocketAddress;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import org.bukkit.Bukkit;
 import org.bukkit.entity.Entity;
+import org.bukkit.event.HandlerList;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.Listener;
@@ -34,6 +36,61 @@ final class BukkitEvents implements Listener, PluginMessageListener {
 
     void attach(BridgeCore core) { this.core = core; }
 
+    // ---- high-volume listeners are registered with Bukkit only while an events subscription asks for their type; with none
+    // ---- subscribed, Bukkit does not even dispatch these events to the bridge.
+
+    private final class ChatL implements Listener {
+        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+        public void onChat(AsyncPlayerChatEvent e) { BukkitEvents.this.onChat(e); }
+    }
+
+    private final class CommandL implements Listener {
+        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+        public void onCommand(PlayerCommandPreprocessEvent e) { BukkitEvents.this.onCommand(e); }
+        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+        public void onConsole(ServerCommandEvent e) { BukkitEvents.this.onConsole(e); }
+    }
+
+    private final class AdvancementL implements Listener {
+        @EventHandler(priority = EventPriority.MONITOR)
+        public void onAdvancement(PlayerAdvancementDoneEvent e) { BukkitEvents.this.onAdvancement(e); }
+    }
+
+    private final class DamageL implements Listener {
+        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+        public void onDamage(EntityDamageEvent e) { BukkitEvents.this.onDamage(e); }
+    }
+
+    private final java.util.Map<String, Listener> dynamic = new java.util.LinkedHashMap<String, Listener>();
+    private final java.util.Set<String> registered = new java.util.HashSet<String>();
+
+    /** Called once the bridge is running: follows subscriptions from now on. */
+    void bindBus(final dev.playermanager.bridge.sub.EventBus bus) {
+        synchronized (dynamic) {
+            dynamic.put("chat", new ChatL());
+            dynamic.put("command", new CommandL());
+            dynamic.put("advancement", new AdvancementL());
+            dynamic.put("damage", new DamageL());
+        }
+        bus.onChange(new Runnable() { public void run() { sync(bus); } });
+        sync(bus);
+    }
+
+    private void sync(dev.playermanager.bridge.sub.EventBus bus) {
+        synchronized (dynamic) {
+            for (java.util.Map.Entry<String, Listener> e : dynamic.entrySet()) {
+                boolean want = bus.hasSubscribers(e.getKey());
+                boolean on = registered.contains(e.getKey());
+                try {
+                    if (want && !on) { Bukkit.getPluginManager().registerEvents(e.getValue(), ctx.plugin); registered.add(e.getKey()); }
+                    else if (!want && on) { HandlerList.unregisterAll(e.getValue()); registered.remove(e.getKey()); }
+                } catch (Throwable t) {
+                    ctx.log.debug("event listener toggle failed for " + e.getKey() + ": " + t);
+                }
+            }
+        }
+    }
+
     private static Map<String, Object> player(Player p) {
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("id", p.getUniqueId().toString());
@@ -49,6 +106,12 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         } catch (Throwable t) {
             ctx.log.debug("event " + type + " dropped: " + t);
         }
+    }
+
+    /** Always called (subscription or not): cached reads of this player and the roster are dropped. */
+    private void changed(Player p) {
+        BridgeCore c = core;
+        if (c != null) c.playerChanged(p.getUniqueId().toString());
     }
 
     private boolean wanted(String type) {
@@ -69,6 +132,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent e) {
         ctx.joinedAt.put(e.getPlayer().getUniqueId(), Long.valueOf(System.currentTimeMillis()));
+        changed(e.getPlayer());
         if (!wanted("join")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("player", player(e.getPlayer()));
@@ -81,6 +145,8 @@ final class BukkitEvents implements Listener, PluginMessageListener {
     public void onQuit(PlayerQuitEvent e) {
         ctx.joinedAt.remove(e.getPlayer().getUniqueId());
         ctx.brands.remove(e.getPlayer().getUniqueId());
+        ctx.forget(e.getPlayer().getUniqueId());
+        changed(e.getPlayer());
         if (!wanted("leave")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("player", player(e.getPlayer()));
@@ -93,6 +159,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
     @EventHandler(priority = EventPriority.MONITOR)
     @SuppressWarnings("deprecation")
     public void onDeath(PlayerDeathEvent e) {
+        changed(e.getEntity());
         if (!wanted("death")) return;
         Player p = e.getEntity();
         Map<String, Object> m = new LinkedHashMap<String, Object>();
@@ -127,8 +194,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         return k;
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onChat(AsyncPlayerChatEvent e) {
+    void onChat(AsyncPlayerChatEvent e) {
         if (!wanted("chat")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("player", player(e.getPlayer()));
@@ -137,8 +203,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         emit("chat", m);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onCommand(PlayerCommandPreprocessEvent e) {
+    void onCommand(PlayerCommandPreprocessEvent e) {
         if (!wanted("command")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("player", player(e.getPlayer()));
@@ -148,8 +213,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         emit("command", m);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onConsole(ServerCommandEvent e) {
+    void onConsole(ServerCommandEvent e) {
         if (!wanted("command")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("command", e.getCommand());
@@ -157,8 +221,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         emit("command", m);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
-    public void onAdvancement(PlayerAdvancementDoneEvent e) {
+    void onAdvancement(PlayerAdvancementDoneEvent e) {
         if (!wanted("advancement")) return;
         String key = e.getAdvancement().getKey().toString();
         if (key.contains("/recipes/") || key.contains(":recipes/")) return;
@@ -168,8 +231,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
         emit("advancement", m);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onDamage(EntityDamageEvent e) {
+    void onDamage(EntityDamageEvent e) {
         if (!(e.getEntity() instanceof Player) || !wanted("damage")) return;
         Player p = (Player) e.getEntity();
         double dmg = e.getFinalDamage();
@@ -185,6 +247,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onKick(PlayerKickEvent e) {
+        changed(e.getPlayer());
         if (!wanted("kick")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("player", player(e.getPlayer()));

@@ -128,14 +128,14 @@ final class McGame {
         if (play != null) g.put("play_time_seconds", play / 20L);
         if (wants(fields, "game.statistics")) {
             try {
-                g.put("statistics", statistics(stats, deadline));
+                g.put("statistics", ctx.stats.get(uuid, () -> statistics(stats, deadline)));
             } catch (Throwable t) {
                 ctx.log.debug("statistics unavailable: " + t);
             }
         }
         if (wants(fields, "game.advancements")) {
             try {
-                g.put("advancements", advancements(ctx, p, includeUnobtained, deadline));
+                g.put("advancements", ctx.advancements.get(uuid + (includeUnobtained ? "+" : "-"), () -> advancements(ctx, p, includeUnobtained, deadline)));
             } catch (Throwable t) {
                 ctx.log.debug("advancements unavailable: " + t);
             }

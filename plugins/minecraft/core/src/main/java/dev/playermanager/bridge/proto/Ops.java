@@ -19,6 +19,7 @@ import dev.playermanager.bridge.sub.ChunkSubscription;
 import dev.playermanager.bridge.sub.EventSubscription;
 import dev.playermanager.bridge.sub.PositionSubscription;
 import dev.playermanager.bridge.sub.Subscription;
+import dev.playermanager.bridge.util.ReadCache;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -61,18 +62,18 @@ public final class Ops {
         }
         switch (op) {
             case "hello": return hello(args);
-            case "server.info": return serverInfo(d);
-            case "players.list": return playersList(args, d);
-            case "player.get": return playerGet(args, d);
-            case "player.inventory": return playerInventory(args, d);
-            case "item.get": return itemGet(args, d);
-            case "player.nearby": return playerNearby(args, d);
+            case "server.info": return cached(op, args, null, d, () -> serverInfo(d));
+            case "players.list": return cached(op, args, null, d, () -> playersList(args, d));
+            case "player.get": return cached(op, args, playerOf(args), d, () -> playerGet(args, d));
+            case "player.inventory": return cached(op, args, playerOf(args), d, () -> playerInventory(args, d));
+            case "item.get": return cached(op, args, playerOf(args), d, () -> itemGet(args, d));
+            case "player.nearby": return cached(op, args, playerOf(args), d, () -> playerNearby(args, d));
             case "positions.subscribe": return positionsSubscribe(c, args);
             case "positions.keyframe": return positionsKeyframe(c, args);
             case "positions.unsubscribe": return unsubscribe(c, args, "positions");
             case "events.subscribe": return eventsSubscribe(c, args);
             case "events.unsubscribe": return unsubscribe(c, args, "events");
-            case "map.chunks": return mapChunks(args, d);
+            case "map.chunks": return cached(op, args, null, d, () -> mapChunks(args, d));
             case "chunks.subscribe": return chunksSubscribe(c, args);
             case "chunks.unsubscribe": return unsubscribe(c, args, "chunks");
             case "action.run": return actionRun(args, d);
@@ -80,6 +81,24 @@ public final class Ops {
             case "assets.get": return assetsGet(args);
             default: throw BridgeException.unsupported("unknown operation '" + op + "'");
         }
+    }
+
+    // ------------------------------------------------------------------ read coalescing
+
+    /** Player id an op depends on, or null when the argument is absent/malformed (the op itself reports that). */
+    private static String playerOf(Args a) {
+        Object v = a.raw().get("id");
+        return v instanceof String ? (String) v : null;
+    }
+
+    private Object cached(String op, Args a, String player, Deadline d, java.util.concurrent.Callable<Object> compute) throws Exception {
+        // the cached value is a PreEncoded: every response that reuses it copies the same bytes instead of encoding again
+        return core.readCache().get(ReadCache.key(op, a.raw()), player, d, new java.util.concurrent.Callable<Object>() {
+            public Object call() throws Exception {
+                Object v = compute.call();
+                return v instanceof Reply || v instanceof dev.playermanager.bridge.codec.PreEncoded ? v : new dev.playermanager.bridge.codec.PreEncoded(v);
+            }
+        });
     }
 
     // ------------------------------------------------------------------ hello
@@ -205,7 +224,8 @@ public final class Ops {
         for (int level = ItemRecords.FULL; level <= ItemRecords.NO_CONTENTS; level++) {
             Map<String, Object> m = new LinkedHashMap<String, Object>();
             m.put("containers", ItemRecords.resolve(cs, level));
-            if (MsgPack.encode(m).length < Framing.MAX_FRAME - 64 * 1024 || level == ItemRecords.NO_CONTENTS) return m;
+            byte[] enc = MsgPack.encode(m);
+            if (enc.length < Framing.MAX_FRAME - 64 * 1024 || level == ItemRecords.NO_CONTENTS) return new dev.playermanager.bridge.codec.PreEncoded(m, enc);
         }
         throw BridgeException.internal("unreachable");
     }
@@ -238,8 +258,9 @@ public final class Ops {
                 rec.remove("truncated");
                 Map<String, Object> out = new LinkedHashMap<String, Object>();
                 out.put("item", rec);
-                if (MsgPack.encode(out).length > Framing.MAX_FRAME - 1024) throw BridgeException.unsupported("item too large");
-                return out;
+                byte[] enc = MsgPack.encode(out);
+                if (enc.length > Framing.MAX_FRAME - 1024) throw BridgeException.unsupported("item too large");
+                return new dev.playermanager.bridge.codec.PreEncoded(out, enc);
             }
             throw BridgeException.notFound("slot is empty");
         }
@@ -455,7 +476,13 @@ public final class Ops {
                     ec == null ? null : Integer.valueOf(((Number) ec).intValue()), efp == null ? null : efp.toString());
         }
 
-        ActionResult r = Await.get(handler.run(new ActionRequest(spec, target, targetIsIp, clean, expect, d)), d);
+        core.readCache().invalidateAll();
+        ActionResult r;
+        try {
+            r = Await.get(handler.run(new ActionRequest(spec, target, targetIsIp, clean, expect, d)), d);
+        } finally {
+            core.readCache().invalidateAll();      // reads that started while the action ran must not be reused
+        }
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("ok", r.ok);
         if (r.message != null) out.put("message", r.message);

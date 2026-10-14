@@ -134,15 +134,15 @@ public final class Connection implements SubscriptionSink {
     // ------------------------------------------------------------ writing
 
     public void send(Map<String, Object> message) {
-        byte[] body;
+        byte[] body;        // complete frame: u32 length + body
         try {
-            body = MsgPack.encode(message);
-            if (body.length > Framing.MAX_FRAME) {
+            body = MsgPack.encodeFramed(message);
+            if (body.length - 4 > Framing.MAX_FRAME) {
                 Map<String, Object> m = new LinkedHashMap<String, Object>();
                 m.put("id", message.get("id"));
                 m.put("ok", false);
                 m.put("error", error(ErrorCode.INTERNAL, "response exceeds 4 MiB frame limit"));
-                body = MsgPack.encode(m);
+                body = MsgPack.encodeFramed(m);
             }
         } catch (RuntimeException e) {
             core.log().error("encode failed", e);
@@ -150,7 +150,7 @@ public final class Connection implements SubscriptionSink {
             m.put("id", message.get("id"));
             m.put("ok", false);
             m.put("error", error(ErrorCode.INTERNAL, "response encoding failed: " + e.getMessage()));
-            body = MsgPack.encode(m);
+            body = MsgPack.encodeFramed(m);
         }
         if (open) outbox.add(body);
     }
@@ -161,14 +161,14 @@ public final class Connection implements SubscriptionSink {
                 Object o = outbox.take();
                 if (o == POISON) break;
                 if (o instanceof byte[]) {
-                    Framing.write(conn.out(), (byte[]) o);
+                    Framing.writeFramed(conn.out(), (byte[]) o);
                     lastActivity = System.nanoTime();
                 } else {
                     Subscription s = (Subscription) o;
                     Map<String, Object> f;
                     while ((f = s.nextFrame()) != null) {
-                        byte[] body = MsgPack.encode(f);
-                        if (body.length <= Framing.MAX_FRAME) Framing.write(conn.out(), body);
+                        byte[] body = MsgPack.encodeFramed(f);
+                        if (body.length - 4 <= Framing.MAX_FRAME) Framing.writeFramed(conn.out(), body);
                         lastActivity = System.nanoTime();
                     }
                     s.queued.set(false);

@@ -23,6 +23,8 @@ public class FakePlatform implements Platform {
     private final PlatformInfo info;
     private final ActionRegistry registry = new ActionRegistry();
     public volatile String lastThread;
+    /** Number of times the game thread was asked for player.get / players.list / player.inventory data. */
+    public final java.util.concurrent.atomic.AtomicInteger readCalls = new java.util.concurrent.atomic.AtomicInteger();
     public final FakeChunks chunks = new FakeChunks(main);
     public volatile boolean chunksEnabled = true;
 
@@ -108,6 +110,7 @@ public class FakePlatform implements Platform {
         return new PlayerProvider() {
             public CompletableFuture<List<Map<String, Object>>> list(boolean off, boolean sens, Deadline d) {
                 return supply(() -> {
+                    readCalls.incrementAndGet();
                     List<Map<String, Object>> rows = new ArrayList<>();
                     Map<String, Object> a = new LinkedHashMap<>();
                     a.put("id", ALICE); a.put("name", "Alice"); a.put("online", true); a.put("ping", 42);
@@ -122,6 +125,7 @@ public class FakePlatform implements Platform {
 
             public CompletableFuture<Map<String, Object>> get(String id, Set<String> fields, boolean sens, boolean unob, Deadline d) {
                 return supply(() -> {
+                    readCalls.incrementAndGet();
                     if (!id.equals(ALICE)) throw BridgeException.notFound("unknown player");
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", id); m.put("name", "Alice"); m.put("online", true);
@@ -148,6 +152,7 @@ public class FakePlatform implements Platform {
 
     @Override public InventoryProvider inventory() {
         return (id, d) -> supply(() -> {
+            readCalls.incrementAndGet();
             if (!id.equals(ALICE)) throw BridgeException.notFound("unknown player");
             List<Map<String, Object>> cs = new ArrayList<>();
             Map<String, Object> inv = new LinkedHashMap<>();

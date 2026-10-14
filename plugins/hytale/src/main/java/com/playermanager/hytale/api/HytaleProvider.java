@@ -116,10 +116,57 @@ public final class HytaleProvider implements GameProvider {
 
     void trackJoin(UUID id) {
         joinedAt.put(id, System.currentTimeMillis() / 1000L);
+        presenceChanged(id);
     }
 
     void trackLeave(UUID id) {
         joinedAt.remove(id);
+        presenceChanged(id);
+    }
+
+    private volatile Consumer<String> presence = id -> { };
+    private volatile java.util.function.Predicate<String> demand = type -> true;
+
+    @Override
+    public void setPresenceListener(Consumer<String> onChange) {
+        this.presence = onChange == null ? id -> { } : onChange;
+    }
+
+    @Override
+    public void setEventDemand(java.util.function.Predicate<String> wants) {
+        this.demand = wants == null ? type -> true : wants;
+    }
+
+    /** True when an events subscription wants this type; listeners return before doing any work otherwise. */
+    boolean wants(String type) {
+        try {
+            return demand.test(type);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private void presenceChanged(UUID id) {
+        try {
+            presence.accept(id.toString());
+        } catch (Throwable t) {
+            // cache invalidation must never disturb join/leave
+        }
+    }
+
+    /** UUID strings are immutable per player: build each once instead of at every sample. */
+    private final Map<UUID, String> idStrings = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private String idString(UUID u) {
+        String s = idStrings.get(u);
+        if (s == null) {
+            if (idStrings.size() > 4096) {
+                idStrings.clear();
+            }
+            s = u.toString();
+            idStrings.put(u, s);
+        }
+        return s;
     }
 
     public void registerEvents(com.hypixel.hytale.event.EventRegistry events,
@@ -932,7 +979,7 @@ public final class HytaleProvider implements GameProvider {
                     Rotation3f rot = hr != null ? hr.getRotation() : tc.getRotation();
                     boolean dead = st.getComponent(ref, DeathComponent.getComponentType()) != null;
                     var p = tc.getPosition();
-                    out.add(new PositionSample(pr.getUuid().toString(), pr.getUsername(), wn,
+                    out.add(new PositionSample(idString(pr.getUuid()), pr.getUsername(), wn,
                             p.x(), p.y(), p.z(), deg(rot.yaw()), deg(rot.pitch()), dead));
                 }
                 return out;

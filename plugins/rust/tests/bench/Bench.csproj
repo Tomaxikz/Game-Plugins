@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Micro-benchmarks for the protocol core (encoder, read coalescing, idle wake-ups).
+       Run: dotnet run -c Release project tests/bench    (compare an older plugin with the PluginFile property) -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS0618;CS0649;CS0169;CS0414;CS0219;CS8632</NoWarn>
+    <PluginFile Condition="'$(PluginFile)' == ''">$(MSBuildThisFileDirectory)../../PlayerManagerRust.cs</PluginFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(PluginFile)" />
+    <Compile Include="../stubs/*.cs" />
+    <Compile Include="Program.cs" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>

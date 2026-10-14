@@ -32,13 +32,36 @@ final class BukkitChunks implements ChunkSource {
     private static final int FOLIA_PER_TICK = 6;
     private static final boolean VERIFY = Boolean.getBoolean("playermanager.chunks.verify") || "true".equals(System.getenv("PM_CHUNKS_VERIFY"));
 
+    private static final java.lang.reflect.Method IF_LOADED = Reflect.method(World.class, "getChunkAtIfLoaded", int.class, int.class);
+
     private final Ctx ctx;
     private final ConcurrentHashMap<UUID, ChunkWorld> levels = new ConcurrentHashMap<UUID, ChunkWorld>();
     private volatile ChunkHub hub;
 
     BukkitChunks(Ctx ctx) { this.ctx = ctx; }
 
-    @Override public void attach(ChunkHub hub) { this.hub = hub; }
+    private volatile org.bukkit.event.Listener blockListener;
+    private boolean blockListenerOn;
+
+    /** The block-change listener is registered with Bukkit only while a chunks subscription exists (no per-event cost otherwise). */
+    void setBlockListener(org.bukkit.event.Listener l) { this.blockListener = l; }
+
+    private synchronized void toggleBlockListener(boolean on) {
+        org.bukkit.event.Listener l = blockListener;
+        if (l == null || on == blockListenerOn) return;
+        try {
+            if (on) Bukkit.getPluginManager().registerEvents(l, ctx.plugin);
+            else org.bukkit.event.HandlerList.unregisterAll(l);
+            blockListenerOn = on;
+        } catch (Throwable t) {
+            ctx.log.debug("chunk listener toggle failed: " + t);
+        }
+    }
+
+    @Override public void attach(ChunkHub hub) {
+        this.hub = hub;
+        hub.onActiveChange(new java.util.function.Consumer<Boolean>() { public void accept(Boolean on) { toggleBlockListener(on.booleanValue()); } });
+    }
 
     /** True while a chunks subscription exists. Listeners test this first so an idle bridge does no work. */
     boolean active() {
@@ -90,8 +113,14 @@ final class BukkitChunks implements ChunkSource {
 
     private LoadedChunk capture(World w, int cx, int cz) {
         try {
-            if (!w.isChunkLoaded(cx, cz)) return null;
-            Chunk ch = w.getChunkAt(cx, cz);                       // loaded: this does not generate or load anything
+            Chunk ch;
+            if (IF_LOADED != null) {                                // Paper: one lookup that never loads or generates
+                ch = (Chunk) IF_LOADED.invoke(w, cx, cz);
+                if (ch == null) return null;
+            } else {
+                if (!w.isChunkLoaded(cx, cz)) return null;
+                ch = w.getChunkAt(cx, cz);                         // loaded: this does not generate or load anything
+            }
             ChunkSnapshot snap = ch.getChunkSnapshot(true, true, false);
             Object mh = Reflect.call(w, "getMinHeight");
             int min = mh instanceof Number ? ((Number) mh).intValue() : 0;

@@ -95,12 +95,38 @@ namespace Oxide.Plugins
                 /// <summary>Encode a value. canonical = sorted map keys, null map values dropped, integral floats as ints (hash input only).</summary>
                 public static byte[] Encode(object v, bool canonical)
                 {
-                    var b = new Buf();
-                    Enc(b, v, canonical, 0);
-                    var r = new byte[b.N];
-                    Buffer.BlockCopy(b.B, 0, r, 0, b.N);
-                    return r;
+                    var b = Scratch();
+                    b.N = 0;
+                    try
+                    {
+                        Enc(b, v, canonical, 0);
+                        var r = new byte[b.N];
+                        Buffer.BlockCopy(b.B, 0, r, 0, b.N);
+                        return r;
+                    }
+                    finally { if (b.B.Length > (1 << 20)) b.B = new byte[4096]; }
                 }
+
+                /// <summary>Encode into one length-prefixed frame (4-byte big-endian length + body) with a single allocation.</summary>
+                public static byte[] EncodeFramed(object v)
+                {
+                    var b = Scratch();
+                    b.N = 4;
+                    try
+                    {
+                        Enc(b, v, false, 0);
+                        int len = b.N - 4;
+                        b.B[0] = (byte)(len >> 24); b.B[1] = (byte)(len >> 16); b.B[2] = (byte)(len >> 8); b.B[3] = (byte)len;
+                        var r = new byte[b.N];
+                        Buffer.BlockCopy(b.B, 0, r, 0, b.N);
+                        return r;
+                    }
+                    finally { if (b.B.Length > (1 << 20)) b.B = new byte[4096]; }
+                }
+
+                // One reusable encode buffer per thread (writer threads, hub thread, test threads). Enc never re-enters Encode.
+                [ThreadStatic] private static Buf scratch;
+                private static Buf Scratch() { return scratch ?? (scratch = new Buf()); }
 
                 private static void Int(Buf b, long v)
                 {
@@ -141,13 +167,14 @@ namespace Oxide.Plugins
 
                 private static void Str(Buf b, string s)
                 {
-                    var bytes = Encoding.UTF8.GetBytes(s);
-                    int n = bytes.Length;
+                    int n = Encoding.UTF8.GetByteCount(s);
                     if (n <= 31) b.U8(0xa0 | n);
                     else if (n <= 255) { b.U8(0xd9); b.U8(n); }
                     else if (n <= 65535) { b.U8(0xda); b.U16(n); }
                     else { b.U8(0xdb); b.U32((uint)n); }
-                    b.Raw(bytes, 0, n);
+                    b.Ensure(n);
+                    Encoding.UTF8.GetBytes(s, 0, s.Length, b.B, b.N);   // straight into the buffer: no temporary byte[]
+                    b.N += n;
                 }
 
                 private static void Bin(Buf b, byte[] d)
@@ -201,6 +228,19 @@ namespace Oxide.Plugins
                     var bin = v as byte[];
                     if (bin != null) { Bin(b, bin); return; }
                     var dict = v as IDictionary;
+                    if (dict != null && !canon)
+                    {
+                        // Wire path: no per-map key list and no per-key byte[] (enumeration order is unchanged).
+                        MapHeader(b, dict.Count);
+                        foreach (DictionaryEntry e in dict)
+                        {
+                            var k = e.Key as string;
+                            if (k == null) throw new InvalidOperationException("msgpack: map keys must be strings");
+                            Str(b, k);
+                            Enc(b, e.Value, false, depth + 1);
+                        }
+                        return;
+                    }
                     if (dict != null)
                     {
                         var keys = new List<KeyValuePair<byte[], object>>();
@@ -223,6 +263,13 @@ namespace Oxide.Plugins
                             b.Raw(kv.Key, 0, n);
                             Enc(b, kv.Value, canon, depth + 1);
                         }
+                        return;
+                    }
+                    var ilist = v as IList;
+                    if (ilist != null)
+                    {
+                        ArrHeader(b, ilist.Count);
+                        for (int i = 0; i < ilist.Count; i++) Enc(b, ilist[i], canon, depth + 1);
                         return;
                     }
                     var en = v as IEnumerable;
@@ -420,7 +467,7 @@ namespace Oxide.Plugins
                             m["fingerprint"] = Fingerprint(m);
                             m["hash"] = RenderHash(RenderSubset(m));
                         }
-                        foreach (var v in m.Values.ToList()) Finalize(v);
+                        foreach (var v in m.Values) Finalize(v);   // keys were added above, before enumeration starts
                         return;
                     }
                     if (node is string || node is byte[]) return;
@@ -634,6 +681,8 @@ namespace Oxide.Plugins
             public string Transport = "auto";               // auto | unix | tcp
             public List<string> RedactCommands = new List<string> { "login", "password", "passwd", "auth", "register", "pin", "pm.", "rcon", "server.rcon" };
             public bool ExportAddress = true;
+            /// <summary>Identical read requests (server.info, players.list, player.get, player.inventory) in flight or finished within this window share one game-thread computation. 0 disables.</summary>
+            public int ReadCoalesceMs = 500;
 
             public const string DefaultJson =
                 "{\n  \"enabled_ops\": [\"*\"],\n  \"disabled_actions\": [],\n  \"positions_min_interval_ms\": 250,\n  \"max_connections\": 8,\n  \"tcp_fallback_port\": 25590,\n" +
@@ -678,7 +727,23 @@ namespace Oxide.Plugins
             public Action Direct;           // system work without a connection
             public long DeadlineMs;
             public int State;               // 0 pending, 1 finished
+            public ReadEntry Entry;         // set on the leader of a coalesced read
+            public bool Shared;             // response data is shared with other requests (see Conn.WriteOne)
         }
+
+        /// <summary>One coalesced read: the leader computes on the game thread, followers (and later requests inside the window) reuse the result.</summary>
+        public sealed class ReadEntry
+        {
+            public string Key, Player;
+            public long At;
+            public bool Done;
+            public object Result;
+            public ProtoException Error;
+            public List<Work> Waiters = new List<Work>();
+        }
+
+        /// <summary>Frame whose data tree is shared between connections: hash/fingerprint filling and encoding are serialised.</summary>
+        public sealed class SharedMap : Map { }
 
         public sealed class PosSub
         {
@@ -731,6 +796,7 @@ namespace Oxide.Plugins
 
         public sealed class Conn
         {
+            private static readonly object SharedEncodeLock = new object();
             public readonly BridgeCore BridgeCore;
             public readonly string Remote;
             private readonly Stream stream;
@@ -841,8 +907,16 @@ namespace Oxide.Plugins
                     byte[] enc = null;
                     try
                     {
-                        Protocol.Canon.Finalize(m);
-                        enc = Protocol.Pack.Encode(m, false);
+                        if (m is SharedMap)
+                        {
+                            // The data tree is shared with other connections' writer threads: fill + encode under one lock.
+                            lock (SharedEncodeLock) { Protocol.Canon.Finalize(m); enc = Protocol.Pack.Encode(m, false); }
+                        }
+                        else
+                        {
+                            Protocol.Canon.Finalize(m);
+                            enc = Protocol.Pack.Encode(m, false);
+                        }
                     }
                     catch (Exception e) { BridgeCore.Log("encode failed: " + e.Message); }
                     if (enc == null || enc.Length > MaxFrame)
@@ -897,6 +971,14 @@ namespace Oxide.Plugins
             private PosSample[] newSample;
             private readonly object sampleLock = new object();
             private int eventMask;
+            private int wakeArmed;
+            private readonly object readLock = new object();
+            private readonly Dictionary<string, ReadEntry> reads = new Dictionary<string, ReadEntry>();
+            public int ReadHits, ReadMisses;
+            /// <summary>Raised (from any thread) when work lands on an idle main-thread queue. The plugin pumps Drain from it, so no timer runs while idle.</summary>
+            public Action OnMainWork;
+            /// <summary>Raised when the first connection arrives / the last one leaves.</summary>
+            public Action<bool> OnActive;
             public static readonly string ManifestHash = Protocol.Canon.Hex(Protocol.Canon.Sha256(Protocol.Pack.Encode(new List<object>(), true)), 16);
 
             public BridgeCore(IGameProvider game, BridgeConfig cfg, string bridgeVersion, bool tcpMode)
@@ -934,13 +1016,17 @@ namespace Oxide.Plugins
                 {
                     if (conns.Count >= Cfg.MaxConnections) return false;
                     conns.Add(c);
-                    return true;
+                    if (conns.Count == 1 && OnActive != null) { try { OnActive(true); } catch (Exception e) { Log("active callback failed: " + e.Message); } }
                 }
+                signal.Set();
+                return true;
             }
 
             public void OnClosed(Conn c)
             {
-                lock (conns) conns.Remove(c);
+                bool nowIdle;
+                lock (conns) { conns.Remove(c); nowIdle = conns.Count == 0; }
+                if (nowIdle && OnActive != null) { try { OnActive(false); } catch (Exception e) { Log("active callback failed: " + e.Message); } }
                 bool changed = false;
                 lock (subLock)
                 {
@@ -948,7 +1034,8 @@ namespace Oxide.Plugins
                     if (c.Ev != null) { evSubs = evSubs.Where(s => s != c.Ev).ToArray(); c.Ev = null; changed = true; }
                 }
                 if (changed) RecalcMask();
-                foreach (var w in pending.Keys) if (w.C == c) Complete(w, null, Err("internal", "connection closed"));
+                // A coalesced leader keeps running for the other connections waiting on it; its reply to this closed connection is dropped.
+                foreach (var w in pending.Keys) if (w.C == c && w.Entry == null) Complete(w, null, Err("internal", "connection closed"));
             }
 
             // ---------- main-thread queue ----------
@@ -956,6 +1043,27 @@ namespace Oxide.Plugins
             public void RunOnMain(Action a)
             {
                 queue.Enqueue(new Work { Direct = a, DeadlineMs = long.MaxValue });
+                NotifyMain();
+            }
+
+            private void NotifyMain()
+            {
+                if (Interlocked.CompareExchange(ref wakeArmed, 1, 0) != 0) return;
+                var cb = OnMainWork;
+                if (cb == null) return;
+                try { cb(); } catch (Exception e) { Log("main wake failed: " + e.Message); }
+            }
+
+            /// <summary>One pump step for the plugin: drains within the budget; returns true when work remains (call again shortly).
+            /// When it returns false the wake flag is re-armed, so the next enqueue calls OnMainWork again.</summary>
+            public bool DrainStep(int maxItems, double budgetMs)
+            {
+                try { Drain(maxItems, budgetMs); }
+                catch (Exception e) { Log("drain failed: " + e.Message); }
+                if (!queue.IsEmpty) return true;
+                Interlocked.Exchange(ref wakeArmed, 0);
+                if (queue.IsEmpty) return false;
+                return Interlocked.CompareExchange(ref wakeArmed, 1, 0) == 0;   // raced with an enqueue: keep pumping
             }
 
             /// <summary>Called by the main-thread timer. Budget: maxItems requests or budgetMs, whichever first.</summary>
@@ -996,8 +1104,101 @@ namespace Oxide.Plugins
                 byte b;
                 pending.TryRemove(w, out b);
                 Interlocked.Decrement(ref w.C.Inflight);
+                if (w.Entry != null) { FinishRead(w.Entry, data, err, w); return; }
                 if (err != null) w.C.SendError(w.Id, err.Code, err.Message);
                 else w.C.SendOk(w.Id, data);
+            }
+
+            private void Respond(Work w, object data, ProtoException err, bool shared)
+            {
+                if (err != null) w.C.SendError(w.Id, err.Code, err.Message);
+                else if (shared) w.C.Send(new SharedMap().Put("id", w.Id).Put("ok", true).Put("data", data ?? new Map()));
+                else w.C.SendOk(w.Id, data);
+            }
+
+            private void FinishRead(ReadEntry e, object data, ProtoException err, Work leader)
+            {
+                List<Work> waiters;
+                lock (readLock)
+                {
+                    e.Done = true; e.At = NowMs; e.Result = data; e.Error = err;
+                    waiters = e.Waiters; e.Waiters = new List<Work>();
+                    if (err != null) { ReadEntry cur; if (reads.TryGetValue(e.Key, out cur) && cur == e) reads.Remove(e.Key); }   // errors are never cached
+                }
+                bool shared = waiters.Count > 0 || err == null;   // later hits may share the tree
+                Respond(leader, data, err, shared && Cfg.ReadCoalesceMs > 0);
+                foreach (var f in waiters)
+                {
+                    if (Interlocked.CompareExchange(ref f.State, 1, 0) != 0) continue;
+                    byte b; pending.TryRemove(f, out b);
+                    Interlocked.Decrement(ref f.C.Inflight);
+                    Respond(f, data, err, true);
+                }
+            }
+
+            /// <summary>Drops cached reads for one player (and the roster-wide ones); null drops everything. Call on disconnect and around actions.</summary>
+            public void InvalidateReads(string playerId)
+            {
+                lock (readLock)
+                {
+                    if (playerId == null) { reads.Clear(); return; }
+                    List<string> drop = null;
+                    foreach (var kv in reads)
+                        if (kv.Value.Player == null || kv.Value.Player == playerId) { if (drop == null) drop = new List<string>(); drop.Add(kv.Key); }
+                    if (drop != null) foreach (var k in drop) reads.Remove(k);
+                }
+            }
+
+            private static string ReadKey(string op, Map args)
+            {
+                return op + "|" + Convert.ToBase64String(Protocol.Pack.Encode(args, true));
+            }
+
+            private void EnqueueRead(Conn c, long id, string op, int timeoutMs, Map args, string player, Func<object> run)
+            {
+                if (Cfg.ReadCoalesceMs <= 0) { Enqueue(c, id, op, timeoutMs, run); return; }
+                string key = ReadKey(op, args);
+                long now = NowMs;
+                if (Interlocked.Increment(ref c.Inflight) > MaxInflight)
+                {
+                    Interlocked.Decrement(ref c.Inflight);
+                    throw Err("busy", "too many requests in flight");
+                }
+                Work leader = null;
+                Work follower = null;
+                ReadEntry hit = null;
+                lock (readLock)
+                {
+                    ReadEntry e;
+                    if (reads.TryGetValue(key, out e) && (!e.Done || now - e.At < Cfg.ReadCoalesceMs))
+                    {
+                        ReadHits++;
+                        if (e.Done) hit = e;
+                        else { follower = new Work { C = c, Id = id, Op = op, DeadlineMs = now + timeoutMs }; e.Waiters.Add(follower); }
+                    }
+                    else
+                    {
+                        ReadMisses++;
+                        e = new ReadEntry { Key = key, Player = player };
+                        reads[key] = e;
+                        if (reads.Count > 256) SweepReads(now);
+                        leader = new Work { C = c, Id = id, Op = op, Run = run, DeadlineMs = now + timeoutMs, Entry = e };
+                    }
+                }
+                if (hit != null) { Interlocked.Decrement(ref c.Inflight); Respond(new Work { C = c, Id = id }, hit.Result, null, true); return; }
+                if (follower != null) { pending.TryAdd(follower, 0); signal.Set(); return; }
+                pending.TryAdd(leader, 0);
+                queue.Enqueue(leader);
+                signal.Set();
+                NotifyMain();
+            }
+
+            private void SweepReads(long now)
+            {
+                List<string> drop = null;
+                foreach (var kv in reads)
+                    if (kv.Value.Done && now - kv.Value.At >= Cfg.ReadCoalesceMs) { if (drop == null) drop = new List<string>(); drop.Add(kv.Key); }
+                if (drop != null) foreach (var k in drop) reads.Remove(k);
             }
 
             private void Enqueue(Conn c, long id, string op, int timeoutMs, Func<object> run)
@@ -1010,6 +1211,8 @@ namespace Oxide.Plugins
                 var w = new Work { C = c, Id = id, Op = op, Run = run, DeadlineMs = NowMs + timeoutMs };
                 pending.TryAdd(w, 0);
                 queue.Enqueue(w);
+                signal.Set();
+                NotifyMain();
             }
 
             // ---------- request handling (worker thread) ----------
@@ -1071,18 +1274,18 @@ namespace Oxide.Plugins
                 if (Array.IndexOf(AllOps, op) < 0 || !Cfg.OpEnabled(op)) throw Err("unsupported", "operation not available: " + op);
                 switch (op)
                 {
-                    case "server.info": Enqueue(c, id, op, 2000, () => Game.ServerInfo()); return;
+                    case "server.info": EnqueueRead(c, id, op, 2000, args, null, () => Game.ServerInfo()); return;
                     case "players.list":
                         {
                             bool sens = Protocol.Check.Bool(args, "include_sensitive", false);
                             bool off = Protocol.Check.Bool(args, "include_offline", false);
-                            Enqueue(c, id, op, 2000, () => Game.PlayersList(off, sens)); return;
+                            EnqueueRead(c, id, op, 2000, args, null, () => Game.PlayersList(off, sens)); return;
                         }
                     case "player.get": DoPlayerGet(c, id, args); return;
                     case "player.inventory":
                         {
                             string pid = PlayerId(args, "id");
-                            Enqueue(c, id, op, 3000, () => Game.PlayerInventory(pid)); return;
+                            EnqueueRead(c, id, op, 3000, args, pid, () => Game.PlayerInventory(pid)); return;
                         }
                     case "item.get": DoItemGet(c, id, args); return;
                     case "action.run": DoAction(c, id, args); return;
@@ -1128,9 +1331,22 @@ namespace Oxide.Plugins
                 }
                 if (!(args.ContainsKey("panel_version") && args["panel_version"] is string)) throw Err("invalid_args", "'panel_version' is required");
                 c.Authed = true;
+                c.SendOk(id, HelloData());
+            }
+
+            // The hello body only depends on the Describe() result and the config, so it is built once per Describe() (not per hello).
+            private sealed class HelloCache { public HelloInfo For; public Map Data; public HashSet<string> Valid; }
+            private volatile HelloCache helloCache;
+            private Map HelloData() { return HelloCacheFor().Data; }
+            private HelloCache HelloCacheFor()
+            {
                 var h = hello;
-                var ops = AllOps.Where(o => Cfg.OpEnabled(o)).ToList();
-                var actions = h.Actions.Where(a => !Cfg.DisabledActions.Contains((string)a["id"])).ToList();
+                var cached = helloCache;
+                if (cached != null && ReferenceEquals(cached.For, h)) return cached;
+                var ops = new List<string>();
+                foreach (var o in AllOps) if (Cfg.OpEnabled(o)) ops.Add(o);
+                var actions = new List<Map>();
+                foreach (var a in h.Actions) if (!Cfg.DisabledActions.Contains((string)a["id"])) actions.Add(a);
                 var caps = new Map()
                     .Put("ops", ops)
                     .Put("player_fields", h.PlayerFields)
@@ -1147,7 +1363,10 @@ namespace Oxide.Plugins
                     .Put("capabilities", caps)
                     .Put("limits", new Map().Put("max_frame", (long)MaxFrame).Put("positions_min_interval_ms", (long)Cfg.PositionsMinIntervalMs).Put("max_inflight", (long)MaxInflight));
                 if (h.Integrations.Count > 0) d["integrations"] = h.Integrations;
-                c.SendOk(id, d);
+                var v = new HashSet<string>(h.PlayerFields) { "id", "name", "online" };
+                var hc = new HelloCache { For = h, Data = d, Valid = v };
+                helloCache = hc;
+                return hc;
             }
 
             private void DoPlayerGet(Conn c, long id, Map args)
@@ -1161,7 +1380,7 @@ namespace Oxide.Plugins
                     var l = fo as IList;
                     if (l == null) throw Err("invalid_args", "'fields' must be an array of strings");
                     fields = new HashSet<string>();
-                    var valid = new HashSet<string>(hello.PlayerFields) { "id", "name", "online" };
+                    var valid = HelloCacheFor().Valid;
                     foreach (var e in l)
                     {
                         var s = e as string;
@@ -1170,7 +1389,7 @@ namespace Oxide.Plugins
                         fields.Add(s);
                     }
                 }
-                Enqueue(c, id, "player.get", 3000, () => Game.PlayerGet(pid, fields, sens));
+                EnqueueRead(c, id, "player.get", 3000, args, pid, () => Game.PlayerGet(pid, fields, sens));
             }
 
             private void DoItemGet(Conn c, long id, Map args)
@@ -1223,7 +1442,9 @@ namespace Oxide.Plugins
                     if (!expect.ContainsKey("id") && !expect.ContainsKey("count") && !expect.ContainsKey("fingerprint")) throw Err("invalid_args", "'expect' needs id, count or fingerprint");
                 }
                 int timeout = (action == "save") ? 10000 : 5000;
-                Enqueue(c, id, "action.run", timeout, () => Game.RunAction(action, target, aargs, expect));
+                // Any action may change what cached reads show: drop them before and after it runs.
+                InvalidateReads(target);
+                Enqueue(c, id, "action.run", timeout, () => { try { return Game.RunAction(action, target, aargs, expect); } finally { InvalidateReads(target); } });
             }
 
             /// <summary>Validate action args against the advertised ActionSpec (kind/choices/min/max). Unknown keys are ignored (dropped).</summary>
@@ -1392,7 +1613,7 @@ namespace Oxide.Plugins
                 {
                     try
                     {
-                        signal.WaitOne(25);
+                        signal.WaitOne(NextWaitMs());
                         if (!running) break;
                         long now = NowMs;
                         SchedulePositionSample(now);
@@ -1402,6 +1623,28 @@ namespace Oxide.Plugins
                     }
                     catch (Exception e) { Log("hub error: " + e); Thread.Sleep(100); }
                 }
+            }
+
+            /// <summary>How long the hub may sleep: forever with no connection, nothing pending and no subscription (zero idle CPU);
+            /// otherwise until the next position sample is due / a pending deadline needs checking / the 1 s housekeeping tick.</summary>
+            private int NextWaitMs()
+            {
+                bool anyConn;
+                lock (conns) anyConn = conns.Count > 0;
+                var ps = posSubs;
+                if (!anyConn && ps.Length == 0 && evSubs.Length == 0 && pending.IsEmpty) return Timeout.Infinite;
+                int wait = 1000;
+                if (!pending.IsEmpty) wait = 25;
+                if (ps.Length > 0 && !sampleInFlight)
+                {
+                    long now = NowMs;
+                    for (int i = 0; i < ps.Length; i++)
+                    {
+                        long d = ps[i].ForceKey ? 0 : ps[i].NextDueMs - now;
+                        if (d < wait) wait = (int)Math.Max(0, d);
+                    }
+                }
+                return wait;
             }
 
             private void SchedulePositionSample(long now)
@@ -2120,7 +2363,7 @@ namespace Oxide.Plugins
                 if (want("team")) g["team"] = Team(pl);
                 if (want("clan")) { object c; if (Clan(pl, sid, out c)) g["clan"] = c; }
                 if (want("building_privilege")) { try { g["building_privilege"] = new Map().Put("authorized", pl.IsBuildingAuthed()); } catch (Exception) { } }
-                if (want("blueprints_learned")) g["blueprints_learned"] = Blueprints(pl);
+                if (want("blueprints_learned")) g["blueprints_learned"] = p.BlueprintCount(pl, 10000);
                 if (want("mounted_entity")) g["mounted_entity"] = Mounted(pl);
                 if (want("owner")) g["owner"] = IsOwner(id);
                 if (want("admin")) g["admin"] = IsAdminRole(pl, id, sid);
@@ -2192,19 +2435,6 @@ namespace Oxide.Plugins
                 }
                 catch (Exception) { }
                 return false;
-            }
-
-            private static long Blueprints(BasePlayer pl)
-            {
-                try
-                {
-                    var bp = pl.blueprints;
-                    if (bp == null) return 0;
-                    long n = 0;
-                    foreach (var def in ItemManager.GetItemDefinitions()) if (bp.HasUnlocked(def)) n++;
-                    return n;
-                }
-                catch (Exception) { return 0; }
             }
 
             private static object Mounted(BasePlayer pl)
@@ -2656,10 +2886,14 @@ namespace Oxide.Plugins
             bridge.SetHello(provider.Describe());
             bridge.EventDemandChanged = mask => bridge.RunOnMain(() => ApplyDemand(mask));
             transport = new Transport(bridge, BridgeDir, Log);
-            var drain = timer.Every(0.05f, () => { try { bridge.Drain(20, 4.0); } catch (Exception e) { Log("drain failed: " + e.Message); } });
-            stoppers.Add(() => drain.Destroy());
-            var refresh = timer.Every(30f, () => { try { bridge.SetHello(provider.Describe()); } catch (Exception e) { Log("describe failed: " + e.Message); } });
-            stoppers.Add(() => refresh.Destroy());
+            // No timer runs while the bridge is idle: queued work wakes the pump (NextTick is thread-safe), the pump drains
+            // within the budget and re-arms itself every 50 ms only while a backlog remains.
+            bridge.OnMainWork = () => NextTick(PumpDrain);
+            stoppers.Add(() => { pumping = false; if (pumpTimer != null) pumpTimer.Destroy(); });
+            pumping = true;
+            // hello facts are re-described every 30 s only while a client is connected, and once when the first one arrives.
+            bridge.OnActive = active => bridge.RunOnMain(() => SetActive(active));
+            stoppers.Add(() => { if (refreshTimer != null) refreshTimer.Destroy(); });
             var b = bridge; var tr = transport;
             // Binding and file work happen off the game thread.
             var th = new Thread(() =>
@@ -2674,6 +2908,28 @@ namespace Oxide.Plugins
                 catch (Exception e) { Log("bridge start failed: " + e); }
             }) { IsBackground = true, Name = "pm-start" };
             th.Start();
+        }
+
+        private Timer pumpTimer, refreshTimer;
+        private volatile bool pumping;
+
+        private void PumpDrain()
+        {
+            if (!pumping || bridge == null) return;
+            if (bridge.DrainStep(20, 4.0)) pumpTimer = timer.Once(0.05f, PumpDrain);
+        }
+
+        private void RefreshHello()
+        {
+            try { bridge.SetHello(provider.Describe()); } catch (Exception e) { Log("describe failed: " + e.Message); }
+        }
+
+        private void SetActive(bool active)
+        {
+            if (refreshTimer != null) { refreshTimer.Destroy(); refreshTimer = null; }
+            if (!active || !pumping) return;
+            RefreshHello();
+            refreshTimer = timer.Every(30f, RefreshHello);
         }
 
         private void Unload()
@@ -2715,6 +2971,7 @@ namespace Oxide.Plugins
             if (!IsReal(player)) return;
             ulong id = player.userID;
             connectedAt[id] = UnixNow();
+            if (bridge != null) bridge.InvalidateReads(null);
             if (Wants("join")) bridge.Emit("join", Ev("join", player).Put("world", provider.WorldId()));
             timer.Once(1f, ExportSnapshot);
         }
@@ -2725,6 +2982,8 @@ namespace Oxide.Plugins
             ulong id = player.userID;
             connectedAt.Remove(id);
             damageWindow.Remove(id);
+            blueprintCache.Remove(id);
+            if (bridge != null) bridge.InvalidateReads(player.UserIDString);
             if (Wants("leave")) bridge.Emit("leave", Ev("leave", player).PutIf(!string.IsNullOrEmpty(reason), "reason", Plain(reason)));
             timer.Once(1f, ExportSnapshot);
         }
@@ -2827,6 +3086,8 @@ namespace Oxide.Plugins
 
         private void OnServerUserSet(ulong steamId, ServerUsers.UserGroup group, string playerName, string reason, long expiry)
         {
+            sleeperCache.Clear();   // bans/roles shown in the cached sleeper records may have changed
+            if (bridge != null) bridge.InvalidateReads(null);
             if (group != ServerUsers.UserGroup.Banned || !Wants("ban")) return;
             var m = new Map().Put("type", "ban").Put("time", UnixNow())
                 .Put("player", new Map().Put("id", steamId.ToString()).Put("name", string.IsNullOrEmpty(playerName) ? steamId.ToString() : playerName));
@@ -2926,60 +3187,140 @@ namespace Oxide.Plugins
             catch (Exception ex) { PrintError("Failed to export player snapshot: " + ex.Message); }
         }
 
+        private const string StampPlaceholder = "@@PM-GENERATED-AT@@";
+        private string lastExportHash;
+        private long lastExportWriteMs;
+        public int ExportsSkipped, ExportsWritten;
+
         private void ExportSnapshotNow()
         {
-            var snap = BuildSnapshot();
-            string path = Path.Combine(Interface.Oxide.DataDirectory, "PlayerManagerRust.json");
-            // Build on the game thread, serialise and write on a pool thread.
+            // Cheapest check first: if the previous write is still in progress there is no point reading the game state.
             if (Interlocked.CompareExchange(ref exportBusy, 1, 0) != 0) return;
+            RawSnapshot raw;
+            try { raw = BuildSnapshot(); }
+            catch (Exception) { Interlocked.Exchange(ref exportBusy, 0); throw; }
+            string path = Path.Combine(Interface.Oxide.DataDirectory, "PlayerManagerRust.json");
+            // The game thread only copies primitives. Sorting, projection, serialisation, hashing and the write run on a pool thread.
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { Transport.AtomicWrite(path, JsonConvert.SerializeObject(snap)); }
+                try
+                {
+                    var snap = raw.Materialize();
+                    snap.GeneratedAt = StampPlaceholder;
+                    string json = JsonConvert.SerializeObject(snap);
+                    string hash;
+                    using (var sha = SHA256.Create()) hash = Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(json)));
+                    long now = cacheClock.ElapsedMilliseconds;
+                    // Unchanged content is not rewritten while the file is still fresh. The panel rejects a generated_at older than 30 s,
+                    // so an unchanged snapshot is still re-stamped once the file is 12 s old (the 15 s schedule is kept).
+                    if (hash == lastExportHash && now - lastExportWriteMs < 12000) { Interlocked.Increment(ref ExportsSkipped); return; }
+                    json = json.Replace(StampPlaceholder, raw.GeneratedAt);
+                    Transport.AtomicWrite(path, json);
+                    lastExportHash = hash; lastExportWriteMs = now;
+                    Interlocked.Increment(ref ExportsWritten);
+                }
                 catch (Exception e) { Log("export write failed: " + e.Message); }
                 finally { Interlocked.Exchange(ref exportBusy, 0); }
             });
         }
 
-        private Snapshot BuildSnapshot()
+        /// <summary>Game-thread copy of everything the export needs; projection into the file shape happens off-thread.</summary>
+        private sealed class RawSnapshot
         {
-            var all = new Dictionary<string, PlayerRecord>();
-            foreach (BasePlayer pl in BasePlayer.activePlayerList)
+            public string GeneratedAt;
+            public ServerInfoRecord ServerInfo;
+            public List<PlayerRecord> Players = new List<PlayerRecord>();
+            public List<object> Roles = new List<object>(), Bans = new List<object>();
+            public bool Backpacks;
+
+            public Snapshot Materialize()
             {
-                if (pl == null) continue;
-                all[pl.UserIDString] = SerializePlayer(pl, true);
-            }
-            foreach (BasePlayer pl in BasePlayer.sleepingPlayerList)
-            {
-                if (pl == null || all.ContainsKey(pl.UserIDString)) continue;
-                all[pl.UserIDString] = SerializePlayer(pl, false);
-            }
-            var roles = new List<object>();
-            var bans = new List<object>();
-            var prov = provider ?? new RustProvider(this);
-            prov.ServerInfoRoles(roles, bans);
-            return new Snapshot
-            {
-                GeneratedAt = DateTime.UtcNow.ToString("o"),
-                PluginVersion = BridgeVersionDefault,
-                ServerInfo = new ServerInfoRecord
+                var online = new List<PlayerRecord>();
+                var sleeping = new List<PlayerRecord>();
+                foreach (var pr in Players) (pr.Online ? online : sleeping).Add(pr);
+                var banned = new List<BannedRecord>();
+                foreach (var o in Bans) { var b = (Map)o; banned.Add(new BannedRecord { Id = (string)b["id"], Name = (string)b["name"], Reason = (string)b["reason"] }); }
+                var admins = new List<RoleRecord>();
+                var mods = new List<RoleRecord>();
+                foreach (var o in Roles)
                 {
-                    Hostname = ConVar.Server.hostname ?? "Rust Server",
-                    Description = ConVar.Server.description ?? "",
-                    MaxPlayers = ConVar.Server.maxplayers,
-                    MapName = ConVar.Server.level ?? "Procedural Map",
-                    WorldSize = ConVar.Server.worldsize,
-                    Seed = (int)ConVar.Server.seed,
-                    Url = ConVar.Server.url ?? "",
-                    HeaderImage = ConVar.Server.headerimage ?? "",
-                },
-                OnlinePlayers = all.Values.Where(p => p.Online).OrderBy(p => p.Name).ToList(),
-                SleepingPlayers = all.Values.Where(p => !p.Online).OrderBy(p => p.Name).ToList(),
-                AllPlayers = all.Values.OrderBy(p => p.Name).ToList(),
-                BannedPlayers = bans.Cast<Map>().Select(b => new BannedRecord { Id = (string)b["id"], Name = (string)b["name"], Reason = (string)b["reason"] }).ToList(),
-                Admins = roles.Cast<Map>().Where(r => (string)r["role"] != "moderator").Select(r => new RoleRecord { Id = (string)r["id"], Name = (string)r["name"], Role = (string)r["role"] }).ToList(),
-                Moderators = roles.Cast<Map>().Where(r => (string)r["role"] == "moderator").Select(r => new RoleRecord { Id = (string)r["id"], Name = (string)r["name"], Role = (string)r["role"] }).ToList(),
-                BackpacksPluginDetected = Backpacks != null,
+                    var r = (Map)o;
+                    var rec = new RoleRecord { Id = (string)r["id"], Name = (string)r["name"], Role = (string)r["role"] };
+                    if (rec.Role != "moderator") admins.Add(rec); else mods.Add(rec);
+                }
+                return new Snapshot
+                {
+                    GeneratedAt = GeneratedAt,
+                    PluginVersion = BridgeVersionDefault,
+                    ServerInfo = ServerInfo,
+                    OnlinePlayers = online.OrderBy(x => x.Name).ToList(),
+                    SleepingPlayers = sleeping.OrderBy(x => x.Name).ToList(),
+                    AllPlayers = Players.OrderBy(x => x.Name).ToList(),
+                    BannedPlayers = banned,
+                    Admins = admins,
+                    Moderators = mods,
+                    BackpacksPluginDetected = Backpacks,
+                };
+            }
+        }
+
+        // Sleeping players do not move, change inventory or stats; their records are rebuilt at most every 45-65 s
+        // (jittered per player so refreshes spread out) instead of at every export.
+        private sealed class CachedRecord { public PlayerRecord Rec; public long At; }
+        private readonly Dictionary<ulong, CachedRecord> sleeperCache = new Dictionary<ulong, CachedRecord>();
+        public int SleeperBuilds, SleeperHits;
+
+        private RawSnapshot BuildSnapshot()
+        {
+            var raw = new RawSnapshot();
+            var seen = new HashSet<string>();
+            var active = BasePlayer.activePlayerList;
+            for (int i = 0; i < active.Count; i++)
+            {
+                var pl = active[i];
+                if (pl == null) continue;
+                seen.Add(pl.UserIDString);
+                raw.Players.Add(SerializePlayer(pl, true));
+            }
+            long now = cacheClock.ElapsedMilliseconds;
+            var sleepers = BasePlayer.sleepingPlayerList;
+            var live = new HashSet<ulong>();
+            for (int i = 0; i < sleepers.Count; i++)
+            {
+                var pl = sleepers[i];
+                if (pl == null || seen.Contains(pl.UserIDString)) continue;
+                seen.Add(pl.UserIDString);
+                ulong uid = pl.userID;
+                live.Add(uid);
+                CachedRecord c;
+                if (sleeperCache.TryGetValue(uid, out c) && now - c.At < 45000 + (long)(uid % 20) * 1000) { SleeperHits++; raw.Players.Add(c.Rec); continue; }
+                SleeperBuilds++;
+                var rec = SerializePlayer(pl, false);
+                sleeperCache[uid] = new CachedRecord { Rec = rec, At = now };
+                raw.Players.Add(rec);
+            }
+            if (sleeperCache.Count > live.Count)
+            {
+                List<ulong> gone = null;
+                foreach (var k in sleeperCache.Keys) if (!live.Contains(k)) { if (gone == null) gone = new List<ulong>(); gone.Add(k); }
+                if (gone != null) foreach (var k in gone) sleeperCache.Remove(k);
+            }
+            var prov = provider ?? new RustProvider(this);
+            prov.ServerInfoRoles(raw.Roles, raw.Bans);
+            raw.GeneratedAt = DateTime.UtcNow.ToString("o");
+            raw.ServerInfo = new ServerInfoRecord
+            {
+                Hostname = ConVar.Server.hostname ?? "Rust Server",
+                Description = ConVar.Server.description ?? "",
+                MaxPlayers = ConVar.Server.maxplayers,
+                MapName = ConVar.Server.level ?? "Procedural Map",
+                WorldSize = ConVar.Server.worldsize,
+                Seed = (int)ConVar.Server.seed,
+                Url = ConVar.Server.url ?? "",
+                HeaderImage = ConVar.Server.headerimage ?? "",
             };
+            raw.Backpacks = Backpacks != null;
+            return raw;
         }
 
         private PlayerRecord SerializePlayer(BasePlayer player, bool online)
@@ -3023,7 +3364,7 @@ namespace Oxide.Plugins
                 TeamId = player.currentTeam != 0 ? player.currentTeam.ToString() : null,
                 TeamMembers = ExportTeamMembers(player),
                 HasBuildingPrivilege = player.IsBuildingAuthed(),
-                BlueprintsLearned = ExportBlueprints(player),
+                BlueprintsLearned = BlueprintCount(player, 120000),
                 IsBanned = ServerUsers.Is(uid, ServerUsers.UserGroup.Banned),
                 IsAdmin = player.IsAdmin,
                 IsModerator = ServerUsers.Is(uid, ServerUsers.UserGroup.Moderator),
@@ -3051,22 +3392,37 @@ namespace Oxide.Plugins
                 if (player.currentTeam == 0) return null;
                 var team = RelationshipManager.ServerInstance?.FindTeam(player.currentTeam);
                 if (team == null) return null;
-                return team.members.Select(id => { var p = BasePlayer.FindByID(id); return p != null ? p.displayName : id.ToString(); }).ToList();
+                var names = new List<string>(team.members.Count);
+                foreach (var id in team.members) { var p = BasePlayer.FindByID(id); names.Add(p != null ? p.displayName : id.ToString()); }
+                return names;
             }
             catch (Exception) { return null; }
         }
 
-        private static int ExportBlueprints(BasePlayer player)
+        // Counting unlocked blueprints walks every item definition (~700 HasUnlocked calls per player), so the result is
+        // cached per player: 10 s for player.get, 2 min for the legacy export. Main thread only.
+        private readonly Dictionary<ulong, KeyValuePair<long, int>> blueprintCache = new Dictionary<ulong, KeyValuePair<long, int>>();
+        private readonly Stopwatch cacheClock = Stopwatch.StartNew();
+
+        private int BlueprintCount(BasePlayer player, long ttlMs)
         {
+            ulong uid = player.userID;
+            long now = cacheClock.ElapsedMilliseconds;
+            KeyValuePair<long, int> hit;
+            if (blueprintCache.TryGetValue(uid, out hit) && now - hit.Key < ttlMs) return hit.Value;
+            int learned = 0;
             try
             {
                 var bp = player.blueprints;
-                if (bp == null) return 0;
-                int learned = 0;
-                foreach (var item in ItemManager.GetItemDefinitions()) if (bp.HasUnlocked(item)) learned++;
-                return learned;
+                if (bp != null)
+                {
+                    var defs = ItemManager.GetItemDefinitions();
+                    for (int i = 0; i < defs.Count; i++) if (bp.HasUnlocked(defs[i])) learned++;
+                }
             }
-            catch (Exception) { return 0; }
+            catch (Exception) { learned = 0; }
+            blueprintCache[uid] = new KeyValuePair<long, int>(now, learned);
+            return learned;
         }
 
         private static int ExportPing(BasePlayer player)
@@ -3089,12 +3445,28 @@ namespace Oxide.Plugins
         {
             var items = new List<ItemRecord>();
             if (container == null || container.itemList == null) return items;
-            foreach (var item in container.itemList.OrderBy(i => i.position))
+            // stable order by slot without LINQ (insertion sort: at most a few dozen items)
+            var ordered = new List<Item>(container.itemList.Count);
+            foreach (var item in container.itemList)
+            {
+                int j = ordered.Count;
+                while (j > 0 && ordered[j - 1] != null && item != null && ordered[j - 1].position > item.position) j--;
+                ordered.Insert(j, item);
+            }
+            foreach (var item in ordered)
             {
                 if (item == null || item.info == null) continue;
                 items.Add(SerializeItem(item));
             }
             return items;
+        }
+
+        private List<ItemRecord> SerializeContents(Item item)
+        {
+            var l = new List<ItemRecord>();
+            var src = item.contents != null ? item.contents.itemList : null;
+            if (src != null) foreach (var c in src) l.Add(SerializeItem(c));
+            return l;
         }
 
         private ItemRecord SerializeItem(Item item)
@@ -3113,7 +3485,7 @@ namespace Oxide.Plugins
                 DurabilityPercent = item.hasCondition ? Math.Round(item.condition / maxCond * 100, 1) : 100,
                 Skin = item.skin,
                 Ammo = ammo,
-                Contents = item.contents?.itemList?.Select(SerializeItem).ToList() ?? new List<ItemRecord>(),
+                Contents = SerializeContents(item),
             };
         }
 

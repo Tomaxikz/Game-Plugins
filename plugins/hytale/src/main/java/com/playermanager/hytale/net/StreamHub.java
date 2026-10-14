@@ -13,6 +13,7 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -44,19 +45,98 @@ public final class StreamHub implements AutoCloseable {
             return t;
         });
         provider.setEventSink(this::publish);
+        provider.setEventDemand(this::wants);
     }
 
-    /** Starts the periodic sampler/keep-alive task. Tests call {@link #tick} directly instead. */
+    private boolean started;
+    private boolean closing;
+    private ScheduledFuture<?> nextRun;
+    private long nextRunAt;
+    /** Sampler wake-ups executed (idle bridge: 0). */
+    public final java.util.concurrent.atomic.AtomicLong runs = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Enables the sampler/keep-alive task. It is demand-scheduled: nothing is scheduled (no timer, no wake-ups) while there
+     * is no subscription; subscribing wakes it and each run schedules the next one exactly when a sample or a keep-alive
+     * is due. Tests call {@link #tick} directly instead.
+     */
     public void start() {
-        sampler.scheduleWithFixedDelay(() -> {
-            try {
-                long now = System.currentTimeMillis();
-                tick(now);
-                keepAlive(now);
-            } catch (Throwable t) {
-                log.error("stream tick failed", t);
+        synchronized (this) {
+            started = true;
+        }
+        reschedule();
+    }
+
+    private void run() {
+        synchronized (this) {
+            nextRun = null;
+        }
+        runs.incrementAndGet();
+        try {
+            long now = System.currentTimeMillis();
+            tick(now);
+            keepAlive(now);
+        } catch (Throwable t) {
+            log.error("stream tick failed", t);
+        }
+        reschedule();
+    }
+
+    /** Milliseconds until the next sample or keep-alive is due; -1 when there is nothing to do. */
+    long nextDelay(long now) {
+        long best = Long.MAX_VALUE;
+        for (Subs.PosSub s : posSubs) {
+            if (s.active) {
+                best = Math.min(best, Math.max(0, s.nextDue - now));
             }
-        }, TICK_MS, TICK_MS, TimeUnit.MILLISECONDS);
+        }
+        for (Subs.Sub s : allSubs()) {
+            if (s.active) {
+                best = Math.min(best, Math.max(0, s.lastSent + PING_MS - now));
+            }
+        }
+        return best == Long.MAX_VALUE ? -1 : best;
+    }
+
+    private void reschedule() {
+        long delay = nextDelay(System.currentTimeMillis());
+        if (delay >= 0) {
+            schedule(Math.max(1, delay));
+        }
+    }
+
+    /** Wakes the sampler as soon as possible (a subscription appeared or asked for a keyframe). */
+    private void wakeSampler() {
+        schedule(1);
+    }
+
+    private synchronized void schedule(long delayMs) {
+        if (!started || closing) {
+            return;
+        }
+        long at = System.currentTimeMillis() + delayMs;
+        if (nextRun != null && !nextRun.isDone() && nextRunAt <= at) {
+            return;
+        }
+        if (nextRun != null) {
+            nextRun.cancel(false);
+        }
+        nextRunAt = at;
+        try {
+            nextRun = sampler.schedule(this::run, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RuntimeException e) {
+            nextRun = null; // executor shut down
+        }
+    }
+
+    /** True when any events subscription asked for this type (listeners skip all work otherwise). */
+    boolean wants(String type) {
+        for (Subs.EventSub s : eventSubs) {
+            if (s.types.contains(type)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- positions -------------------------------------------------------------------------
@@ -83,6 +163,7 @@ public final class StreamHub implements AutoCloseable {
         if (sub instanceof Subs.EventSub) {
             sub.conn.wake();
         }
+        wakeSampler();
     }
 
     void requestKeyframe(Conn conn, int subId) {
@@ -92,6 +173,7 @@ public final class StreamHub implements AutoCloseable {
         }
         p.needKey = true;
         p.nextDue = 0;
+        wakeSampler();
     }
 
     /** One sampling pass. Package-private so tests can drive it with a fake clock. */
@@ -308,6 +390,9 @@ public final class StreamHub implements AutoCloseable {
 
     @Override
     public void close() {
+        synchronized (this) {
+            closing = true;
+        }
         sampler.shutdownNow();
         posSubs.clear();
         eventSubs.clear();

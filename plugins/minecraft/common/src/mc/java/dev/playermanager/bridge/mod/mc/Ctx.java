@@ -6,6 +6,7 @@ import dev.playermanager.bridge.mod.RosterCache;
 import dev.playermanager.bridge.mod.RosterFiles;
 import dev.playermanager.bridge.spi.BridgeLog;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -27,6 +28,10 @@ final class Ctx {
     final McItems items;
     final RosterCache roster;
     final ExecutorService async;
+    /** Statistics and advancement progress per player, kept for 2 s (recomputing them walks thousands of entries on the server thread). */
+    final dev.playermanager.bridge.util.TimedCache<UUID, Map<String, Object>> stats = new dev.playermanager.bridge.util.TimedCache<UUID, Map<String, Object>>(Long.getLong("pm.stats.cache.ms", 2000L));
+    final dev.playermanager.bridge.util.TimedCache<String, Map<String, Object>> advancements = new dev.playermanager.bridge.util.TimedCache<String, Map<String, Object>>(Long.getLong("pm.stats.cache.ms", 2000L));
+
     final Perms perms;
     volatile BridgeConfig config = BridgeConfig.defaults();
     final ConcurrentHashMap<UUID, Long> joinedAt = new ConcurrentHashMap<UUID, Long>();
@@ -45,6 +50,7 @@ final class Ctx {
             public void debug(String m) { if (Boolean.getBoolean("playermanager.debug")) slf.info("[debug] " + m); }
         };
         this.root = server.getServerDirectory().toAbsolutePath().normalize();
+        dev.playermanager.bridge.util.TaskStats.startReporter(log);
         this.scheduler = new McScheduler(server);
         this.worlds = new McWorlds(server, root);
         this.items = new McItems(server, log);
@@ -78,6 +84,13 @@ final class Ctx {
 
     @SuppressWarnings("unchecked")
     <T> T resolve(Object tree) { return (T) resolveSnaps(tree); }
+
+    /** A player left: forget everything cached for them. */
+    void forget(UUID id) {
+        stats.invalidate(id);
+        advancements.invalidate(id + "+");
+        advancements.invalidate(id + "-");
+    }
 
     void shutdown() { async.shutdownNow(); }
 }

@@ -104,7 +104,6 @@ public final class BridgeServer implements AutoCloseable {
         Thread t = new Thread(this::acceptLoop, "pm-bridge-accept");
         t.setDaemon(true);
         t.start();
-        janitor.scheduleAtFixedRate(this::sweepIdle, 5, 5, TimeUnit.SECONDS);
         log.info("bridge listening (" + (tcp ? "tcp" : "unix") + ")");
     }
 
@@ -154,6 +153,7 @@ public final class BridgeServer implements AutoCloseable {
                 Conn conn = new Conn(c, ids.incrementAndGet(), hub);
                 conn.authed = !tcp;
                 conns.add(conn);
+                ensureSweeper();
                 conn.startWriter();
                 Thread t = new Thread(() -> serve(conn), "pm-bridge-conn-" + conn.id);
                 t.setDaemon(true);
@@ -315,7 +315,24 @@ public final class BridgeServer implements AutoCloseable {
         return r;
     }
 
+    private java.util.concurrent.ScheduledFuture<?> sweeper;
+
+    /** The idle sweep exists only while at least one client is connected: nothing is scheduled on an idle bridge. */
+    private synchronized void ensureSweeper() {
+        if (sweeper == null || sweeper.isDone()) {
+            sweeper = janitor.scheduleAtFixedRate(this::sweepIdle, 5, 5, TimeUnit.SECONDS);
+        }
+    }
+
+    private synchronized void stopSweeperIfIdle() {
+        if (conns.isEmpty() && sweeper != null) {
+            sweeper.cancel(false);
+            sweeper = null;
+        }
+    }
+
     private void sweepIdle() {
+        stopSweeperIfIdle();
         long now = System.currentTimeMillis();
         for (Conn c : conns) {
             if (!c.hasSubscription() && now - c.lastActivity > IDLE_MS) {

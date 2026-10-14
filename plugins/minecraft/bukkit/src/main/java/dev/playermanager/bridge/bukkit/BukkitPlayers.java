@@ -95,6 +95,7 @@ final class BukkitPlayers implements PlayerProvider {
         String world, dimension;
         boolean op, sleeping;
         Perms.Result perms;
+        boolean lp;
         Long afk;
         long joinedAt;
         String brand, locale, ip;
@@ -114,7 +115,8 @@ final class BukkitPlayers implements PlayerProvider {
                         if (w != null) { WorldMap.Info i = ctx.worlds.of(w); r.world = i.world; r.dimension = i.dimension; }
                         r.op = p.isOp();
                         r.sleeping = p.isSleeping();
-                        r.perms = ctx.perms.lookup(p);
+                        r.perms = ctx.perms.lookupOnGameThread(p);
+                        r.lp = r.perms == null && ctx.perms.luckPermsActive();
                         Object idle = Reflect.call(p, "getIdleDuration");
                         Object secs = Reflect.call(idle, "getSeconds");
                         r.afk = secs instanceof Number ? Long.valueOf(((Number) secs).longValue()) : null;
@@ -147,6 +149,7 @@ final class BukkitPlayers implements PlayerProvider {
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         Set<String> seen = new LinkedHashSet<String>();
         for (OnlineRow r : online) {
+            if (r.lp) r.perms = ctx.perms.lookupLuckPerms(r.id);          // LuckPerms is thread-safe: off the game thread
             String id = r.id.toString();
             seen.add(id);
             Map<String, Object> m = new LinkedHashMap<String, Object>();
@@ -276,40 +279,16 @@ final class BukkitPlayers implements PlayerProvider {
     public CompletableFuture<Map<String, Object>> get(final String playerId, final Set<String> fields, final boolean sensitive,
                                                       final boolean includeUnobtained, final Deadline deadline) {
         final UUID uuid = UUID.fromString(playerId);
-        CompletableFuture<Map<String, Object>> first;
-        if (!ctx.env.folia) {
-            first = ctx.scheduler.global(new Callable<Map<String, Object>>() {
-                public Map<String, Object> call() {
-                    Player p = Bukkit.getPlayer(uuid);
-                    return p == null ? null : online(p, fields, sensitive, includeUnobtained, deadline);
-                }
-            });
-        } else {
-            CompletableFuture<Player> found = ctx.scheduler.global(new Callable<Player>() {
-                public Player call() { return Bukkit.getPlayer(uuid); }
-            });
-            final CompletableFuture<Map<String, Object>> res = new CompletableFuture<Map<String, Object>>();
-            found.whenComplete(new BiConsumer<Player, Throwable>() {
-                public void accept(final Player p, Throwable err) {
-                    if (err != null) { res.completeExceptionally(err); return; }
-                    if (p == null) { res.complete(null); return; }
-                    ctx.scheduler.forPlayer(p, new Callable<Map<String, Object>>() {
-                        public Map<String, Object> call() { return online(p, fields, sensitive, includeUnobtained, deadline); }
-                    }).whenComplete(new BiConsumer<Map<String, Object>, Throwable>() {
-                        public void accept(Map<String, Object> m, Throwable e2) {
-                            if (e2 != null) res.completeExceptionally(e2); else res.complete(m);
-                        }
-                    });
-                }
-            });
-            first = res;
-        }
+        CompletableFuture<Map<String, Object>> first = ctx.withPlayer(uuid, new Ctx.PlayerWork<Map<String, Object>>() {
+            public Map<String, Object> run(Player p) { return p == null ? null : online(p, fields, sensitive, includeUnobtained, deadline); }
+        });
         final CompletableFuture<Map<String, Object>> out = new CompletableFuture<Map<String, Object>>();
         first.whenCompleteAsync(new BiConsumer<Map<String, Object>, Throwable>() {
             public void accept(Map<String, Object> m, Throwable err) {
                 if (err != null) { out.completeExceptionally(err); return; }
                 try {
                     if (m != null) {
+                        fillLuckPerms(uuid, m);
                         Map<String, Object> r = ctx.resolve(m);
                         out.complete(r);
                     } else {
@@ -321,6 +300,20 @@ final class BukkitPlayers implements PlayerProvider {
             }
         }, ctx.async);
         return out;
+    }
+
+    /** Replaces the permission placeholders left by {@link #onlineGame} with the LuckPerms answer (looked up off the game thread). */
+    @SuppressWarnings("unchecked")
+    private void fillLuckPerms(UUID uuid, Map<String, Object> m) {
+        Object g = m.get("game");
+        if (!(g instanceof Map) || !Boolean.TRUE.equals(((Map<String, Object>) g).remove("_pm_lp"))) return;
+        Map<String, Object> game = (Map<String, Object>) g;
+        Perms.Result pr = ctx.perms.lookupLuckPerms(uuid);
+        if (pr != null) {
+            game.put("groups", pr.groups);
+            game.put("primary_group", pr.primary);
+            game.put("permission_provider", pr.provider);
+        }
     }
 
     // ---------------------------------------------------------------- online snapshot (entity/main thread)
@@ -391,9 +384,9 @@ final class BukkitPlayers implements PlayerProvider {
     }
 
     @SuppressWarnings("deprecation")
-    private Map<String, Object> onlineGame(Player p, Set<String> fields, boolean includeUnobtained, Deadline deadline, Location l) {
+    private Map<String, Object> onlineGame(final Player p, Set<String> fields, final boolean includeUnobtained, final Deadline deadline, Location l) {
         Map<String, Object> g = new LinkedHashMap<String, Object>();
-        UUID uuid = p.getUniqueId();
+        final UUID uuid = p.getUniqueId();
         g.put("offline_uuid", PlayerIds.isOfflineUuid(uuid, p.getName()));
         Object pgm = Reflect.call(p, "getPreviousGameMode");
         g.put("previous_game_mode", pgm instanceof GameMode ? ((GameMode) pgm).name().toLowerCase(Locale.ROOT) : null);
@@ -457,7 +450,8 @@ final class BukkitPlayers implements PlayerProvider {
         g.put("whitelisted", p.isWhitelisted());
         Map<String, Object> ban = ctx.roster.bans().get(uuid.toString());
         g.put("banned", ban == null ? null : RosterFiles.banObject(ban));
-        Perms.Result pr = ctx.perms.lookup(p);
+        Perms.Result pr = ctx.perms.lookupOnGameThread(p);
+        if (pr == null && ctx.perms.luckPermsActive()) g.put("_pm_lp", Boolean.TRUE);      // filled in off-thread, same key position below
         if (pr != null) {
             g.put("groups", pr.groups);
             g.put("primary_group", pr.primary);
@@ -509,43 +503,23 @@ final class BukkitPlayers implements PlayerProvider {
         } catch (Throwable ignored) { }
         if (wants(fields, "game.statistics")) {
             try {
-                g.put("statistics", StatsCollector.collect(p, ctx.env.gameVersion, deadline));
+                g.put("statistics", ctx.stats.get(uuid, new java.util.concurrent.Callable<Map<String, Object>>() {
+                    public Map<String, Object> call() { return StatsCollector.collect(p, ctx.env.gameVersion, deadline); }
+                }));
             } catch (Throwable t) {
                 ctx.log.debug("statistics unavailable: " + t);
             }
         }
         if (wants(fields, "game.advancements")) {
             try {
-                g.put("advancements", advancements(p, includeUnobtained, deadline));
+                g.put("advancements", ctx.advancements.get(uuid + (includeUnobtained ? "+" : "-"), new java.util.concurrent.Callable<Map<String, Object>>() {
+                    public Map<String, Object> call() { return Advancements.collect(p, includeUnobtained, deadline); }
+                }));
             } catch (Throwable t) {
                 ctx.log.debug("advancements unavailable: " + t);
             }
         }
         return g;
-    }
-
-    private static Map<String, Object> advancements(Player p, boolean includeUnobtained, Deadline deadline) {
-        Map<String, Object> out = new LinkedHashMap<String, Object>();
-        int n = 0;
-        for (Iterator<Advancement> it = Bukkit.advancementIterator(); it.hasNext(); ) {
-            Advancement a = it.next();
-            if ((++n & 63) == 0 && deadline.expired()) break;
-            AdvancementProgress pr = p.getAdvancementProgress(a);
-            Collection<String> awarded = pr.getAwardedCriteria();
-            boolean done = pr.isDone();
-            if (awarded.isEmpty() && !done && !includeUnobtained) continue;
-            Map<String, Object> m = new LinkedHashMap<String, Object>();
-            m.put("done", done);
-            Map<String, Object> crit = new LinkedHashMap<String, Object>();
-            for (String c : awarded) {
-                Date d = pr.getDateAwarded(c);
-                crit.put(c, d == null ? null : RosterFiles.formatDate(d));
-            }
-            m.put("criteria", crit);
-            m.put("criteria_total", awarded.size() + pr.getRemainingCriteria().size());
-            out.put(a.getKey().toString(), m);
-        }
-        return out;
     }
 
     // ================================================================== offline

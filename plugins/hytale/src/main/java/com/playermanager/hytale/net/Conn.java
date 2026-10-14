@@ -9,7 +9,6 @@ import java.nio.channels.SocketChannel;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -78,10 +77,7 @@ final class Conn {
     private void writeLoop() {
         try (OutputStream out = Channels.newOutputStream(ch)) {
             while (!closed && ch.isOpen()) {
-                Object item = outbox.poll(500, TimeUnit.MILLISECONDS);
-                if (item == null) {
-                    continue;
-                }
+                Object item = outbox.take(); // blocks without polling; close() wakes it
                 if (item instanceof byte[] body) {
                     Framing.write(out, body);
                 } else if (item instanceof StreamItem si) {
@@ -112,6 +108,7 @@ final class Conn {
 
     void close() {
         closed = true;
+        outbox.offer(WAKE);
         hub.dropConnection(this);
         try {
             ch.close();

@@ -540,8 +540,8 @@ Bridges reuse these ids and `fields` keys. Args shown are the Minecraft ones; a 
 | `whisper` | `message` | yes | MC |
 | `give_item` | `item` (identifier), `amount` | yes | MC, Rust, Hytale |
 | `clear_inventory` | — | yes | MC, Rust, Hytale |
-| `remove_item`, `set_item_count`, `move_item` | `container`,`slot`,`expected_id`,`expected_count`,`expected_fingerprint`, + `amount` / `destination_slot` | yes | MC (offline-capable in panel) |
-| `remove_item_live`, `replace_item_live`, `set_item_live`, `move_item_live`, `give_custom_item` | `container`,`slot`,`expected_id`,`item`,`amount`,`destination_container`,`destination_slot` | yes | MC |
+| `remove_item`, `set_item_count`, `move_item` | `container`,`slot`,`expected_id`,`expected_count`,`expected_fingerprint`, + `amount` / `destination_slot` + `destination_expected_*` (move: swap/stack onto occupied slots) | yes | MC (offline-capable in panel) |
+| `remove_item_live`, `replace_item_live`, `set_item_live`, `move_item_live`, `give_custom_item` | `container`,`slot`,`expected_id`,`item`,`amount`,`destination_container`,`destination_slot`,`destination_expected_id` (move: swap/stack) | yes | MC |
 | `set_scale`, `reset_scale` | `scale`, `attribute` | yes | MC |
 | `heal` | — | yes | MC, Rust, Hytale |
 | `hurt`, `sethealth` | `amount` | yes | Rust |

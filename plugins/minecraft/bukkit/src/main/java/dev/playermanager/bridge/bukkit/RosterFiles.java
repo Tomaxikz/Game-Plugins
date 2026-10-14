@@ -72,8 +72,18 @@ final class RosterFiles {
         }
     }
 
+    private static final java.util.concurrent.ConcurrentHashMap<Long, String> DATES = new java.util.concurrent.ConcurrentHashMap<Long, String>();
+
+    /** Formatted once per distinct instant (advancement dates repeat on every read); the zone is the server's, as before. */
     static String formatDate(java.util.Date d) {
-        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.ROOT).format(d);
+        Long k = Long.valueOf(d.getTime());
+        String s = DATES.get(k);
+        if (s == null) {
+            s = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.ROOT).format(d);
+            if (DATES.size() > 20000) DATES.clear();
+            DATES.put(k, s);
+        }
+        return s;
     }
 
     /** Ban object of minecraft.md section 4. */

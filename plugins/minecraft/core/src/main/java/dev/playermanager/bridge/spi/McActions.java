@@ -22,6 +22,7 @@ public final class McActions {
     private static Field slot() { return Field.slot("slot", "Slot").required(); }
     private static Field expId() { return Field.identifier("expected_id", "Expected item"); }
     private static Field expCount() { return Field.integer("expected_count", "Expected count", 0, 2147483647); }
+    private static Field destExpId() { return Field.identifier("destination_expected_id", "Expected destination item"); }
     private static Field expFp() { return Field.text("expected_fingerprint", "Expected fingerprint").maxLength(64); }
 
     public static final ActionSpec KICK = def(ActionSpec.of("kick", true, true, reason()));
@@ -51,14 +52,16 @@ public final class McActions {
     public static final ActionSpec SET_ITEM_COUNT = def(ActionSpec.of("set_item_count", true, false, container(), slot(), expId(), expCount(), expFp(),
             Field.integer("amount", "Amount", 1, 64).required()));
     public static final ActionSpec MOVE_ITEM = def(ActionSpec.of("move_item", true, false, container(), slot(), expId(), expCount(), expFp(),
-            Field.slot("destination_slot", "Destination slot").required()));
+            Field.slot("destination_slot", "Destination slot").required(), destExpId(),
+            Field.integer("destination_expected_count", "Expected destination count", 0, 2147483647),
+            Field.text("destination_expected_fingerprint", "Expected destination fingerprint").maxLength(64)));
     public static final ActionSpec REMOVE_ITEM_LIVE = def(ActionSpec.of("remove_item_live", true, true, container(), slot(), expId(), expCount(), expFp()));
     public static final ActionSpec REPLACE_ITEM_LIVE = def(ActionSpec.of("replace_item_live", true, true, container(), slot(), expId(), expCount(), expFp(),
             Field.item("item", "Item").required(), Field.integer("amount", "Amount", 1, 64)));
     public static final ActionSpec SET_ITEM_LIVE = def(ActionSpec.of("set_item_live", true, true, container(), slot(), expId(), expCount(), expFp(),
             Field.item("item", "Item").required()));
     public static final ActionSpec MOVE_ITEM_LIVE = def(ActionSpec.of("move_item_live", true, false, container(), slot(), expId(), expCount(), expFp(),
-            Field.text("destination_container", "Destination container").maxLength(32).required(), Field.slot("destination_slot", "Destination slot").required()));
+            Field.text("destination_container", "Destination container").maxLength(32).required(), Field.slot("destination_slot", "Destination slot").required(), destExpId()));
     public static final ActionSpec SET_SCALE = def(ActionSpec.of("set_scale", true, false,
             Field.number("scale", "Scale", 0.0625, 16d).required(), Field.identifier("attribute", "Attribute")));
     public static final ActionSpec RESET_SCALE = def(ActionSpec.of("reset_scale", true, false, Field.identifier("attribute", "Attribute")));

@@ -43,6 +43,17 @@ public interface GameProvider {
     /** The hub registers its sink here; listeners must only enqueue and never block (T5). */
     void setEventSink(Consumer<GameEvent> sink);
 
+    /**
+     * Lets the provider ask whether any events subscription wants an event type, so listeners for high-volume
+     * events can return immediately (before building anything) while nobody subscribed.
+     */
+    default void setEventDemand(java.util.function.Predicate<String> wants) {
+    }
+
+    /** Called with a player id on join/leave so cached reads about that player can be dropped. */
+    default void setPresenceListener(java.util.function.Consumer<String> onChange) {
+    }
+
     default void stop() {
     }
 }

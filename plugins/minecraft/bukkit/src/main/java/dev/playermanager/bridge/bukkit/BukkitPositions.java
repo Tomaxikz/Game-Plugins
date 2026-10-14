@@ -68,12 +68,11 @@ final class BukkitPositions implements PositionSource {
                     }
                 });
             }
-            ctx.async.execute(new Runnable() {
+            ctx.delayed.schedule(new Runnable() {
                 public void run() {
-                    try { Thread.sleep(500); } catch (InterruptedException e) { return; }
                     if (!res.isDone()) res.complete(new ArrayList<PositionSample>(out));   // stalled region: send what we have
                 }
-            });
+            }, 500, TimeUnit.MILLISECONDS);
         } catch (Throwable t) {
             res.completeExceptionally(t);
         }

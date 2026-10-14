@@ -41,6 +41,7 @@ Contract revision: `docs/protocol/` was updated upstream on 2026-10-12 18:11–1
 | D21 | Hytale item ids | `items-and-assets.md` §1 expects lowercase `namespace:path`; Hytale 0.7.0 item ids are CamelCase asset ids without namespace (`Weapon_Sword_Iron`), and `give_item` needs exactly that id. | The Hytale bridge sends the game's own id unchanged (no invented namespace, no case change) so ids round-trip into actions. **Panel action:** treat Hytale ids as opaque, case-sensitive strings. |
 | D22 | Bukkit minimum version (deviation) | `releases.md` sets the universal jar to `>=1.12`. | The Bukkit half supports **1.13+**: pre-flattening ids would need an untestable legacy table (worker A, NOTES §2). On 1.12.2 the bridge disables itself with a clear log line and the server is unaffected. Manifest `game_versions` for the universal jar is `>=1.13`. **Panel action:** none; 1.12 servers fall back to RCON/console. |
 | D23 | Chunk surfaces: details `operations.md` §6b/§7.3 and `minecraft.md` §6a leave open | (a) `hash`: byte layout unspecified. (b) A column with no surface block (all air, e.g. End void columns in a non-void chunk). (c) Water that reaches the bottom of the world. (d) When "under load" starts. (e) Palette entries: ids or full block states. | (a) `hash` = first 16 hex of SHA-256 over **canonical MessagePack** (`items-and-assets.md` §2 rules) of the map `{biome, biomes, floor, palette, top, water_depth, y}` (bins as `bin`); a void chunk hashes `{void: true}`. (b) Such a column uses palette entry `minecraft:air` as `top`, `y` = the world's minimum Y, `water_depth` 0, `floor` 0xFFFF, `biome` = biome at (x, min Y, z). A chunk where every column is like that is sent as `void: true` with only `cx`, `cz`, `world`, `dimension`, `hash`. (c) `floor` = 0xFFFF and `water_depth` counts down to the bottom (capped at 255). Otherwise `floor` is the first non-water block below the water, whatever it is (air included). (d) Per subscription: normally a flush every 250 ms sends every dirty chunk whose 2 s cooldown has passed, ≤ 64 per frame. If more than 64 chunks are waiting, the subscription enters load mode for that second: it sends at most 16 chunks in that second, discards the rest, and puts `"dropped": n` (the count discarded since the last frame) on its next frame. (e) Palette entries are block **ids** without state properties (`minecraft:oak_stairs`), as the region renderer uses. Surfaces are compared by `hash` and a chunk is only sent when its hash differs from the last one sent on that subscription (first load always sends). **Panel action:** confirm (a) and (b) match `src/terrain.rs`. |
+| D24 | Moving onto an occupied slot (`move_item`, `move_item_live`) | `minecraft.md` §7 rows leave open: a full destination stack, which items "fit" an equipment slot, a missing `destination_expected_id`, and source = destination. | (a) Destination empty: move (if `destination_expected_id` is given it must be `minecraft:air`, else `conflict`). (b) Destination occupied and `destination_expected_id` absent: `conflict` (old panels keep the old "must be empty" behaviour). Present: it must equal the destination's id (`move_item` also checks `destination_expected_count` and `destination_expected_fingerprint`, `none` = empty), else `conflict`. (c) Same item (`isSimilar` / `ItemStack.isSameItemSameComponents`) and the destination has room: stack min(room, source count) into it, the rest stays in the source slot. Same item but the destination is already at its max stack size: swap. Different items: swap. (d) Fit: `head`/`chest`/`legs`/`feet` accept only items whose equipment slot is that slot (Bukkit `EquipmentSlot` of the material / `Equippable` component; mods `LivingEntity#getEquipmentSlotForItem`); `offhand` and every container slot accept anything. A swap checks both directions; a misfit is `conflict` and nothing changes. (e) Source = destination: `invalid_args`. (f) Everything happens in one task on the player's thread; then `updateInventory()`. `result` reports what happened: `{op: "move"|"stack"|"swap", moved: n}`. |
 
 ## 1. Shared implementation rules (all bridges)
 
@@ -107,6 +108,148 @@ Entries for the lead to merge into `NOTES.md` §2. Format: **topic** — what di
 > **Bukkit dirty events** are exactly the listed ones plus nothing else: falling blocks (`EntityChangeBlockEvent`), pistons and physics-only changes are not hooked, so they appear on the next chunk load / listed event. Folia region snapshots are staggered 6 chunks per tick; non-Folia uses a 1.5 ms per tick time slice.
 
 > **Dimension resolution on Bukkit** — `world` matches the WorldMap folder (or the Bukkit world name); omitting `dimension` when the folder maps to several Bukkit worlds is `invalid_args`.
+
+
+### Moving onto occupied slots (D24; Bukkit family and mod loaders share the rules in core `MoveLogic`)
+
+- Shared decision table lives in core `spi/MoveLogic` (pure, unit-tested); Bukkit `BukkitActions#move` and mod `McActionSet#move` only gather facts and apply the plan. Result `{op, moved}`.
+- Empty destination also accepts `destination_expected_count` 0 and `destination_expected_fingerprint` `none` (besides `minecraft:air`); any other value is `conflict`. `destination_expected_fingerprint` is validated as `none` or 64 hex in the handler (not in core arg validation, since `none` is not hex).
+- Bukkit equipment fit: EQUIPPABLE item component (`ItemMeta#getEquippable`, 1.21.2+) first, then `Material#getEquipmentSlot` (reflection), then name heuristics (`*_HELMET`, `CARVED_PUMPKIN`, `*_HEAD`, `*_SKULL`, `*_CHESTPLATE`, `ELYTRA`, `*_LEGGINGS`, `*_BOOTS`) on 1.13-1.20. Version-specific: only 1.21.4 (Paper) was run live; older ones are untested.
+- Mods: `Player#getEquipmentSlotForItem` (26.3 mapping); only the v26 sources exist. Cursor container accepts anything, like offhand.
+
+
+### Performance pass (1.0.2)
+
+# NOTES section — Minecraft bridge CPU / game-thread cost pass (worker O1)
+
+Entries for the lead to merge into `NOTES.md` §2 (core + Bukkit family) and the mod-loader section. Protocol output is unchanged
+(all conformance tests green, item hashes/fingerprints untouched, byte-identical encodings are asserted by unit tests).
+
+## How it was measured
+
+`plugins/minecraft/scripts/bench-bridge.mjs` (uses `conformance/lib/client.mjs`; `scripts/bench-hook.sh` runs it as `PM_HOOK` inside
+`headless-conformance.sh`). Per op it sends a burst of 128 identical requests (8 connections x `max_inflight` 16 = the default
+`max_connections`) 1 warm-up + 5 rounds, then 20 sequential single calls.
+* `wall-50 ms/call` = the lead's burst method; it quantises to one 50 ms tick and reads 0.000 for anything cheap.
+* `task ms/call` = **game-thread time spent inside bridge tasks per request**, exact: with `-Dpm.taskstats=true` every task that a
+  scheduler (`BukkitScheduler`, `McScheduler`) hands to a game thread is timed and `[pm-taskstats] tasks=N nanos=M` is logged when
+  activity stops; the bench diffs it per op (needs `<root>/server.log`). This is the number used below. It costs two `nanoTime()`
+  calls per task and is off by default.
+* The idle section reads `/proc/<pid>/task/*/stat` for the `pm-bridge-*` threads (6 s, without and with one idle connection).
+* Profiler: JFR (`-XX:StartFlightRecording=...,settings=profile`) on Paper 1.21.4, bot Notch, normal world. Server-thread samples whose
+  stack contains bridge code: **592 before -> 83 after** over the same bench + conformance run.
+* Paper 1.21.4 (Java 21), Folia 1.21.4, Fabric 26.3 (Java 25), a mineflayer bot via ViaProxy on Fabric. Flat numbers are CPU-noisy (+-20%).
+
+## Results (game-thread ms per request, `task ms/call`)
+
+"offloaded" = all changes except request coalescing (`-Dpm.readcache.ms=0`); "default" = everything (coalescing on, 500 ms window).
+The bench repeats identical calls, so "default" shows the coalescing effect (~one computation per 500 ms window, shared by up to 128 requests);
+a panel refreshing one player once a second gets the "offloaded" column. `statistics` / `advancements` columns include their 2 s per-player cache.
+
+| operation | before (Paper) | after, offloaded (Paper) | after, default (Paper) | Folia offloaded / default | Fabric default |
+|---|---|---|---|---|---|
+| server.info | 0.0247 | 0.0232 | 0.0026 | 0.1552 / 0.0154 | 0.0003 |
+| players.list | 0.0090 | 0.0110 | 0.0006 | 0.0092 / 0.0006 | 0.0002 |
+| players.list include_sensitive | 0.0050 | 0.0039 | 0.0006 | 0.0037 / 0.0008 | 0.0014 |
+| player.get (no `game`) | 0.0922 | 0.0733 | 0.0024 | 0.0627 / 0.0025 | 0.0012 |
+| player.get `game` without statistics/advancements | 1.3875 | 0.1476 | 0.0533 | 0.1531 / 0.0596 | 0.0162 |
+| player.get `game.statistics` | 0.4923 | 0.0730 | 0.0070 | 0.0674 / 0.0059 | 0.0040 |
+| player.get `game.advancements` (+unobtained) | 1.3141 | 0.2314 | 0.0119 | 0.1286 / 0.0115 | 0.0200 |
+| player.get ALL | 2.2952 | 0.1464 | 0.0173 | 0.1083 / 0.0162 | 0.0195 |
+| player.inventory | 0.1739 | 0.0621 | 0.0035 | 0.0572 / 0.0035 | 0.0023 |
+| player.nearby r16 | 0.0877 | 0.0285 | 0.0038 | 0.0379 / 0.0046 | 0.0014 |
+| player.nearby r32 + blocks (65x65x17 cells) | 8.3808 | 0.6178 | 0.0112 | 0.4950 / 0.0132 | 0.0026 |
+| item.get | 0.2073 | 0.0519 | 0.0031 | 0.0355 / 0.0034 | 0.0014 |
+| map.chunks (81 chunks) | 2.6450 | 1.8779 | 0.0098 | 1.8472 / 0.0206 | n/a (0) |
+
+Scheduler tasks per request on the game thread: `player.inventory`, `player.nearby`, `item.get` went from 2 (global lookup + owning thread) to 1.
+Idle: **0 ms CPU in the 5 `pm-bridge-*` threads over 6 s without a panel and 0 ms with one idle connection (8 threads, all blocked in socket
+reads/queue takes); 0 bridge tasks on the game thread** (Paper, Folia, Fabric). No timer exists while nothing is subscribed.
+
+## Optimisations (each with its measured effect)
+
+> **Block slice built off the game thread** (`player.nearby blocks:true`) — the game thread only copies the `ChunkSnapshot`s (Bukkit) / the
+> `PalettedContainer` block-state copies of the covered sections (mods) plus the block entities; the 72k-cell loop (`getBlockData`/`getAsString`,
+> palette, `BlockSlice.pack`) runs on the async pool. Before: 8.38 ms per call on the game thread (profile: `BlockSlice.paletteId`,
+> `CraftBlockData.equals/clone`, `pack`). After: 0.62 ms (snapshot copies only). `BlockSlice.pack` also got a byte-wise packer (identical bytes,
+> asserted against the old bit-at-a-time reference in `BlockSliceTest`).
+
+> **Statistics** (`StatsCollector`) — candidate material/entity lists, their id strings and the Statistic classification are built once (lazily, no startup
+> cost); a (statistic, material/entity) pair that threw `IllegalArgumentException` once is remembered and never tried again (validity depends only on the
+> pair); the result is cached per player for 2 s (`TimedCache`, `-Dpm.stats.cache.ms`, invalidated on quit). Same for the mod loaders
+> (`McGame.statistics`). 0.49 -> 0.07 ms (Paper). The `Statistic` API has no way to list nonzero values, so a cold collection still walks the valid pairs.
+
+> **Advancements** — definitions (handle, key string, criteria count) are read once and kept for 60 s or until `ServerLoadEvent` (datapack/plugin
+> reload, registered defensively); only the player's progress is read per call, `criteria_total` comes from the cached definition, dates are formatted once per
+> instant (a `SimpleDateFormat` per date was allocated before), and the result is cached per player for 2 s. 1.31 -> 0.23 ms uncached.
+
+> **Reflection / id caches** — `Reflect.method` resolves through a per-class `ClassValue` map without building a key string per call;
+> material, entity, effect and attribute ids and the attribute-by-name lookup (`Compat.value("max_health")` rescanned every attribute with
+> reflection four times per `player.get`) are cached. `player.get game` 1.39 -> 0.15 ms.
+
+> **Permissions** — LuckPerms (thread-safe API) is queried on the async pool, not the game thread (`players.list`, `player.get` leave the
+> `groups`/`primary_group`/`permission_provider` keys in place as placeholders and fill them off-thread, so key order is unchanged). Vault is still read on
+> the game thread. Deviation: if LuckPerms is installed but does not know the user, the old Vault fallback is not tried.
+
+> **One scheduler task per request / per tick** — `TickBatcher`: everything queued before the owning thread runs goes out as one `runTask` /
+> `execute` / entity-scheduler call; a drain stops after 10 ms (`-Dpm.batch.budget.ms`) and re-submits the rest for the next tick. Folia: one batcher per
+> player on the entity scheduler (dropped on quit, `retired` fails queued tasks with `offline`); the lookup `Bukkit.getPlayer(uuid)` is done on the calling
+> thread, no hop through the global region (it used to cost one extra global-region task per `player.get`/`inventory`/`nearby`). Folia region batching
+> (`forRegion`, chunk snapshots) is not done: the API gives no region identity, so only same-chunk tasks could share a call.
+
+> **Read coalescing** (`ReadCache`, core) — `server.info`, `players.list`, `player.get`, `player.inventory`, `item.get`, `player.nearby`, `map.chunks`: an
+> identical request (key = op + canonical args incl. `fields`, `include_sensitive`, `include_unobtained`) that is in flight or finished < 500 ms ago
+> (`-Dpm.readcache.ms`, 0 = off) reuses that result. Only successes are kept; a follower whose leader hit *its own* deadline recomputes. Invalidation:
+> every `action.run` (before and after), join/leave/kick/death of a player (platform hooks call `BridgeCore.playerChanged`, subscription or not; proxies on
+> join/leave/kick) drop that player's entries plus all server-wide ones (roster, server info, chunks). Entries are swept every 5 s. The response body of a
+> cached result is MessagePack-encoded once (`PreEncoded`) and copied into each response. Staleness is bounded by 500 ms (`uptime`, `ping`, positions).
+> Deviation/limit: the invalidation is global for actions (we do not parse which player an action touches) and changes made by other plugins/commands are
+> visible after at most 500 ms.
+
+> **Encoding / framing** — `MsgPack.encodeFramed` (per-thread reusable buffer, frame header reserved, exactly one right-sized copy; removes the separate
+> `Framing.frame` copy), ASCII fast path in `writeStr` (no `getBytes` per key/id), `PreEncoded`, no second encode of inventory/item responses (they were
+> encoded once to measure the size and again to send), frame header read in one call instead of four single-byte socket reads. Byte-identical output is
+> asserted in `MsgPackFramedTest`.
+
+> **Event listeners registered only while needed** (Bukkit) — chat, command (player + console), advancement and damage listeners are separate `Listener`s
+> registered with Bukkit when the first events subscription asks for the type and unregistered when the last one leaves (`EventBus.onChange`);
+> `BukkitChunkEvents` (block place/break/form/fade/burn/decay/flow/explode/grow, chunk load) is registered on the first `chunks.subscribe` and removed after
+> the last (`ChunkHub.onActiveChange`). `EventBus.hasSubscribers` is one hash lookup instead of a list scan. The mod loaders' hooks (Fabric mixins cannot
+> be detached) keep their early return, which is now that single lookup.
+
+> **Startup / threads** — roster files (`ops`, `whitelist`, `banned-*`, `usercache`) are read on the async thread, not in `onEnable`; Folia position
+> sampling no longer parks a pool thread for 500 ms per sample (single delayed-task thread); request workers are a bounded pool (32, idle ones retire)
+> instead of one new thread per concurrent request; asset indexing runs at minimum thread priority (the JVM only honours priorities with
+> `-XX:ThreadPriorityPolicy` on Linux, so this is best effort). Asset/pack indexing was already lazy (first `assets.*` call).
+
+## Evaluated and not done (measured or reasoned)
+
+* **Snapshot-once per tick** for several requests needing the same player: identical requests are already coalesced; different ops share almost nothing
+  (the player lookup is a map read), the remaining per-op cost is op-specific. Skipped.
+* **Delta-only main-thread position sampling** — the whole off-thread pipeline (quantise + diff + framed encode) for 500 players is 0.17 ms per frame
+  with one subscriber, 0.42 ms with four (`PositionPipelineBenchTest`, samples pre-built; the earlier "2.5 ms" figure was cold JIT + `String.format` in the test),
+  i.e. ~0.07 % of a core at 4 Hz. The sampler already skips ticks where no subscriber is due and never queues samples. The game-thread copy is primitives
+  plus one `PositionSample`; a main-thread compare would save at most that allocation and complicates `gone`/keyframe handling. Skipped (not measurable on one bot).
+* **Folia region batching / mod-loader listener unregistration** — see above (no region id in the API; mixins cannot be detached).
+* **Item record caches keyed by stack identity** — `serializeAsBytes` (4 samples of 592) is the only per-item game-thread cost left and an identity cache is not
+  safe (stacks mutate in place). Skipped.
+* `map.chunks` snapshot copies (`getChunkSnapshot`, ~0.023 ms/chunk, time-sliced to 1.5 ms per tick) remain on the game thread: that copy is what makes the
+  rest thread-safe. Coalescing makes repeated polls free; `getChunkAtIfLoaded` (Paper) replaces `isChunkLoaded` + `getChunkAt` when present.
+
+## Tests added
+
+`ReadCacheTest` (hit, expiry, per-player and global invalidation, errors not cached, concurrent single computation, invalidation during computation, leader
+timeout -> follower recomputes, sweep, TTL 0), `ReadCoalescingTest` (loopback: one game-thread computation for a burst, `include_sensitive` and `fields` kept
+separate, action / quit invalidation, expiry, errors), `TimedCacheTest`, `TickBatcherTest` (one submit per tick, order, budget split, failed hand-over),
+`MsgPackFramedTest` (string encoding unchanged for ASCII/unicode/all length classes, framed == frame(encode), `PreEncoded` byte identity), `BlockSliceTest`
+(fast packer == reference), `PositionPipelineBenchTest`, bukkit `ReflectCacheTest`.
+
+## Test results
+
+`./gradlew buildAll check` green (universal jar Java 8 bytecode). Headless conformance, final jar: paper 114 pass / 0 fail / 13 skip, folia 115/0/12 (uncached) and
+114/0/13 (default), fabric 114/0/13, neoforge 115/0/12, forge 115/0/12. The one extra skip (`action.run.expect-conflict`: "player has no item to probe") is the
+physics bot dying in the earlier `chunks.subscribe.frames` test (it is teleported 3000 blocks and back at the spawn height: "fell from a high place" /
+"suffocated in a wall" in the server log), which empties its inventory; it depends on the random world (the baseline and two intermediate builds of this pass happened to survive: paper 115/0/12), not on bridge code.
 
 ## 3. Minecraft — mod loaders
 
@@ -288,6 +431,28 @@ Checked against `Assembly-CSharp.dll` / `Oxide.*.dll` shipped in Oxide.Rust 2.0.
 
 _(not run: needs a Rust server; see plugins/rust/smoke/README.md for what to record)_
 
+
+### Performance pass (1.0.2)
+
+Measured with `dotnet run -c Release --project plugins/rust/tests/bench` (before = `-p:PluginFile=<HEAD copy>`). The environment has no Rust server: numbers are for the protocol core; game-side savings are counted in calls, not time.
+
+| What | Before | After |
+|---|---|---|
+| encode 500-player position frame | 0.366 ms | 0.127 ms |
+| encode 500-row players.list reply | 0.238 ms | 0.128 ms |
+| 10 identical `player.get` in one drain | 10 provider calls on the main thread | 1 |
+| main-thread wake-ups per second, idle | 20 (50 ms `timer.Every`) | 0 |
+| hub thread wake-ups per second, idle | 40 (`WaitOne(25)`) | 0 (blocks until a connection/subscription exists) |
+
+> **Idle behaviour** — nothing connected, no subscriptions: no drain timer (work wakes a `NextTick` pump, which re-arms a 50 ms `timer.Once` only while a backlog remains), no 30 s hello re-describe (runs only while a client is connected, and once when the first one arrives), hub thread blocked indefinitely. Remaining: the 15 s legacy export (required by the panel's 30 s freshness rule) and the event hooks that are always needed (connect/disconnect/death/kick/save/user-set; chat, command and damage hooks are subscribed only while an events subscription asks for them, verified in `Init`/`ApplyDemand`).
+> **Read coalescing** — `server.info`, `players.list`, `player.get`, `player.inventory`: identical op+canonical args in flight or <= 500 ms old share one main-thread computation (`BridgeConfig.ReadCoalesceMs`, default 500, 0 disables); errors are not cached; `action.run` invalidates the target (before and after), disconnect invalidates the player, connect and ban/role changes invalidate everything. Shared response trees are filled with hash/fingerprint and encoded under one lock (they are shared between connection writer threads); responses are identical to uncached ones. This also de-duplicates identical requests inside one drain.
+> **Drain pump** — `BridgeCore.OnMainWork` + `DrainStep`: the first enqueue on an empty queue raises one wake (`NextTick`, thread-safe in Oxide; Carbon exposes the same method), the pump drains with the existing 20 requests / 4 ms budget. Latency is now the next frame instead of up to 50 ms.
+> **Legacy export** — the main thread only copies primitives into records; sorting, projection, JSON serialisation, hashing and the write run on a pool thread, and the export is not even built when the previous write is still running. Sleeping players (hundreds on a busy wipe) are rebuilt only every 45-65 s (jittered; cache cleared on ban/role changes) instead of at every export; `blueprints_learned` (a loop over ~700 item definitions per player) is cached per player (2 min for the file, 10 s for `player.get`). An unchanged snapshot (hash excludes `generated_at`) is not rewritten while the file is < 12 s old; because the panel rejects `generated_at` older than 30 s, an unchanged snapshot is still re-stamped (no re-serialisation of the cached JSON is possible without a change hash on the game thread, so it is serialised on the pool thread and written) once the file is 12 s old. So the 15 s schedule is unchanged and the skip only removes duplicate event-triggered exports. Deviation from the brief ("skip writing if unchanged"): a pure skip would break the 30 s freshness rule.
+> **Allocation** — msgpack encoder reuses one buffer per thread, writes strings straight into it, no per-map key list/byte[] on the wire path, arrays are indexed instead of copied; `Finalize` no longer copies each map's values; hello body and valid-field set built once per `Describe()`; no LINQ left on the main-thread export path.
+> **Not changed** — position sampling already used a single sampler and primitive copies (`PosSample` struct); the per-sample array allocation is kept to avoid changing `IGameProvider`. Item definition lookups are Rust's own dictionaries.
+
+Tests: `tests/unit/PerfTests.cs` (coalescing: in-flight sharing, hit, expiry, sensitive/field separation, per-player invalidation, errors; pump wake semantics; framed/reused encoder equivalence).
+
 ## 6. Hytale (worker E)
 
 > **Real API from a public Maven repository (replaces the earlier "needs an account login" finding)** — the server API is the artifact `com.hypixel.hytale:Server`, served without login by `https://maven.hytale.com/release/` (stable) and `https://maven.hytale.com/pre-release/`. Index: `.../release/com/hypixel/hytale/Server/maven-metadata.xml` lists `0.5.10, 0.6.6, 0.6.7, 0.6.8, 0.7.0` (latest/release `0.7.0`, updated 2026-10-12); pre-release lists `0.7.0-pre.5.1` as latest. The jar is `Server-0.7.0.jar` (111 MB, Java 25, POM licence "Hypixel Studios Proprietary License"), sha1 `eea19f2fcc772828032301fcca27c99285ece659`. The build uses it as `compileOnly` and `testImplementation` only; it is never packaged. No official page documenting the repository URL was found (docs.hytale.com has no Maven page); the host is on hytale.com infrastructure, and a community repository FAQ (`https://docs.codemc.io/faq/using-hytale-repository/`) shows the same coordinates on a CodeMC mirror. Pinned build: `0.7.0` (`gradle.properties`; override with `-Phytale_build=0.7.0-pre.5.1 -Phytale_channel=pre-release`). Capability effect: every API-backed capability is real; artifact is `playermanager-bridge-hytale-0.7.0-<ver>.jar`.
@@ -325,6 +490,28 @@ _(not run: needs a Rust server; see plugins/rust/smoke/README.md for what to rec
 > **Conformance** — `conformance/bin/pm-conformance.mjs --profile hytale --allow-actions --slow` against the real socket server + stream hub driven by the fake provider (`./gradlew runFakeBridge -Proot=<dir>`, test source `FakeServerMain`): 75 passed, 0 failed, 25 skipped (assets not advertised, MC/Rust/FiveM profiles, expect-conflict probe because no panel inventory-editing action id is advertised). This validates the protocol layer only, not the Hytale API.
 
 > **Not run against a real server** — the dedicated server needs the game assets (`Assets.zip`) and an authenticated session; the brief forbids logging in or accepting licences. Every API-backed path is compile-checked against the real 0.7.0 jar and probe-checked (`ProbeTest` resolves each capability against the jar) but was not executed in a live world.
+
+
+### Performance pass (1.0.2)
+
+No Hytale server is available; figures are from unit tests and counters (the real `World.execute` is replaced by a fake executor).
+
+| What | Before | After |
+|---|---|---|
+| sampler wake-ups per second, no subscription | 20 (`scheduleWithFixedDelay` 50 ms) | 0 |
+| sampler wake-ups with one 1000 ms positions subscriber | 20 | 1 |
+| idle sweep (`pm-bridge-janitor`) wake-ups | 0.2/s always | 0 until a client connects |
+| writer thread wake-ups per connection when quiet | 2/s (`poll(500 ms)`) | 0 (`take()`, `close()` wakes it) |
+| 40 requests arriving within one tick | 40 `World.execute` | 1 (`WorldBatcherTest`) |
+| 6 identical concurrent `player.get` | 6 world tasks | 1 (`ReadCacheTest`) |
+| listeners when nobody subscribed | build GameEvent per join/leave/chat/death | return immediately |
+
+> **Idle behaviour** — nothing connected: no scheduled task, no polling thread; only the (registered-once) game listeners, which return before building anything unless an events subscription wants that type (join/leave still update the joined-at map and drop cached reads).
+> **World work** — `WorldBatcher` (one per world, weakly keyed): all bridge tasks queued for a world while a pass is pending run in one `World.execute`; a pass stops after 64 tasks or 4 ms and re-queues itself; a rejected pass fails every queued task. The position sampler was already one execute per world per sample copying primitives only; UUID strings are now cached instead of rebuilt per sample. Quantising, diffing and encoding stay on the sampler thread.
+> **Sampler scheduling** — demand-scheduled: subscribing/activating/keyframe requests wake it, each run schedules the next at the earliest of the next due sample and the next 60 s keep-alive; unsubscribing lets it go idle.
+> **Read coalescing** — `ReadCache` in the dispatcher for `server.info`, `players.list`, `player.get`, `player.inventory` (500 ms, key = op + canonical args incl. include_sensitive/fields; errors never cached; `action.run` invalidates its target before and after; join/leave invalidate that player and roster reads). Results are only read by the encoder, so responses are identical.
+> **Reflection** — verified: reflection is used only by `ApiProbe` at startup; no `Method`/`Field` lookups on any request or sample path, so nothing to cache. hello body is built once.
+> **Skipped (no measurable gain)** — rewriting `Msgpack` without `ByteArrayOutputStream`: the JIT already elides its locking, 500-player frame encode is 0.24 ms on the sampler thread (not a game thread) at <= 4 Hz; `EncoderBenchTest` keeps the reference encoder and benchmark (`PM_BENCH_OUT=file`).
 
 ## 7. FiveM / RedM (worker F)
 
@@ -427,6 +614,31 @@ the FiveM source tree at `citizenfx/fivem` (HEAD, fetched read-only) and the fra
 
 > **Shipped working directory** — the release zip contains `playermanager_bridge/.playermanager/README.txt` so the directory exists for the `SaveResourceFile` strategy, which cannot create directories. Source: lead review. Capability effect: none.
 
+
+### Performance pass (1.0.2)
+
+FXServer runs resource JavaScript on the server's main thread, so every line of bridge JS is main-thread cost. Measured with `node plugins/fivem/test/bench.js` (500 players, best of 5; native calls counted by the fake; the pre-change code is `git show HEAD:...`).
+
+| What | Before | After |
+|---|---|---|
+| msgpack encode, 500-player position frame | 2.4-3.1 ms | 0.37 ms (6-9x) |
+| msgpack encode, 500-row players.list reply | 2.3-3.4 ms | 0.38 ms (6-9x) |
+| canonical record encode (hash input) | 0.0071 ms | 0.0017 ms |
+| one sampler tick incl. diff + frame encode | 2.25 ms | 0.37 ms |
+| natives per position sample | 6001 (+ `getPlayerIdentifiers` = 1+2n natives each) | 2001 (GetPlayers + 4 per player) |
+| players.list handler | 0.67 ms, 6001 natives | 0.05 ms, 1001 natives |
+| 10 identical players.list requests together | 7.0 ms, 60010 natives | 0.52 ms, 1001 natives |
+
+> **Idle behaviour** — with nothing connected the resource schedules nothing: no `setTick`, no interval (sampler timer exists only while a positions subscription exists; the 5 s housekeeping interval exists only while a client is connected). Only the FXServer event handlers (`playerJoining`, `playerDropped`, `chatMessage`, net events) remain; with no events subscription they return before reading any native. The client script no longer creates a thread on RedM and polls every 500 ms (250 ms in a vehicle) on GTA instead of always 250 ms.
+> **Sampler** — one timer at the fastest requested interval (>= `positions_min_interval_ms`), one `GetPlayers` + 4 natives per player; each subscriber is served at its own `interval_ms` (previously every subscriber got the 250 ms floor rate regardless). Identifiers are cached per source (dropped on `playerDropped` and pruned against the online list), names refreshed every 5 s by the sampler (always fresh in on-demand ops). Samples are primitive copies into reused per-player slots, quantised once per tick and diffed against reused per-subscriber records (no signature strings, no per-player object churn except the frame entries actually sent). No game-thread hop for the sampler (it already runs on the main thread).
+> **Encoder** — `lib/msgpack.js` writes into one reusable growable Buffer (no per-byte array pushes), ASCII fast path for strings, `encodeFramed` builds the length-prefixed frame in one allocation. Output is byte-identical (fuzz test against the previous encoder kept as `test/ref-msgpack.js`; hash vectors unchanged).
+> **Read coalescing** — `server.info`, `players.list`, `player.get`, `player.inventory`: identical op+canonical args (include_sensitive and fields included) in flight or finished <= 500 ms ago share one main-thread computation; errors are never cached; invalidated per player by `action.run` (before and after), `playerDropped`, and wholesale by `playerJoining`. Results are only read afterwards, so responses are byte-identical to uncached ones.
+> **Batching** — requests arriving in the same tick share one `setImmediate` hop and one `GetPlayers` snapshot (`beginBatch/endBatch`); the per-request deadline timer was removed (deadline is checked when the hop runs). Lookups by id (`player.get`, `item.get`, ...) use the identity cache instead of re-reading the whole roster.
+> **Worker offload (optional)** — `lib/offload.js` + `lib/encode-worker.js`: encoding of very large `players.list` replies (>= 200 rows) on a Node `worker_threads` worker. FXServer only permits spawning workers after a console grant: `add_unsafe_worker_permission playermanager_bridge` in `server.cfg` (citizenfx `FilesystemPermissions.cpp` `ScriptingWorkerAllowSpawn`, checked by `NodeScriptRuntime.cpp` for the `worker` permission scope; the grant is only accepted before the server finishes initial configuration). Without the grant `new Worker` fails, the offload marks itself unavailable (one log line with the cfg line) and everything is encoded synchronously. The worker is created lazily on the first large reply (idle cost zero) and unref'd; disable with convar `set pm_bridge_offload 0`. Honest assessment: the structured-clone hand-over costs about as much as the encode itself for 500 rows, so this only pays off on very large rosters; hashing/inventory work is not offloaded (needs the live records on the main thread anyway). Source: https://github.com/citizenfx/fivem/blob/master/code/components/citizen-scripting-core/src/FilesystemPermissions.cpp , https://github.com/citizenfx/fivem/blob/master/code/components/citizen-scripting-node/src/NodeScriptRuntime.cpp . Capability effect: none.
+> **Not done** — natives results that never change are already cached (identifiers); weapon/model names are static map lookups; asset image indexes are read only on `assets.manifest` (lazy).
+
+Tests: `test/perf.test.js` (encoder fuzz equivalence, coalescing hit/expiry/sensitive/invalidation/errors, sampler scheduling and per-subscriber interval, offload fallback and a real worker).
+
 ## 8. Conformance (worker G)
 
 > **Hash test vector (D17)** — `items-and-assets.md` §2 lists `81 a2 69 64 ae …` → `027f2bef638386bd`; `minecraft:stone` is 15 bytes, so the header is `af` and the hash is `90d892ebcdb67d59`. The suite asserts the correct values and checks the documented bytes as an erratum (`test/selftest.test.mjs`). Source: `docs/protocol/items-and-assets.md` §2. Capability effect: none.
@@ -468,3 +680,13 @@ Format: **topic** — interpretation. Why.
 > **Teleport test is invasive** — `chunks.subscribe.frames` (only with `--allow-actions`) moves the online player +3000 X, then -3000 X, then back to the original coordinates with the same Y. Fall damage or suffocation is possible on a real server. It needs the `teleport` action (`x`, `y`, `z` args) and a bridge that actually moves the player.
 
 > **Unloading** — the mock unloads chunks that are no longer near a player at each teleport so reruns see new loads. A real server may keep the destination chunks loaded for a while; if a second run against the same server sees no frames, wait for the chunks to unload.
+
+### Moving onto occupied slots (conformance interpretations)
+
+# Conformance notes (worker S2, D24 move tests)
+
+> **move tests: scratch slots, `remove_item_live` required** — `move.*` (new, `--allow-actions`) use the two highest free inventory slots (normally 35/34), fill them with `set_item_live` (`expected_id: minecraft:air`) and clear them with `remove_item_live` (`expected_id` = what `item.get` reports), so a bridge must advertise `set_item_live`, `remove_item_live` and the move action or the tests skip. Why: D24 names no way to empty a slot other than removal. Capability effect: none.
+
+> **move tests: interpretations of D24** — (1) `result.moved` is asserted exactly only for `move` (source count) and `stack` (amount that fit, e.g. 14 for 40 onto 50); for `swap` any non-negative integer is accepted. (2) A `move_item` empty destination is expressed as `destination_expected_id: minecraft:air` plus `destination_expected_fingerprint: none` (no count sent). (3) `move_item` is exercised only inside `inventory` (no `destination_container` field in its row); cross-container cases (`equipment/head`) use `move_item_live`. (4) `equipment/head` is addressed with the string slot `"head"` in `item.get`, `move_item_live` and `remove_item_live`; if the bridge answers `invalid_args` for it the armor tests skip instead of failing. (5) `move.armor-fit` skips when the head holds a non-helmet (it might not fit back) and uses a diamond helmet when an iron one is already worn so that a swap is observable. (6) ActionSpec kinds checked by `move.advertised`: ids `identifier|text`, counts `integer`, fingerprints `text|identifier`, slots `text|integer|identifier` (equipment slots are strings, so `text` is the natural kind). (7) Same-slot is sent with a matching `destination_expected_id` so that `invalid_args` cannot be confused with a stale expectation.
+
+> **mock: `remove_item_live` slot kind** — the mock's `remove_item_live` ActionSpec now declares `slot` as `text` (was `integer`) so equipment slot names validate. No protocol change.

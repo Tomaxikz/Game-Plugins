@@ -24,6 +24,8 @@ import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -47,8 +49,14 @@ final class McNearby implements NearbyProvider {
                 return collect(p, req);
             }
         }).whenCompleteAsync((m, e) -> {
-            if (e != null) out.completeExceptionally(e);
-            else out.complete(ctx.<Map<String, Object>>resolve(m));
+            if (e != null) { out.completeExceptionally(e); return; }
+            try {
+                Object pending = m.get("blocks");
+                if (pending instanceof PendingSlice) m.put("blocks", ((PendingSlice) pending).build());      // the cell loop runs here, not on the server thread
+                out.complete(ctx.<Map<String, Object>>resolve(m));
+            } catch (Throwable t) {
+                out.completeExceptionally(t);
+            }
         }, ctx.async);
         return out;
     }
@@ -159,7 +167,63 @@ final class McNearby implements NearbyProvider {
         return Mc.stateProperties(st, id);
     }
 
-    private Map<String, Object> slice(ServerPlayer p, ServerLevel level, Request req) {
+    /** Server-thread capture of a block slice: copies of the palettised containers it covers plus the block entities. */
+    private final class PendingSlice {
+        final int ox, y0, oz, sx, sy, sz, minY, sec0, cx0, cz0, cx1, cz1;
+        final PalettedContainer<BlockState>[][] containers;      // [(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)][section - sec0]; null row = chunk not loaded
+        final List<Object[]> blockEntities;                      // {x, y, z, id, signLines}
+        final String dimension;
+
+        PendingSlice(int ox, int y0, int oz, int sx, int sy, int sz, int minY, int sec0, int cx0, int cz0, int cx1, int cz1,
+                     PalettedContainer<BlockState>[][] containers, List<Object[]> blockEntities, String dimension) {
+            this.ox = ox; this.y0 = y0; this.oz = oz; this.sx = sx; this.sy = sy; this.sz = sz; this.minY = minY; this.sec0 = sec0;
+            this.cx0 = cx0; this.cz0 = cz0; this.cx1 = cx1; this.cz1 = cz1;
+            this.containers = containers; this.blockEntities = blockEntities; this.dimension = dimension;
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> build() {
+            BlockSlice s = new BlockSlice(ox, y0, oz, sx, sy, sz);
+            int y1 = y0 + sy - 1;
+            int voidId = -1;
+            Map<BlockState, Integer> ids = new HashMap<BlockState, Integer>();
+            int ncz = cz1 - cz0 + 1;
+            for (int cx = cx0; cx <= cx1; cx++) {
+                for (int cz = cz0; cz <= cz1; cz++) {
+                    PalettedContainer<BlockState>[] secs = containers[(cx - cx0) * ncz + (cz - cz0)];
+                    int xa = Math.max(ox, cx << 4), xb = Math.min(ox + sx - 1, (cx << 4) + 15);
+                    int za = Math.max(oz, cz << 4), zb = Math.min(oz + sz - 1, (cz << 4) + 15);
+                    if (secs == null) s.markTruncated();
+                    for (int z = za; z <= zb; z++) {
+                        for (int x = xa; x <= xb; x++) {
+                            for (int y = y0; y <= y1; y++) {
+                                int id;
+                                if (secs == null) { if (voidId < 0) voidId = s.paletteId(VOID); id = voidId; }
+                                else {
+                                    BlockState st = secs[((y - minY) >> 4) - sec0].get(x & 15, y & 15, z & 15);
+                                    Integer c = ids.get(st);
+                                    if (c == null) {
+                                        c = Integer.valueOf(s.paletteId(BlockSlice.normalizeState(stateString(st))));
+                                        ids.put(st, c);
+                                    }
+                                    id = c.intValue();
+                                }
+                                s.setPaletteId(x - ox, y - y0, z - oz, id);
+                            }
+                        }
+                    }
+                }
+            }
+            for (Object[] be : blockEntities) s.addBlockEntity((Integer) be[0], (Integer) be[1], (Integer) be[2], (String) be[3], (List<String>) be[4]);
+            Map<String, Object> m = s.toMap();
+            m.put("world", ctx.worlds.folder);
+            m.put("dimension", dimension);
+            return m;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object slice(ServerPlayer p, ServerLevel level, Request req) {
         int rad = (int) Math.floor(req.radius);
         BlockPos bp = p.blockPosition();
         int bx = bp.getX(), by = bp.getY(), bz = bp.getZ();
@@ -171,49 +235,27 @@ final class McNearby implements NearbyProvider {
         int sx = rad * 2 + 1, sz = rad * 2 + 1, sy = y1 - y0 + 1;
         if ((long) sx * sz * sy > BlockSlice.MAX_CELLS) throw BridgeException.invalid("block slice exceeds 262144 cells");
         int ox = bx - rad, oz = bz - rad;
-        BlockSlice s = new BlockSlice(ox, y0, oz, sx, sy, sz);
-        int voidId = -1;
-        Map<BlockState, Integer> ids = new HashMap<BlockState, Integer>();
-        BlockPos.MutableBlockPos mp = new BlockPos.MutableBlockPos();
-        for (int cx = ox >> 4; cx <= (ox + sx - 1) >> 4; cx++) {
-            for (int cz = oz >> 4; cz <= (oz + sz - 1) >> 4; cz++) {
+        int cx0 = ox >> 4, cx1 = (ox + sx - 1) >> 4, cz0 = oz >> 4, cz1 = (oz + sz - 1) >> 4;
+        int sec0 = (y0 - worldMin) >> 4, sec1 = (y1 - worldMin) >> 4;
+        PalettedContainer<BlockState>[][] containers = new PalettedContainer[(cx1 - cx0 + 1) * (cz1 - cz0 + 1)][];
+        List<Object[]> bes = new ArrayList<Object[]>();
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
                 LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
-                int xa = Math.max(ox, cx << 4), xb = Math.min(ox + sx - 1, (cx << 4) + 15);
-                int za = Math.max(oz, cz << 4), zb = Math.min(oz + sz - 1, (cz << 4) + 15);
-                if (chunk == null) s.markTruncated();
-                for (int z = za; z <= zb; z++) {
-                    for (int x = xa; x <= xb; x++) {
-                        for (int y = y0; y <= y1; y++) {
-                            int id;
-                            if (chunk == null) { if (voidId < 0) voidId = s.paletteId(VOID); id = voidId; }
-                            else {
-                                BlockState st = chunk.getBlockState(mp.set(x, y, z));
-                                Integer c = ids.get(st);
-                                if (c == null) {
-                                    c = Integer.valueOf(s.paletteId(BlockSlice.normalizeState(stateString(st))));
-                                    ids.put(st, c);
-                                }
-                                id = c.intValue();
-                            }
-                            s.setPaletteId(x - ox, y - y0, z - oz, id);
-                        }
-                    }
-                }
-                if (chunk != null) {
-                    for (Map.Entry<BlockPos, BlockEntity> be : chunk.getBlockEntities().entrySet()) {
-                        BlockPos q = be.getKey();
-                        if (q.getX() < ox || q.getX() >= ox + sx || q.getZ() < oz || q.getZ() >= oz + sz || q.getY() < y0 || q.getY() > y1) continue;
-                        String bid = Mc.blockEntityId(be.getValue());
-                        if (bid == null) continue;
-                        s.addBlockEntity(q.getX(), q.getY(), q.getZ(), bid, Mc.signLines(be.getValue()));
-                    }
+                if (chunk == null) continue;
+                LevelChunkSection[] secs = chunk.getSections();
+                PalettedContainer<BlockState>[] copy = new PalettedContainer[sec1 - sec0 + 1];
+                for (int i = sec0; i <= sec1; i++) copy[i - sec0] = secs[i].getStates().copy();
+                containers[(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)] = copy;
+                for (Map.Entry<BlockPos, BlockEntity> be : chunk.getBlockEntities().entrySet()) {
+                    BlockPos q = be.getKey();
+                    if (q.getX() < ox || q.getX() >= ox + sx || q.getZ() < oz || q.getZ() >= oz + sz || q.getY() < y0 || q.getY() > y1) continue;
+                    String bid = Mc.blockEntityId(be.getValue());
+                    if (bid == null) continue;
+                    bes.add(new Object[] {q.getX(), q.getY(), q.getZ(), bid, Mc.signLines(be.getValue())});
                 }
             }
         }
-        Map<String, Object> m = s.toMap();
-        String dim = McWorlds.dimension(level);
-        m.put("world", ctx.worlds.folder);
-        m.put("dimension", dim);
-        return m;
+        return new PendingSlice(ox, y0, oz, sx, sy, sz, worldMin, sec0, cx0, cz0, cx1, cz1, containers, bes, McWorlds.dimension(level));
     }
 }

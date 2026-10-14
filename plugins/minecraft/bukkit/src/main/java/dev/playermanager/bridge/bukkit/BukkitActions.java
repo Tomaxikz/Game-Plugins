@@ -8,6 +8,7 @@ import dev.playermanager.bridge.spi.ActionRequest;
 import dev.playermanager.bridge.spi.ActionResult;
 import dev.playermanager.bridge.spi.ActionSpec;
 import dev.playermanager.bridge.spi.McActions;
+import dev.playermanager.bridge.spi.MoveLogic;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,6 +34,7 @@ import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
@@ -379,15 +381,78 @@ final class BukkitActions {
     }
 
     private ActionResult move(Player p, ActionRequest r, String destContainer) {
-        ItemStack cur = checked(p, r);
+        String srcContainer = str(r, "container");
+        Object srcSlot = r.args.get("slot");
         Object destSlot = r.args.get("destination_slot");
+        if (srcContainer.equals(destContainer) && slotEq(srcSlot, destSlot)) throw BridgeException.invalid("source and destination are the same slot");
+        ItemStack cur = checked(p, r);
         ItemStack at = getSlot(p, destContainer, destSlot);
-        if (!ItemConverter.isAir(at)) throw BridgeException.conflict("destination slot is not empty");
-        ItemStack copy = cur.clone();
-        setSlot(p, destContainer, destSlot, copy);
-        setSlot(p, str(r, "container"), r.args.get("slot"), null);
+        boolean destEmpty = ItemConverter.isAir(at);
+        Object ec = r.args.get("destination_expected_count");
+        String efp = (String) r.args.get("destination_expected_fingerprint");
+        if (efp != null && !efp.equals("none") && !efp.matches("[0-9a-f]{64}")) throw BridgeException.invalid("bad destination_expected_fingerprint");
+        MoveLogic.verifyDestination((String) r.args.get("destination_expected_id"), ec == null ? null : Integer.valueOf(((Number) ec).intValue()),
+                efp, destEmpty ? null : ctx.items.rawNow(at));
+        MoveLogic.Plan plan = MoveLogic.plan(cur.getAmount(), destEmpty, !destEmpty && cur.isSimilar(at), destEmpty ? 0 : at.getAmount(),
+                destEmpty ? 0 : at.getMaxStackSize(), fits(cur, destContainer, destSlot), destEmpty || fits(at, srcContainer, srcSlot));
+        if (plan.op.equals(MoveLogic.STACK)) {
+            ItemStack d = at.clone();
+            d.setAmount(plan.destCount);
+            ItemStack s = cur.clone();
+            s.setAmount(plan.srcCount);
+            setSlot(p, destContainer, destSlot, d);
+            setSlot(p, srcContainer, srcSlot, plan.srcCount <= 0 ? null : s);
+        } else if (plan.op.equals(MoveLogic.SWAP)) {
+            ItemStack a = cur.clone(), b = at.clone();
+            setSlot(p, destContainer, destSlot, a);
+            setSlot(p, srcContainer, srcSlot, b);
+        } else {
+            ItemStack a = cur.clone();
+            setSlot(p, destContainer, destSlot, a);
+            setSlot(p, srcContainer, srcSlot, null);
+        }
         p.updateInventory();
-        return ActionResult.ok();
+        return ActionResult.ok(plan.result());
+    }
+
+    /** Armor slots accept only items that belong there; offhand, cursor and container slots accept anything. */
+    private static boolean fits(ItemStack s, String container, Object slot) {
+        if (!container.equals("equipment")) return true;
+        String sl = String.valueOf(slot);
+        if (!(sl.equals("head") || sl.equals("chest") || sl.equals("legs") || sl.equals("feet"))) return true;
+        return sl.equals(equipmentSlotOf(s));
+    }
+
+    /** head/chest/legs/feet for wearable items, else null. */
+    private static String equipmentSlotOf(ItemStack s) {
+        try {
+            ItemMeta meta = s.getItemMeta();
+            if (meta != null && Boolean.TRUE.equals(Reflect.call(meta, "hasEquippable"))) {   // 1.21.2+ EQUIPPABLE component
+                Object eq = Reflect.call(meta, "getEquippable");
+                Object sl = eq == null ? null : Reflect.call(eq, "getSlot");
+                String n = norm(sl);
+                if (n != null) return n;
+            }
+        } catch (Throwable ignored) { }
+        String n = norm(Reflect.call(s.getType(), "getEquipmentSlot"));   // newer API
+        if (n != null) return n;
+        String m = s.getType().name();
+        if (m.endsWith("_HELMET") || m.equals("CARVED_PUMPKIN") || m.endsWith("_HEAD") || m.endsWith("_SKULL")) return "head";
+        if (m.endsWith("_CHESTPLATE") || m.equals("ELYTRA")) return "chest";
+        if (m.endsWith("_LEGGINGS")) return "legs";
+        if (m.endsWith("_BOOTS")) return "feet";
+        return null;
+    }
+
+    private static String norm(Object slot) {
+        if (slot == null) return null;
+        switch (String.valueOf(slot)) {
+            case "HEAD": return "head";
+            case "CHEST": return "chest";
+            case "LEGS": return "legs";
+            case "FEET": return "feet";
+            default: return null;
+        }
     }
 
     // ---- bans / whitelist / op

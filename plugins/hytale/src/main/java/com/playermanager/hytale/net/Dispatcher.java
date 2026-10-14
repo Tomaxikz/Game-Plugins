@@ -46,6 +46,10 @@ public final class Dispatcher {
     private final String bridgeVersion;
     private final int maxFrame;
     private final long positionsMinIntervalMs;
+    /** Identical reads within this window share one game-thread computation (0 disables). */
+    public static final long READ_TTL_MS = 500L;
+    private final ReadCache reads;
+    private volatile Map<String, Object> helloMemo;
 
     public Dispatcher(GameProvider provider, StreamHub hub, BridgeConfig cfg, String bridgeVersion) {
         this.provider = provider;
@@ -54,6 +58,8 @@ public final class Dispatcher {
         this.verified = provider.capabilities();
         this.maxFrame = 4 * 1024 * 1024;
         this.positionsMinIntervalMs = cfg.positionsMinIntervalMs();
+        this.reads = new ReadCache(READ_TTL_MS, System::currentTimeMillis);
+        provider.setPresenceListener(id -> reads.invalidate(id));
 
         Set<String> ops = new LinkedHashSet<>();
         ops.add("hello");
@@ -95,6 +101,15 @@ public final class Dispatcher {
         return ops.contains(op);
     }
 
+    /** Test/diagnostics: read-cache counters. */
+    public long readHits() {
+        return reads.hits.get();
+    }
+
+    public long readMisses() {
+        return reads.misses.get();
+    }
+
     public int maxFrame() {
         return maxFrame;
     }
@@ -114,10 +129,16 @@ public final class Dispatcher {
         }
         return switch (op) {
             case "hello" -> Result.of(hello(args));
-            case "server.info" -> Result.of(provider.serverInfo());
-            case "players.list" -> Result.of(playersList(args));
-            case "player.get" -> Result.of(playerGet(args));
-            case "player.inventory" -> Result.of(provider.playerInventory(uuid(args.get("id"), "id")));
+            case "server.info" -> Result.of(reads.get(op, args, null, provider::serverInfo));
+            case "players.list" -> Result.of(reads.get(op, args, null, () -> playersList(args)));
+            case "player.get" -> {
+                String id = uuid(args.get("id"), "id");
+                yield Result.of(reads.get(op, args, id, () -> playerGet(args)));
+            }
+            case "player.inventory" -> {
+                String id = uuid(args.get("id"), "id");
+                yield Result.of(reads.get(op, args, id, () -> provider.playerInventory(id)));
+            }
             case "item.get" -> Result.of(itemGet(args));
             case "player.nearby" -> Result.of(nearby(args));
             case "action.run" -> Result.of(actionRun(args));
@@ -138,6 +159,10 @@ public final class Dispatcher {
     private Map<String, Object> hello(Map<String, Object> args) {
         if (!(args.get("panel_version") instanceof String pv) || pv.isEmpty()) {
             throw BridgeError.invalid("panel_version is required");
+        }
+        Map<String, Object> memo = helloMemo;
+        if (memo != null) {
+            return memo;
         }
         Map<String, Object> caps = new LinkedHashMap<>();
         caps.put("ops", new ArrayList<>(ops));
@@ -160,6 +185,7 @@ public final class Dispatcher {
         data.put("bridge_version", bridgeVersion);
         data.put("capabilities", caps);
         data.put("limits", limits);
+        helloMemo = data; // depends only on constants: built once, shared (read-only)
         return data;
     }
 
@@ -309,7 +335,13 @@ public final class Dispatcher {
         Map<String, Object> actionArgs = args.get("args") == null ? Map.of() : mapOf(args.get("args"), "args");
         Map<String, Object> clean = validateArgs(spec, actionArgs);
         Expect expect = args.get("expect") == null ? null : parseExpect(mapOf(args.get("expect"), "expect"), clean);
-        return provider.runAction(action, target, clean, expect);
+        // Any action may change what a cached read shows: drop the target's entries before and after it runs.
+        reads.invalidate(target);
+        try {
+            return provider.runAction(action, target, clean, expect);
+        } finally {
+            reads.invalidate(target);
+        }
     }
 
     static Expect parseExpect(Map<String, Object> m, Map<String, Object> actionArgs) {

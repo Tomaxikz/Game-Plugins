@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -62,6 +63,7 @@ public final class BridgeCore {
     private AssetService assets;
     private ChunkService chunks;
     private Ops ops;
+    private final dev.playermanager.bridge.util.ReadCache readCache = new dev.playermanager.bridge.util.ReadCache(Long.getLong("pm.readcache.ms", 500L));
     private final Set<Connection> connections = java.util.Collections.newSetFromMap(new ConcurrentHashMap<Connection, Boolean>());
 
     public BridgeCore(Platform platform) {
@@ -82,6 +84,10 @@ public final class BridgeCore {
     public AssetService assets() { return assets; }
     public ChunkService chunks() { return chunks; }
     public Ops ops() { return ops; }
+    public dev.playermanager.bridge.util.ReadCache readCache() { return readCache; }
+
+    /** Platform hook: a player joined, left, died, was kicked or banned. Drops that player's cached reads and the roster-wide ones. */
+    public void playerChanged(String playerId) { readCache.invalidatePlayer(playerId); }
     public ExecutorService pool() { return pool; }
     public ScheduledExecutorService timer() { return timer; }
     public String token() { return token; }
@@ -99,9 +105,13 @@ public final class BridgeCore {
             files.ensureDirs();
             config = BridgeConfig.loadOrCreate(files.config, log);
             capabilities = new Capabilities(platform, config);
-            pool = Executors.newCachedThreadPool(daemon("pm-bridge-worker"));
-            timer = Executors.newScheduledThreadPool(2, daemon("pm-bridge-timer"));
-            assetPool = Executors.newSingleThreadExecutor(daemon("pm-bridge-assets"));
+            // Request workers mostly wait for the game thread: a bounded pool (32 threads, idle ones retire after 30 s) instead of one
+            // thread per concurrent request; the asset indexer runs at minimum priority so it never competes with the server.
+            ThreadPoolExecutor workers = new ThreadPoolExecutor(32, 32, 30, TimeUnit.SECONDS, new java.util.concurrent.LinkedBlockingQueue<Runnable>(), daemon("pm-bridge-worker", Thread.NORM_PRIORITY - 1));
+            workers.allowCoreThreadTimeOut(true);
+            pool = workers;
+            timer = Executors.newScheduledThreadPool(2, daemon("pm-bridge-timer", Thread.NORM_PRIORITY - 1));
+            assetPool = Executors.newSingleThreadExecutor(daemon("pm-bridge-assets", Thread.MIN_PRIORITY));
             events = new EventBus(new CommandRedactor(config.platformStrings("redact_commands", null)), subIds);
             if (platform.positions() != null) {
                 positions = new PositionService(platform.positions(), timer, pool, log, subIds, config.positionsMinIntervalMs);
@@ -180,6 +190,7 @@ public final class BridgeCore {
     private void housekeeping() {
         try {
             for (Connection c : connections) c.housekeeping();
+            readCache.sweep();
         } catch (Throwable t) {
             log.debug("housekeeping: " + t);
         }
@@ -187,12 +198,13 @@ public final class BridgeCore {
 
     public void connectionClosed(Connection c) { connections.remove(c); }
 
-    private static ThreadFactory daemon(final String name) {
+    private static ThreadFactory daemon(final String name, final int priority) {
         final AtomicInteger n = new AtomicInteger();
         return new ThreadFactory() {
             public Thread newThread(Runnable r) {
                 Thread t = new Thread(r, name + "-" + n.incrementAndGet());
                 t.setDaemon(true);
+                t.setPriority(priority);
                 return t;
             }
         };

@@ -269,6 +269,17 @@ export const tests = [
       const home = { x: t.x, y: t.y, z: t.z };
       const want = { world: t.world, dimension: t.dimension };
       let moved = false;
+      // Teleporting 3000 blocks at the same Y can drop the player into the air or a wall; a death would empty the
+      // inventory and break later tests. Use creative mode (no damage) for the trip when the bridge offers `gamemode`.
+      let restoreMode = null;
+      if (ctx.caps.actions.some((a) => a.id === 'gamemode')) {
+        const g = await client.request('player.get', { id: t.player.id });
+        const mode = g.ok && typeof g.data.game_mode === 'string' ? g.data.game_mode : null;
+        if (mode && mode !== 'creative' && mode !== 'spectator') {
+          const r = await client.request('action.run', { action: 'gamemode', target: t.player.id, args: { mode: 'creative' } });
+          if (r.ok && r.data.ok !== false) restoreMode = mode;
+        }
+      }
       try {
         // Phase 1: no area.
         const a = await client.subscribe('chunks.subscribe', baseArgs(t));
@@ -316,6 +327,13 @@ export const tests = [
             await teleport(client, t, home.x, home.y, home.z);
           } catch {
             /* best effort: the player may need to be moved back by hand */
+          }
+        }
+        if (restoreMode) {
+          try {
+            await client.request('action.run', { action: 'gamemode', target: t.player.id, args: { mode: restoreMode } });
+          } catch {
+            /* best effort */
           }
         }
         client.close();

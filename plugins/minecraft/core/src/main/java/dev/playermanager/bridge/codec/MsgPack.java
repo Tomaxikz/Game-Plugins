@@ -27,6 +27,29 @@ public final class MsgPack {
         return out.toByteArray();
     }
 
+    private static final ThreadLocal<Out> POOL = new ThreadLocal<Out>();
+
+    /**
+     * Encodes {@code value} and returns the whole wire frame: u32 big-endian length followed by the body, in one exactly
+     * sized array. The scratch buffer is reused per thread (no growth copies on warm threads, no separate framing copy).
+     * Not re-entrant on one thread for the same call chain: {@link PreEncoded} nested values use a private buffer.
+     */
+    public static byte[] encodeFramed(Object value) {
+        Out out = POOL.get();
+        if (out == null) { out = new Out(); POOL.set(out); }
+        out.len = 4;
+        try {
+            write(out, value, false, 0);
+            int n = out.len - 4;
+            byte[] r = new byte[out.len];
+            System.arraycopy(out.buf, 0, r, 0, out.len);
+            r[0] = (byte) (n >>> 24); r[1] = (byte) (n >>> 16); r[2] = (byte) (n >>> 8); r[3] = (byte) n;
+            return r;
+        } finally {
+            if (out.buf.length > (256 << 10)) out.buf = new byte[(64 << 10)];       // do not pin a huge buffer to an idle thread
+        }
+    }
+
     /** Canonical encoding (items-and-assets.md section 2): sorted keys, integral floats as ints, nil dropped from maps. */
     public static byte[] encodeCanonical(Object value) {
         Out out = new Out();
@@ -81,6 +104,7 @@ public final class MsgPack {
         if (depth > MAX_DEPTH) throw new MsgPackException("nesting too deep");
         if (v == null) { out.b(0xc0); return; }
         if (v instanceof Boolean) { out.b(((Boolean) v) ? 0xc3 : 0xc2); return; }
+        if (v instanceof PreEncoded) { byte[] b = ((PreEncoded) v).bytes(); out.bytes(b, 0, b.length); return; }
         if (v instanceof Double || v instanceof Float) {
             double d = ((Number) v).doubleValue();
             if (canonical && d == Math.rint(d) && !Double.isInfinite(d) && Math.abs(d) < 9.0e18) {
@@ -177,6 +201,22 @@ public final class MsgPack {
     }
 
     public static void writeStr(Out out, String s) {
+        int n = s.length();
+        if (n < 65536) {                    // ASCII fast path: no intermediate byte[] (almost every key and id)
+            int i = 0;
+            while (i < n && s.charAt(i) < 0x80) i++;
+            if (i == n) {
+                if (n < 32) out.b(0xa0 | n);
+                else if (n < 256) { out.b(0xd9); out.b(n); }
+                else { out.b(0xda); out.s(n); }
+                out.ensure(n);
+                byte[] buf = out.buf;
+                int p = out.len;
+                for (int k = 0; k < n; k++) buf[p + k] = (byte) s.charAt(k);
+                out.len = p + n;
+                return;
+            }
+        }
         byte[] a = s.getBytes(StandardCharsets.UTF_8);
         if (a.length < 32) out.b(0xa0 | a.length);
         else if (a.length < 256) { out.b(0xd9); out.b(a.length); }

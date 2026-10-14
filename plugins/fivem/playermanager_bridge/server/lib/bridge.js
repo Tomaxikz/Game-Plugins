@@ -15,6 +15,13 @@ const KEYFRAME_EVERY_MS = 10000;
 const PING_AFTER_MS = 60000;
 const IDLE_CLOSE_MS = 120000;
 const EVENT_QUEUE_CAP = 1024;
+const READ_TTL_MS = 500;
+
+function stableKey(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(stableKey).join(',') + ']';
+  return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + stableKey(v[k])).join(',') + '}';
+}
 const EVENT_TYPES = ['join', 'leave', 'chat'];
 const PLAYER_FIELDS_BASE = ['position', 'health', 'max_health', 'held_item', 'vehicle', 'ping', 'game'];
 const GAME_KEYS = ['server_id', 'identifiers', 'routing_bucket', 'ped_model', 'vehicle', 'weapon', 'framework', 'inventory'];
@@ -58,6 +65,12 @@ class BridgeCore {
     this.eventSubs = new Set();
     this.nameCache = new Map(); // source -> identity for leave events
     this.lastEventAt = 0;
+    this.samplerTimer = null;
+    this.samplerEvery = 0;
+    this.gen = 0;
+    this.readTtlMs = READ_TTL_MS;
+    this.readCache = new Map();
+    this.readStats = { hits: 0, misses: 0 };
   }
 
   // ---- capabilities -------------------------------------------------------
@@ -109,6 +122,7 @@ class BridgeCore {
     this.conns.delete(conn);
     for (const s of [conn.positions, conn.events]) if (s) this.dropSub(s);
     conn.positions = null; conn.events = null;
+    this.maybeStopSampler();
   }
   dropSub(sub) {
     this.positionSubs.delete(sub);
@@ -124,10 +138,10 @@ class BridgeCore {
     if (!conn.hello) throw E.invalid('hello required');
     if (!this.caps || !this.caps.supported || !this.caps.ops.includes(op)) throw E.unsupported('operation not supported: ' + op);
     switch (op) {
-      case 'server.info': return this.main(() => this.serverInfo(), 2000);
-      case 'players.list': return this.main(() => this.playersList(args), 2000);
-      case 'player.get': return this.main(() => this.playerGet(args), 3000);
-      case 'player.inventory': return this.main(() => this.playerInventory(args), 3000);
+      case 'server.info': return this.coalesce(op, args, null, () => this.main(() => this.serverInfo(), 2000));
+      case 'players.list': return this.coalesce(op, args, null, () => this.main(() => this.playersList(args), 2000));
+      case 'player.get': return this.coalesce(op, args, typeof args.id === 'string' ? args.id : null, () => this.main(() => this.playerGet(args), 3000));
+      case 'player.inventory': return this.coalesce(op, args, typeof args.id === 'string' ? args.id : null, () => this.main(() => this.playerInventory(args), 3000));
       case 'item.get': return this.main(() => this.itemGet(args), 3000);
       case 'positions.subscribe': return this.positionsSubscribe(conn, args);
       case 'positions.keyframe': return this.positionsKeyframe(conn, args);
@@ -142,6 +156,31 @@ class BridgeCore {
   }
 
   main(fn, ms) { return this.onMain(fn, ms); }
+
+  // ---- read coalescing -------------------------------------------------------
+  // Identical reads (same op + same canonical args, so include_sensitive / fields are part of the key) that are in
+  // flight or finished within READ_TTL_MS share one game-thread computation. Errors are never cached. Results are
+  // immutable once built (the encoder only reads them), so sharing is safe and responses are byte-identical.
+  coalesce(op, args, player, compute) {
+    if (this.readTtlMs <= 0) return compute();
+    const key = op + '|' + stableKey(args);
+    const now = this.monoMs();
+    const hit = this.readCache.get(key);
+    if (hit && now - hit.at < this.readTtlMs) { this.readStats.hits++; return hit.promise; }
+    this.readStats.misses++;
+    const entry = { at: now, player, promise: null };
+    entry.promise = compute();
+    this.readCache.set(key, entry);
+    entry.promise.catch(() => { if (this.readCache.get(key) === entry) this.readCache.delete(key); });
+    if (this.readCache.size > 256) this.sweepReads(now);
+    return entry.promise;
+  }
+  sweepReads(now) { for (const [k, e] of this.readCache) if (now - e.at >= this.readTtlMs) this.readCache.delete(k); }
+  // Drops cached reads for one player (license id) plus the roster-wide ones; with no id, everything.
+  invalidateReads(playerId) {
+    if (!playerId) { this.readCache.clear(); return; }
+    for (const [k, e] of this.readCache) if (e.player === null || e.player === playerId) this.readCache.delete(k);
+  }
 
   hello(conn, args) {
     V.reqString(args, 'panel_version', { max: 64, min: 1, allowEmpty: false });
@@ -174,7 +213,7 @@ class BridgeCore {
   serverInfo() {
     const g = this.game;
     const info = g.serverInfo();
-    const online = g.roster().length;
+    const online = g.onlineCount();
     return {
       name: info.name,
       max_players: info.max_players,
@@ -191,8 +230,7 @@ class BridgeCore {
     const sensitive = args.include_sensitive === true && this.caps.features.includes('sensitive');
     const rows = [];
     for (const p of this.game.roster()) {
-      const r = this.game.readPlayer(p.source, { withVehicle: false });
-      const row = { id: p.id, name: p.name, online: true, ping: r.ping ?? null, world: this.game.world, groups: [], game: { server_id: p.source } };
+      const row = { id: p.id, name: p.name, online: true, ping: this.game.pingOf(p.source), world: this.game.world, groups: [], game: { server_id: p.source } };
       if (sensitive) row.ip = this.game.endpointOf(p.source).replace(/:\d+$/, '');
       rows.push(row);
       if (rows.length >= 5000) break;
@@ -201,8 +239,7 @@ class BridgeCore {
   }
 
   resolveOnline(id) {
-    const p = this.game.roster().find((x) => x.id === id);
-    return p || null;
+    return this.game.findOnline(id);
   }
 
   parseFields(fields) {
@@ -321,7 +358,7 @@ class BridgeCore {
       if (!Array.isArray(args.worlds) || args.worlds.some((w) => typeof w !== 'string')) throw E.invalid('worlds must be a string array');
       worlds = new Set(args.worlds);
     }
-    const sub = { id: conn.nextSub(), kind: 'positions', conn, interval: Math.max(floor, Math.round(interval)), worlds, last: new Map(), seq: 0, needKey: true, lastKeyAt: 0, lastFrameAt: this.monoMs(), timer: 0 };
+    const sub = { id: conn.nextSub(), kind: 'positions', conn, interval: Math.max(floor, Math.round(interval)), worlds, last: new Map(), seq: 0, needKey: true, lastKeyAt: 0, lastFrameAt: this.monoMs(), lastSampleAt: 0 };
     conn.positions = sub;
     this.positionSubs.add(sub);
     this.ensureSampler();
@@ -362,56 +399,88 @@ class BridgeCore {
     return { sub: sub.id };
   }
 
-  // Sampler: one timer for all position subscribers; one main-thread read per tick.
+  // Sampler: one timer for all position subscribers, running at the fastest requested interval (never below the
+  // configured floor); one main-thread read per tick, shared by every subscriber. Each subscriber is served at its
+  // own interval. Nothing is scheduled while there is no positions subscription.
+  samplerPeriod() {
+    let p = Infinity;
+    for (const sub of this.positionSubs) if (sub.interval < p) p = sub.interval;
+    return p;
+  }
   ensureSampler() {
-    if (this.samplerTimer) return;
-    const period = this.config.positions_min_interval_ms;
-    this.samplerTimer = setInterval(() => { this.sampleTick().catch((e) => this.log('sampler: ' + (e && e.message))); }, period);
+    const period = this.samplerPeriod();
+    if (!Number.isFinite(period)) return;
+    if (this.samplerTimer && this.samplerEvery === period) return;
+    if (this.samplerTimer) clearInterval(this.samplerTimer);
+    this.samplerEvery = period;
+    this.samplerTimer = setInterval(() => { this.sampleTick(); }, period);
     if (this.samplerTimer && this.samplerTimer.unref) this.samplerTimer.unref();
   }
   maybeStopSampler() {
-    if (this.positionSubs.size === 0 && this.samplerTimer) { clearInterval(this.samplerTimer); this.samplerTimer = null; }
+    if (this.positionSubs.size === 0) {
+      if (this.samplerTimer) { clearInterval(this.samplerTimer); this.samplerTimer = null; this.samplerEvery = 0; }
+      return;
+    }
+    this.ensureSampler(); // a slower remaining subscriber lets the timer slow down
   }
 
-  async sampleTick() {
-    if (this.positionSubs.size === 0) return;
-    const raw = await this.main(() => this.game.positionSamples(), 2000).catch(() => null);
-    if (!raw) return;
+  // Runs on the game thread already (timer callback): no hop, no deadline timer. Returns false when nothing was sent.
+  sampleTick() {
+    if (this.positionSubs.size === 0) return false;
     const now = this.monoMs();
-    const entries = raw.map((p) => this.quantise(p));
-    for (const sub of [...this.positionSubs]) {
-      try { this.emitPositions(sub, entries, now); } catch (e) { this.log('positions frame: ' + (e && e.message)); }
+    let due = null;
+    for (const sub of this.positionSubs) {
+      if (sub.needKey || now - sub.lastSampleAt >= sub.interval * 0.9) (due || (due = [])).push(sub);
+    }
+    if (!due) return false;
+    let batch;
+    try { batch = this.game.positionSamples(); } catch (e) { this.log('sampler: ' + (e && e.message)); return false; }
+    if (!batch) return false;
+    this.gen = (this.gen + 1) >>> 0;
+    this.quantiseBatch(batch);
+    for (const sub of due) {
+      sub.lastSampleAt = now;
+      try { this.emitPositions(sub, batch, now); } catch (e) { this.log('positions frame: ' + (e && e.message)); }
+    }
+    return true;
+  }
+
+  // Quantise in place on the (reused) sample slots: 1/16 block positions, 1/100 degree yaw.
+  quantiseBatch(batch) {
+    const list = batch.list, n = batch.n;
+    for (let i = 0; i < n; i++) {
+      const p = list[i];
+      p.qx = p.hasCoords ? Math.round(p.x * 16) : 0;
+      p.qy = p.hasCoords ? Math.round(p.y * 16) : 0;
+      p.qz = p.hasCoords ? Math.round(p.z * 16) : 0;
+      const h = (((p.heading || 0) % 360) + 360) % 360;
+      p.qyaw = Math.round(h * 100);
+      p.alive = p.health > 0;
     }
   }
 
-  quantise(p) {
-    const c = p.coords;
-    const h = (((Number(p.heading) || 0) % 360) + 360) % 360;
-    return {
-      id: p.id, name: p.name, world: this.game.world,
-      x: c ? Math.round(c.x * 16) : 0, y: c ? Math.round(c.y * 16) : 0, z: c ? Math.round(c.z * 16) : 0,
-      yaw: Math.round(h * 100),
-      state: p.health > 0 ? 'alive' : 'dead',
-    };
-  }
-
-  emitPositions(sub, entries, now) {
-    const scoped = entries.filter((e) => !sub.worlds || sub.worlds.has(e.world));
+  emitPositions(sub, batch, now) {
+    const world = this.game.world;
+    const inScope = !sub.worlds || sub.worlds.has(world);
+    const list = batch.list, n = inScope ? batch.n : 0;
     const keyFrame = sub.needKey || now - sub.lastKeyAt >= KEYFRAME_EVERY_MS;
     const players = [];
-    const seen = new Set();
-    for (const e of scoped) {
-      seen.add(e.id);
-      const prev = sub.last.get(e.id);
-      const sig = `${e.world}|${e.x}|${e.y}|${e.z}|${e.yaw}|${e.state}|${e.name}`;
-      if (keyFrame || !prev || prev !== sig) { players.push(this.pub(e)); }
-      sub.last.set(e.id, sig);
+    const gen = this.gen;
+    const last = sub.last;
+    for (let i = 0; i < n; i++) {
+      const e = list[i];
+      let prev = last.get(e.id);
+      if (!prev) { prev = { x: 0, y: 0, z: 0, yaw: 0, alive: false, name: null, gen: 0, fresh: true }; last.set(e.id, prev); }
+      const changed = prev.fresh || prev.x !== e.qx || prev.y !== e.qy || prev.z !== e.qz || prev.yaw !== e.qyaw || prev.alive !== e.alive || prev.name !== e.name;
+      if (keyFrame || changed) {
+        players.push({ id: e.id, name: e.name, world, x: e.qx, y: e.qy, z: e.qz, yaw: e.qyaw, state: e.alive ? 'alive' : 'dead' });
+        prev.x = e.qx; prev.y = e.qy; prev.z = e.qz; prev.yaw = e.qyaw; prev.alive = e.alive; prev.name = e.name; prev.fresh = false;
+      }
+      prev.gen = gen;
     }
     const gone = [];
-    if (!keyFrame) {
-      for (const id of [...sub.last.keys()]) if (!seen.has(id)) { gone.push(id); sub.last.delete(id); }
-    } else {
-      sub.last = new Map(scoped.map((e) => [e.id, `${e.world}|${e.x}|${e.y}|${e.z}|${e.yaw}|${e.state}|${e.name}`]));
+    if (last.size > n) { // stale entries: players that left or left the scope
+      for (const [id, rec] of last) if (rec.gen !== gen) { if (!keyFrame) gone.push(id); last.delete(id); }
     }
     if (keyFrame) { sub.needKey = false; sub.lastKeyAt = now; }
     if (!keyFrame && players.length === 0 && gone.length === 0) {
@@ -421,10 +490,6 @@ class BridgeCore {
     const data = { key: keyFrame, players };
     if (!keyFrame) data.gone = gone;
     this.sendSub(sub, data, now);
-  }
-
-  pub(e) {
-    return { id: e.id, name: e.name, world: e.world, x: e.x, y: e.y, z: e.z, yaw: e.yaw, state: e.state };
   }
 
   sendSub(sub, data, now) {
@@ -530,6 +595,10 @@ class BridgeCore {
   }
 
   async actionRun(args) {
+    try { return await this.actionRunInner(args); } finally { this.invalidateReads(typeof args.target === 'string' ? args.target : null); }
+  }
+
+  async actionRunInner(args) {
     const actionId = V.reqString(args, 'action', { max: 64, allowEmpty: false });
     const spec = this.specFor(actionId);
     if (!spec) throw E.unsupported('action not supported: ' + actionId);

@@ -57,47 +57,117 @@ final class StatsCollector {
         }
     }
 
+    // ---- derived data, built once on first use (no startup cost): candidate materials per statistic kind, id strings, and
+    // ---- which (statistic, material/entity) pairs the server rejects. Rejection depends only on the pair, never on the player,
+    // ---- so a pair that threw IllegalArgumentException once is skipped for good (exceptions are what made the old loop slow).
+    private static final class Candidates {
+        final Material[] blocks, items, durable;
+        final String[] blockIds, itemIds, durableIds;
+        final EntityType[] entities;
+        final String[] entityIds;
+
+        Candidates() {
+            java.util.List<Material> b = new java.util.ArrayList<Material>(), i = new java.util.ArrayList<Material>(), d = new java.util.ArrayList<Material>();
+            for (Material mat : Material.values()) {
+                if (mat.isLegacy()) continue;
+                if (mat.isBlock()) b.add(mat);
+                if (mat.isItem()) {
+                    i.add(mat);
+                    if (mat.getMaxDurability() > 0) d.add(mat);
+                }
+            }
+            blocks = b.toArray(new Material[0]);
+            items = i.toArray(new Material[0]);
+            durable = d.toArray(new Material[0]);
+            blockIds = ids(blocks);
+            itemIds = ids(items);
+            durableIds = ids(durable);
+            java.util.List<EntityType> e = new java.util.ArrayList<EntityType>();
+            for (EntityType t : EntityType.values()) if (t != EntityType.UNKNOWN && t.getName() != null) e.add(t);
+            entities = e.toArray(new EntityType[0]);
+            entityIds = new String[entities.length];
+            for (int k = 0; k < entities.length; k++) entityIds[k] = Compat.entityTypeId(entities[k]);
+        }
+
+        private static String[] ids(Material[] ms) {
+            String[] r = new String[ms.length];
+            for (int k = 0; k < ms.length; k++) r[k] = ItemConverter.idOf(ms[k]);
+            return r;
+        }
+    }
+
+    private static volatile Candidates candidates;
+    /** Per statistic ordinal: 0 = unknown, 1 = valid, 2 = rejected; indexed like the candidate arrays. Racy writes are benign. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, byte[]> VALIDITY = new java.util.concurrent.ConcurrentHashMap<String, byte[]>();
+    /** Statistic classification, computed once per Statistic constant. */
+    private static final java.util.concurrent.ConcurrentHashMap<Statistic, Object[]> KINDS = new java.util.concurrent.ConcurrentHashMap<Statistic, Object[]>();
+
+    private static Candidates candidates() {
+        Candidates c = candidates;
+        if (c == null) candidates = c = new Candidates();
+        return c;
+    }
+
+    /** Test hook: forgets the learned validity (and candidates). */
+    static void resetForTests() { candidates = null; VALIDITY.clear(); KINDS.clear(); }
+
+    /** [category (nullable String), Statistic.Type, custom-id (String), isBroken (Boolean)] */
+    private static Object[] kind(Statistic s, String mcVersion) {
+        Object[] k = KINDS.get(s);
+        if (k == null) {
+            String cat = category(s);
+            String id = null;
+            if (cat == null) {
+                id = CUSTOM_IDS.get(s.name());
+                if (id == null) id = s.name().toLowerCase(Locale.ROOT);
+                if (s.name().equals("PLAY_ONE_MINUTE") && !dev.playermanager.bridge.util.Versions.atLeast(mcVersion, "1.17")) id = "play_one_minute";
+                id = "minecraft:" + id;
+            }
+            k = new Object[] {cat, s.getType(), id, Boolean.valueOf(s.name().equals("BREAK_ITEM"))};
+            KINDS.put(s, k);
+        }
+        return k;
+    }
+
     static Map<String, Object> collect(Player p, String mcVersion, Deadline deadline) {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         Map<String, Object> custom = new LinkedHashMap<String, Object>();
-        Material[] mats = Material.values();
-        EntityType[] types = EntityType.values();
+        Candidates cand = candidates();
         int n = 0;
         for (Statistic s : Statistic.values()) {
             if (deadline.expired()) break;
             try {
-                String cat = category(s);
+                Object[] kd = kind(s, mcVersion);
+                String cat = (String) kd[0];
+                Statistic.Type type = (Statistic.Type) kd[1];
                 if (cat == null) {
-                    if (s.getType() != Statistic.Type.UNTYPED) continue;
+                    if (type != Statistic.Type.UNTYPED) continue;
                     int v = p.getStatistic(s);
-                    if (v > 0) {
-                        String id = CUSTOM_IDS.get(s.name());
-                        if (id == null) id = s.name().toLowerCase(Locale.ROOT);
-                        if (s.name().equals("PLAY_ONE_MINUTE") && !dev.playermanager.bridge.util.Versions.atLeast(mcVersion, "1.17")) id = "play_one_minute";
-                        custom.put("minecraft:" + id, v);
-                    }
+                    if (v > 0) custom.put((String) kd[2], v);
                     continue;
                 }
                 Map<String, Object> m = new LinkedHashMap<String, Object>();
-                if (s.getType() == Statistic.Type.ENTITY) {
-                    for (EntityType t : types) {
-                        if (t == EntityType.UNKNOWN || t.getName() == null) continue;
+                if (type == Statistic.Type.ENTITY) {
+                    byte[] ok = validity(s, cand.entities.length);
+                    for (int k = 0; k < cand.entities.length; k++) {
+                        if (ok[k] == 2) continue;
                         if ((++n & 127) == 0 && deadline.expired()) break;
                         int v;
-                        try { v = p.getStatistic(s, t); } catch (IllegalArgumentException e) { continue; }
-                        if (v > 0) m.put(Compat.entityTypeId(t), v);
+                        try { v = p.getStatistic(s, cand.entities[k]); ok[k] = 1; } catch (IllegalArgumentException e) { ok[k] = 2; continue; }
+                        if (v > 0) m.put(cand.entityIds[k], v);
                     }
                 } else {
-                    boolean block = s.getType() == Statistic.Type.BLOCK;
-                    boolean broken = s.name().equals("BREAK_ITEM");
-                    for (Material mat : mats) {
-                        if (mat.isLegacy()) continue;
-                        if (block ? !mat.isBlock() : !mat.isItem()) continue;
-                        if (broken && mat.getMaxDurability() <= 0) continue;
+                    boolean block = type == Statistic.Type.BLOCK;
+                    boolean broken = ((Boolean) kd[3]).booleanValue();
+                    Material[] mats = block ? cand.blocks : broken ? cand.durable : cand.items;
+                    String[] ids = block ? cand.blockIds : broken ? cand.durableIds : cand.itemIds;
+                    byte[] ok = validity(s, mats.length);
+                    for (int k = 0; k < mats.length; k++) {
+                        if (ok[k] == 2) continue;
                         if ((++n & 255) == 0 && deadline.expired()) break;
                         int v;
-                        try { v = p.getStatistic(s, mat); } catch (IllegalArgumentException e) { continue; }
-                        if (v > 0) m.put(ItemConverter.idOf(mat), v);
+                        try { v = p.getStatistic(s, mats[k]); ok[k] = 1; } catch (IllegalArgumentException e) { ok[k] = 2; continue; }
+                        if (v > 0) m.put(ids[k], v);
                     }
                 }
                 if (!m.isEmpty()) {
@@ -111,6 +181,16 @@ final class StatsCollector {
         }
         if (!custom.isEmpty()) out.put("minecraft:custom", custom);
         return out;
+    }
+
+    private static byte[] validity(Statistic s, int size) {
+        byte[] b = VALIDITY.get(s.name());
+        if (b == null) {
+            b = new byte[size];
+            byte[] prev = VALIDITY.putIfAbsent(s.name(), b);
+            if (prev != null) b = prev;
+        }
+        return b;
     }
 
     /** {@code play_time} ticks from a statistics object, or -1. */

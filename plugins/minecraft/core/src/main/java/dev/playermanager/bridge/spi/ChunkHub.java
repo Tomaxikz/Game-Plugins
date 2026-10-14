@@ -10,4 +10,11 @@ public interface ChunkHub {
      * {@link #active()}. {@code loaded} = the chunk was just loaded/generated (always sent once per subscription).
      */
     void dirty(ChunkWorld world, int cx, int cz, boolean loaded);
+
+    /**
+     * Registers a listener told {@code true} when the first chunks subscription opens and {@code false} when the last one
+     * closes, so a platform can register its (high-volume) block listeners only while they are needed. May be called from any
+     * thread; the callback runs on a bridge thread. Default: ignored.
+     */
+    default void onActiveChange(java.util.function.Consumer<Boolean> listener) { }
 }

@@ -74,7 +74,17 @@ public final class ChunkService implements ChunkHub {
 
     // ------------------------------------------------------------------ ChunkHub
 
+    private volatile java.util.function.Consumer<Boolean> activeListener;
+
     @Override public boolean active() { return active; }
+
+    @Override public void onActiveChange(java.util.function.Consumer<Boolean> listener) { this.activeListener = listener; }
+
+    private void notifyActive(boolean on) {
+        java.util.function.Consumer<Boolean> l = activeListener;
+        if (l == null) return;
+        try { l.accept(Boolean.valueOf(on)); } catch (Throwable t) { log.debug("chunk activity listener failed: " + t); }
+    }
 
     @Override public void dirty(ChunkWorld world, int cx, int cz, boolean loaded) {
         if (!active || world == null) return;
@@ -90,27 +100,33 @@ public final class ChunkService implements ChunkHub {
 
     public ChunkSubscription subscribe(SubscriptionSink sink, ChunkWorld world, int[] area) {
         ChunkSubscription s = new ChunkSubscription(ids.incrementAndGet(), sink, world, area, this);
+        boolean started = false;
         synchronized (this) {
             subs.add(s);
             if (!active) {
                 active = true;
+                started = true;
                 if (timer != null) {
                     task = timer.scheduleWithFixedDelay(new Runnable() { public void run() { safeTick(); } }, FLUSH_MS, FLUSH_MS, TimeUnit.MILLISECONDS);
                 }
             }
         }
+        if (started) notifyActive(true);
         return s;
     }
 
     void remove(ChunkSubscription s) {
+        boolean stopped = false;
         synchronized (this) {
             subs.remove(s);
             if (subs.isEmpty() && active) {
                 active = false;
+                stopped = true;
                 if (task != null) { task.cancel(false); task = null; }
                 dirty.clear();
             }
         }
+        if (stopped) notifyActive(false);
     }
 
     public int subscriberCount() { return subs.size(); }
@@ -259,10 +275,13 @@ public final class ChunkService implements ChunkHub {
     private static long pos(int cx, int cz) { return ((long) cx << 32) | (cz & 0xffffffffL); }
 
     public void stop() {
+        boolean was;
         synchronized (this) {
+            was = active;
             active = false;
             if (task != null) { task.cancel(false); task = null; }
             dirty.clear();
         }
+        if (was) notifyActive(false);
     }
 }

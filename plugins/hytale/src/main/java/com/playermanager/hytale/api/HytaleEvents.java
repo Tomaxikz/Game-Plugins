@@ -45,6 +45,9 @@ final class HytaleEvents {
                 try {
                     PlayerRef pr = e.getPlayerRef();
                     p.trackJoin(pr.getUuid());
+                    if (!p.wants("join")) {
+                        return e;
+                    }
                     World w = e.getWorld();
                     p.emit(new GameEvent("join", now(), pr.getUuid().toString(), pr.getUsername(),
                             w == null ? null : w.getName(), null));
@@ -62,6 +65,9 @@ final class HytaleEvents {
                 try {
                     PlayerRef pr = e.getPlayerRef();
                     p.trackLeave(pr.getUuid());
+                    if (!p.wants("leave")) {
+                        return;
+                    }
                     Map<String, Object> extra = new LinkedHashMap<>();
                     var reason = e.getDisconnectReason();
                     if (reason != null && reason.getServerDisconnectReason() != null) {
@@ -81,7 +87,7 @@ final class HytaleEvents {
             // LAST priority: we see the final cancelled state; cancelled messages are not sent (operations.md §7.2)
             events.registerAsyncGlobal(EventPriority.LAST, PlayerChatEvent.class, f -> f.thenApply(e -> {
                 try {
-                    if (!e.isCancelled() && e.getSender() != null && e.getContent() != null) {
+                    if (p.wants("chat") && !e.isCancelled() && e.getSender() != null && e.getContent() != null) {
                         PlayerRef pr = e.getSender();
                         Map<String, Object> extra = new LinkedHashMap<>();
                         extra.put("message", e.getContent());
@@ -143,6 +149,9 @@ final class HytaleEvents {
         public void onComponentAdded(Ref<EntityStore> ref, DeathComponent dc, Store<EntityStore> store,
                                      CommandBuffer<EntityStore> cb) {
             try {
+                if (!provider.wants("death")) {
+                    return;
+                }
                 PlayerRef pr = store.getComponent(ref, PlayerRef.getComponentType());
                 if (pr == null) {
                     return;

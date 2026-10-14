@@ -15,7 +15,7 @@ using Core = Oxide.Plugins.PlayerManagerRust.BridgeCore;
 public sealed class FakeProvider : PlayerManagerRust.IGameProvider
 {
     public List<PlayerManagerRust.PosSample> Players = new List<PlayerManagerRust.PosSample>();
-    public int ServerInfoCalls;
+    public int ServerInfoCalls, PlayersListCalls, PlayerGetCalls, PlayerInvCalls;
     public volatile bool Block;
     public Map LastAction;
     public int MainThreadId;
@@ -33,15 +33,17 @@ public sealed class FakeProvider : PlayerManagerRust.IGameProvider
     }
     void Gate() { while (Block) Thread.Sleep(5); MainThreadId = Thread.CurrentThread.ManagedThreadId; }
     public Map ServerInfo() { Gate(); ServerInfoCalls++; return new Map().Put("name", "Fake").Put("max_players", 10L).Put("online", (long)Players.Count).Put("worlds", new List<object>()); }
-    public Map PlayersList(bool off, bool s) { Gate(); return new Map().Put("players", Players.Select(p => (object)new Map().Put("id", p.Id).Put("name", p.Name).Put("online", true).Put("groups", new List<string>()).Put("admin", false).PutIf(s, "ip", "1.2.3.4")).ToList()); }
+    public Map PlayersList(bool off, bool s) { Gate(); PlayersListCalls++; return new Map().Put("players", Players.Select(p => (object)new Map().Put("id", p.Id).Put("name", p.Name).Put("online", true).Put("groups", new List<string>()).Put("admin", false).PutIf(s, "ip", "1.2.3.4")).ToList()); }
     public Map PlayerGet(string id, HashSet<string> fields, bool s)
     {
-        Gate();
+        Gate(); PlayerGetCalls++;
         if (id == "76561198000000404") throw PlayerManagerRust.Err("not_found", "no such player");
         var item = new PlayerManagerRust.ItemMap(); item["id"] = "rifle.ak"; item["count"] = 1L; item["skin"] = 5UL;
-        return new Map().Put("id", id).Put("name", "Bob").Put("online", true).Put("held_item", item).Put("game", new Map());
+        var m = new Map().Put("id", id).Put("name", "Bob").Put("online", true).Put("held_item", item).Put("game", new Map());
+        if (s) m["ip"] = "9.9.9.9";
+        return m;
     }
-    public Map PlayerInventory(string id) { Gate(); return new Map().Put("containers", new List<object>()); }
+    public Map PlayerInventory(string id) { Gate(); PlayerInvCalls++; return new Map().Put("containers", new List<object>()); }
     public Map ItemGet(string id, string c, int slot, int[] path) { Gate(); throw PlayerManagerRust.Err("not_found", "Slot is empty"); }
     public Map RunAction(string action, string target, Map args, Map expect) { Gate(); LastAction = args; return new Map().Put("ok", true).Put("message", action + ":" + target); }
     public PlayerManagerRust.PosSample[] SamplePositions() { Gate(); return Players.ToArray(); }

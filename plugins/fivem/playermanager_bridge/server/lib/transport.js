@@ -2,14 +2,15 @@
 // Socket transport: Unix stream socket first, TCP+token fallback. Framing, per-connection limits, idle/ping timers.
 const crypto = require('crypto');
 const path = require('path');
-const { FrameDecoder, encodeFrame, MAX_FRAME } = require('./framing');
-const { encode, decode } = require('./msgpack');
+const { FrameDecoder, MAX_FRAME } = require('./framing');
+const { encodeFramed, decode } = require('./msgpack');
 const { E } = require('./errors');
 const { MAX_INFLIGHT, IDLE_CLOSE_MS, PING_AFTER_MS } = require('./bridge');
 const { writeAtomic } = require('./discovery');
 
 class Transport {
-  constructor({ core, net, fs, config, paths, bridgeInfo, relDir, relSocket, forceTcp = false, log = () => {}, now = () => Date.now() }) {
+  constructor({ core, net, fs, config, paths, bridgeInfo, relDir, relSocket, forceTcp = false, log = () => {}, now = () => Date.now(), offload = null }) {
+    this.offload = offload;
     this.relDir = relDir;
     this.relSocket = relSocket;
     this.forceTcp = forceTcp;
@@ -38,8 +39,6 @@ class Transport {
       const tcpOk = await this.tryTcp();
       if (!tcpOk) return null;
     }
-    this.timer = setInterval(() => this.housekeeping(), 5000);
-    if (this.timer.unref) this.timer.unref();
     return { transport: this.transport };
   }
 
@@ -124,6 +123,7 @@ class Transport {
     const conn = this.makeConn(sock);
     this.conns.add(conn);
     this.core.attach(conn);
+    this.ensureHousekeeping();
     sock.on('data', (chunk) => this.onData(conn, chunk));
     sock.on('error', () => this.drop(conn));
     sock.on('close', () => this.drop(conn));
@@ -154,6 +154,14 @@ class Transport {
     this.conns.delete(conn);
     this.core.detach(conn);
     try { conn.sock.destroy(); } catch (e) { /* ignore */ }
+    if (this.conns.size === 0 && this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+
+  // The idle/ping sweep only exists while at least one client is connected: zero timers when nothing is connected.
+  ensureHousekeeping() {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.housekeeping(), 5000);
+    if (this.timer.unref) this.timer.unref();
   }
 
   close(conn) { this.drop(conn); }
@@ -161,12 +169,29 @@ class Transport {
   send(conn, obj) {
     if (conn.closed) return;
     let frame;
-    try { frame = encodeFrame(encode(obj), MAX_FRAME); } catch (e) { this.log('encode failed: ' + e.message); return; }
+    try { frame = encodeFramed(obj, MAX_FRAME); } catch (e) { this.log('encode failed: ' + e.message); return; }
     conn.lastActivity = this.now();
     try { conn.sock.write(frame); } catch (e) { this.drop(conn); }
   }
 
-  reply(conn, id, ok, payload) {
+  // Replies for these ops hold no Float wrappers (which would not survive a structured clone) and can be large.
+  offloadable(op, payload) {
+    if (!this.offload || !this.offload.available) return false;
+    if (op === 'players.list') return this.offload.worthIt(payload && payload.players ? payload.players.length : 0);
+    return false;
+  }
+
+  reply(conn, id, ok, payload, op) {
+    if (ok && op && this.offloadable(op, payload)) {
+      const obj = { id, ok: true, data: payload };
+      this.offload.encodeFramed(obj, MAX_FRAME).then((frame) => {
+        if (conn.closed) return;
+        if (!frame) { this.send(conn, obj); return; }
+        conn.lastActivity = this.now();
+        try { conn.sock.write(frame); } catch (e) { this.drop(conn); }
+      });
+      return;
+    }
     if (ok) this.send(conn, { id, ok: true, data: payload });
     else this.send(conn, { id, ok: false, error: { code: payload.code, message: payload.message } });
   }
@@ -200,7 +225,7 @@ class Transport {
     conn.inflight++;
     Promise.resolve()
       .then(() => this.core.handle(conn, req))
-      .then((data) => { conn.inflight--; if (!conn.closed) this.reply(conn, req.id, true, data ?? {}); })
+      .then((data) => { conn.inflight--; if (!conn.closed) this.reply(conn, req.id, true, data ?? {}, req.op); })
       .catch((err) => {
         conn.inflight--;
         const code = err && err.code && /^[a-z_]+$/.test(err.code) ? err.code : 'internal';
@@ -226,6 +251,7 @@ class Transport {
   }
 
   stop() {
+    if (this.offload) this.offload.stop();
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     for (const conn of [...this.conns]) this.drop(conn);
     try { if (this.server) this.server.close(); } catch (e) { /* ignore */ }

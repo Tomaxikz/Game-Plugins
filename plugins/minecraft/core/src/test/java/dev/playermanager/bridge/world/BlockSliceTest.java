@@ -29,6 +29,17 @@ class BlockSliceTest {
         assertArrayEquals(new byte[] {(byte) 0x80}, BlockSlice.pack(new int[] {1, 0, 0}, 1));
     }
 
+    @Test void fastPackMatchesTheBitAtATimeReference() {
+        java.util.Random r = new java.util.Random(7);
+        for (int bits = 1; bits <= 20; bits++) {
+            for (int n : new int[] {0, 1, 2, 7, 8, 9, 100, 4097}) {
+                int[] v = new int[n];
+                for (int i = 0; i < n; i++) v[i] = r.nextInt();          // high bits must be ignored by both
+                assertArrayEquals(BlockSlice.packSlow(v, bits), BlockSlice.pack(v, bits), "bits=" + bits + " n=" + n);
+            }
+        }
+    }
+
     @Test void packUnpackRandom() {
         Random r = new Random(1);
         for (int bits = 1; bits <= 13; bits++) {

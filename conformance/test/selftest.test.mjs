@@ -441,6 +441,47 @@ describe('chunk surfaces against the mock', () => {
   });
 });
 
+describe('move_item / move_item_live tests against the mock (D24)', () => {
+  const MOVE_IDS = [
+    'move.advertised', 'move.empty-destination', 'move.empty-destination.item', 'move.swap', 'move.swap.item', 'move.stack-full', 'move.stack-full.item',
+    'move.stack-remainder', 'move.stack-remainder.item', 'move.full-destination-swaps', 'move.full-destination-swaps.item', 'move.stale-destination',
+    'move.stale-destination.item', 'move.no-destination-expectation', 'move.no-destination-expectation.item', 'move.same-slot', 'move.same-slot.item',
+    'move.armor-mismatch', 'move.armor-fit', 'move.item.destination-checks',
+  ];
+  for (const [name, extra] of [['unix', []], ['tcp', ['--tcp']]]) {
+    test(`${name}: every move test passes with --allow-actions and leaves the inventory as it was`, async () => {
+      const root = tempRoot();
+      const mock = await startMock(root, extra);
+      try {
+        const r = await cliReport(root, ['--root', root, '--allow-actions', '--only', MOVE_IDS.join(',')], 'move');
+        for (const id of MOVE_IDS) assert.equal(r.byId.get(id)?.status, 'pass', `${id}: ${r.byId.get(id)?.reason}`);
+        assert.equal(r.code, 0, r.out);
+        // a second run sees the same free slots again (nothing was left behind)
+        const r2 = await cliReport(root, ['--root', root, '--allow-actions', '--only', 'move.swap,player.inventory.digests'], 'move2');
+        assert.equal(r2.byId.get('move.swap').status, 'pass');
+        assert.equal(r2.byId.get('player.inventory.digests').status, 'pass');
+      } finally {
+        await mock.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('without --allow-actions only move.advertised runs', async () => {
+    const root = tempRoot();
+    const mock = await startMock(root);
+    try {
+      const r = await cliReport(root, ['--root', root, '--only', 'move.advertised,move.swap,move.item.destination-checks'], 'move-noact');
+      assert.equal(r.byId.get('move.advertised').status, 'pass');
+      assert.equal(r.byId.get('move.swap').status, 'skip');
+      assert.equal(r.byId.get('move.item.destination-checks').status, 'skip');
+    } finally {
+      await mock.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // Each break must make the named test(s) fail. Transport decides which breaks apply.
 const BREAK_CASES = [
   { brk: 'no-hello-check', mode: 'unix', fail: ['hello.required-first'] },
@@ -479,6 +520,10 @@ const BREAK_CASES = [
   { brk: 'chunk-initial-dump', mode: 'unix', fail: ['chunks.subscribe.ack'] },
   { brk: 'chunk-no-coalesce', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
   { brk: 'chunk-oversize-frame', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
+  { brk: 'move-no-swap', mode: 'unix', actions: true, fail: ['move.swap', 'move.swap.item', 'move.stack-full', 'move.stack-full.item', 'move.stack-remainder', 'move.full-destination-swaps', 'move.item.destination-checks'] },
+  { brk: 'move-overstack', mode: 'unix', actions: true, fail: ['move.stack-remainder', 'move.stack-remainder.item', 'move.full-destination-swaps', 'move.full-destination-swaps.item'] },
+  { brk: 'move-armor-unchecked', mode: 'unix', actions: true, fail: ['move.armor-mismatch'] },
+  { brk: 'move-stale-ok', mode: 'unix', actions: true, fail: ['move.empty-destination', 'move.stale-destination', 'move.stale-destination.item', 'move.no-destination-expectation', 'move.no-destination-expectation.item', 'move.item.destination-checks'] },
   { brk: 'max-connections-4', mode: 'unix', fail: ['conn.eight-concurrent'] },
 ];
 if (SLOW_OK) BREAK_CASES.push({ brk: 'no-ping', mode: 'unix', slow: true, fail: ['ping.keepalive-60s'] });

@@ -24,15 +24,33 @@ public final class EventBus {
     public EventSubscription subscribe(SubscriptionSink sink, Set<String> types) {
         EventSubscription s = new EventSubscription(ids.incrementAndGet(), sink, types, this);
         subs.add(s);
+        rebuildWanted();
+        changed();
         return s;
     }
 
-    void remove(EventSubscription s) { subs.remove(s); }
+    private volatile Runnable changeListener;
 
-    public boolean hasSubscribers(String type) {
-        for (EventSubscription s : subs) if (s.types.contains(type)) return true;
-        return false;
+    /** Told (on a bridge thread) whenever a subscription is added or removed, so a platform can (un)register listeners per type. */
+    public void onChange(Runnable r) { this.changeListener = r; }
+
+    private void changed() {
+        Runnable r = changeListener;
+        if (r != null) { try { r.run(); } catch (Throwable ignored) { } }
     }
+
+    /** Union of the subscribed types; replaced on every change so {@link #hasSubscribers} is one hash lookup (hot listeners call it per event). */
+    private volatile Set<String> wantedTypes = Collections.emptySet();
+
+    private void rebuildWanted() {
+        Set<String> u = new java.util.HashSet<String>();
+        for (EventSubscription s : subs) u.addAll(s.types);
+        wantedTypes = Collections.unmodifiableSet(u);
+    }
+
+    void remove(EventSubscription s) { subs.remove(s); rebuildWanted(); changed(); }
+
+    public boolean hasSubscribers(String type) { return wantedTypes.contains(type); }
 
     public int subscriberCount() { return subs.size(); }
 
@@ -41,10 +59,7 @@ public final class EventBus {
      * @param data event-specific keys; {@code player} = {id,name} map. {@code time} is added when absent.
      */
     public void emit(String type, Map<String, Object> data) {
-        if (subs.isEmpty()) return;
-        boolean any = false;
-        for (EventSubscription s : subs) if (s.types.contains(type)) { any = true; break; }
-        if (!any) return;
+        if (!wantedTypes.contains(type)) return;
         Map<String, Object> d = new LinkedHashMap<String, Object>();
         d.put("type", type);
         if (!data.containsKey("time")) d.put("time", System.currentTimeMillis() / 1000L);

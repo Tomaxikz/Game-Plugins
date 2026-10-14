@@ -284,11 +284,11 @@ Common: `target` is the player UUID (or name for the commands that require a nam
 | `clear_inventory` | — | ✓ | ✓ | – | – | |
 | `remove_item` | `container`, `slot`, `expected_id`, `expected_count`, `expected_fingerprint` | ✓ | ✓ | – | – | Online: live. Offline: Bukkit family/mods may edit player data natively; otherwise panel's saved-data path |
 | `set_item_count` | same + `amount` 1–64 | ✓ | ✓ | – | – | |
-| `move_item` | same + `destination_slot` (must be empty) | ✓ | ✓ | – | – | |
+| `move_item` | same + `destination_slot`, `destination_expected_id` (`minecraft:air` = empty), `destination_expected_count`, `destination_expected_fingerprint` (`none` when empty) | ✓ | ✓ | – | – | Empty destination: move. Occupied: verify the destination like the source (`conflict` on mismatch), then **stack** when both are the same item (equal id + components; `ItemStack#isSimilar`) up to the item's max stack size, leaving any remainder in the source slot; otherwise **swap** the two stacks |
 | `remove_item_live` | `container`,`slot`,`expected_id` | ✓ | ✓ | – | – | Atomic on the game thread |
 | `replace_item_live` | `container`,`slot`,`expected_id`,`item`,`amount` 1–64 | ✓ | ✓ | – | – | |
 | `set_item_live` | `container`,`slot`,`expected_id`,`item` = encoded item | ✓ | ✓ | – | – | Preserves components/NBT from the record |
-| `move_item_live` | `container`,`slot`,`destination_container`,`destination_slot`,`expected_id` | ✓ | ✓ | – | – | |
+| `move_item_live` | `container`,`slot`,`destination_container`,`destination_slot`,`expected_id`, `destination_expected_id` (`minecraft:air` = empty) | ✓ | ✓ | – | – | Atomic on the game thread. Empty destination: move. Occupied: `conflict` unless the destination holds `destination_expected_id`; then **stack** if `isSimilar` (respect `getMaxStackSize()`, remainder stays in the source slot) else **swap**. Works across containers (inventory ↔ ender chest ↔ equipment) when the swapped item fits the destination slot (armor slots accept only matching armor; otherwise `conflict`). The panel sends occupied-destination moves only to the bridge |
 | `set_scale` | `scale` 0.0625–16, `attribute`: `minecraft:scale`\|`minecraft:generic.scale` | p | p | – | – | 1.20.5+ only; bridge picks the right attribute and ignores `attribute` |
 | `reset_scale` | `attribute` | p | p | – | – | 1.20.5+ |
 | `heal` | — | ✓ | ✓ | – | – | |

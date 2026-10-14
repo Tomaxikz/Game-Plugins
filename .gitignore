@@ -55,3 +55,6 @@ Thumbs.db
 
 # Lead/worker scratch (not part of the repository)
 .workers/
+
+# Local test servers (deleted after each run)
+.work/

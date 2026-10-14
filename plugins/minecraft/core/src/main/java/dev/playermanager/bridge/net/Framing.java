@@ -13,11 +13,15 @@ public final class Framing {
 
     /** @return body, or null on clean EOF before the first header byte. @throws IOException on truncation or oversize (&gt; 4 MiB). */
     public static byte[] read(InputStream in) throws IOException {
-        int b0 = in.read();
-        if (b0 < 0) return null;
-        int b1 = in.read(), b2 = in.read(), b3 = in.read();
-        if ((b1 | b2 | b3) < 0) throw new EOFException("truncated frame header");
-        long len = ((long) b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        byte[] h = new byte[4];                      // one read for the whole header (single-byte reads were one syscall each)
+        int got = in.read(h, 0, 4);
+        if (got < 0) return null;
+        while (got < 4) {
+            int n = in.read(h, got, 4 - got);
+            if (n < 0) throw new EOFException("truncated frame header");
+            got += n;
+        }
+        long len = ((long) (h[0] & 0xff) << 24) | ((h[1] & 0xff) << 16) | ((h[2] & 0xff) << 8) | (h[3] & 0xff);
         if (len > MAX_FRAME) throw new IOException("frame too large: " + len);
         byte[] body = new byte[(int) len];
         int off = 0;
@@ -37,6 +41,13 @@ public final class Framing {
         f[3] = (byte) body.length;
         System.arraycopy(body, 0, f, 4, body.length);
         return f;
+    }
+
+    /** Writes a frame that already carries its 4-byte header ({@code MsgPack.encodeFramed}). */
+    public static void writeFramed(OutputStream out, byte[] framed) throws IOException {
+        if (framed.length - 4 > MAX_FRAME) throw new IOException("frame too large: " + (framed.length - 4));
+        out.write(framed);
+        out.flush();
     }
 
     public static void write(OutputStream out, byte[] body) throws IOException {

@@ -99,6 +99,10 @@ public final class ProxyPlatform implements Platform {
     public void emit(String type, Map<String, Object> data) {
         BridgeCore c = core;
         try {
+            if (c != null && (type.equals("join") || type.equals("leave") || type.equals("kick")) && data.get("player") instanceof Map) {
+                Object id = ((Map<?, ?>) data.get("player")).get("id");
+                if (id != null) c.playerChanged(String.valueOf(id));     // cached roster reads are dropped, subscription or not
+            }
             if (c == null || c.events() == null || !c.events().hasSubscribers(type)) return;
             c.events().emit(type, data);
         } catch (Throwable t) {

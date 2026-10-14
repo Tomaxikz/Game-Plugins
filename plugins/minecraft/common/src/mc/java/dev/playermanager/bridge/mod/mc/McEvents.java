@@ -41,6 +41,12 @@ public final class McEvents {
         }
     }
 
+    /** Always called (subscription or not): cached reads of this player and the roster-wide ones are dropped. */
+    private void changed(ServerPlayer p) {
+        BridgeCore c = core;
+        if (c != null) c.playerChanged(p.getUUID().toString());
+    }
+
     private boolean wanted(String type) {
         BridgeCore c = core;
         return c != null && c.running() && c.events().hasSubscribers(type);
@@ -70,6 +76,7 @@ public final class McEvents {
     public void join(ServerPlayer p) {
         try {
             ctx.joinedAt.put(p.getUUID(), Long.valueOf(System.currentTimeMillis()));
+            changed(p);
             if (!wanted("join")) return;
             Map<String, Object> m = new LinkedHashMap<String, Object>();
             m.put("player", player(p));
@@ -90,6 +97,8 @@ public final class McEvents {
         try {
             ctx.joinedAt.remove(p.getUUID());
             ctx.brands.remove(p.getUUID());
+            ctx.forget(p.getUUID());
+            changed(p);
             String reason = disconnectReasons.remove(p.getUUID());
             if (!wanted("leave")) return;
             Map<String, Object> m = new LinkedHashMap<String, Object>();
@@ -106,6 +115,7 @@ public final class McEvents {
         try {
             String cause = src == null ? null : Mc.damageCause(src);
             ctx.lastDeaths.put(p.getUUID(), new Object[] {Long.valueOf(System.currentTimeMillis() / 1000L), cause == null ? null : "minecraft:" + cause});
+            changed(p);
             if (!wanted("death")) return;
             Map<String, Object> m = new LinkedHashMap<String, Object>();
             m.put("player", player(p));
@@ -188,6 +198,7 @@ public final class McEvents {
     public void kick(ServerPlayer p, String reason) {
         try {
             long now = System.nanoTime();
+            changed(p);
             Long prev = recentKicks.put(p.getUUID(), Long.valueOf(now));
             if (prev != null && now - prev.longValue() < 1_000_000_000L) return;
             if (!wanted("kick")) return;

@@ -58,6 +58,10 @@ const BREAKS = {
   'chunk-no-coalesce': 'chunks.subscribe sends every chunk a second time 500 ms after the first frame',
   'chunk-oversize-frame': 'chunks.subscribe frames carry all ready chunks (more than 64), no load mode',
   'chunk-missing-wrong': 'map.chunks answers unloaded (far) chunks as if they were loaded',
+  'move-no-swap': 'move_item(_live) onto an occupied slot is always a conflict (no stack, no swap)',
+  'move-overstack': 'move_item(_live) stacks past the max stack size (64)',
+  'move-armor-unchecked': 'move_item(_live) puts any item into armor slots',
+  'move-stale-ok': 'move_item(_live) ignores destination_expected_id and the destination_expected_* checks',
   'chunk-waterlogged-as-water': 'waterlogged blocks are reported as water (water_depth 1 under a non-water top)',
 };
 
@@ -189,6 +193,8 @@ const PLAYERS = [
   },
 ];
 
+
+const tf = (key, kind = 'text', min = null, max = null) => ({ key, label: key, kind, choices: [], min, max });
 const ACTIONS = [
   { id: 'kick', label: 'kick', target: true, destructive: true, offline: false, fields: [{ key: 'reason', label: 'Reason', kind: 'text', choices: [], min: null, max: null }] },
   { id: 'set_health', label: 'set health', target: true, destructive: false, offline: false, fields: [{ key: 'amount', label: 'Amount', kind: 'number', choices: [], min: 0, max: 20 }] },
@@ -200,10 +206,13 @@ const ACTIONS = [
     offline: false,
     fields: [
       { key: 'container', label: 'Container', kind: 'text', choices: [], min: null, max: null },
-      { key: 'slot', label: 'Slot', kind: 'integer', choices: [], min: 0, max: 35 },
+      { key: 'slot', label: 'Slot', kind: 'text', choices: [], min: null, max: null },
       { key: 'expected_id', label: 'Expected id', kind: 'identifier', choices: [], min: null, max: null },
     ],
   },
+  { id: 'set_item_live', label: 'set item', target: true, destructive: true, offline: false, fields: [tf('container'), tf('slot'), tf('expected_id', 'identifier'), tf('item', 'item')] },
+  { id: 'move_item_live', label: 'move item', target: true, destructive: true, offline: false, fields: [tf('container'), tf('slot'), tf('destination_container'), tf('destination_slot'), tf('expected_id', 'identifier'), tf('destination_expected_id', 'identifier')] },
+  { id: 'move_item', label: 'move item', target: true, destructive: true, offline: false, fields: [tf('container'), tf('slot'), tf('expected_id', 'identifier'), tf('expected_count', 'integer', 0, 64), tf('expected_fingerprint'), tf('destination_slot'), tf('destination_expected_id', 'identifier'), tf('destination_expected_count', 'integer', 0, 64), tf('destination_expected_fingerprint')] },
   {
     id: 'teleport',
     label: 'teleport',
@@ -331,6 +340,25 @@ function mockBlocks() {
     block_entities: [],
     truncated: false,
   };
+}
+
+const AIR = 'minecraft:air';
+const EQUIP_SLOTS = ['head', 'chest', 'legs', 'feet', 'offhand'];
+function ARMOR_SLOT_OF(id) {
+  if (/_helmet$/.test(id)) return 'head';
+  if (/_chestplate$/.test(id)) return 'chest';
+  if (/_leggings$/.test(id)) return 'legs';
+  if (/_boots$/.test(id)) return 'feet';
+  return null;
+}
+function maxStack(id) {
+  if (/_(sword|helmet|chestplate|leggings|boots|pickaxe|axe|shovel|hoe)$/.test(id) || id === 'minecraft:shulker_box') return 1;
+  if (id === 'minecraft:ender_pearl') return 16;
+  return 64;
+}
+function sameItem(a, b) {
+  const strip = ({ count, hash, fingerprint, slot, ...rest }) => Buffer.from(canonicalBytes(rest)).toString('hex');
+  return strip(a) === strip(b);
 }
 
 function containersOf(p) {
@@ -808,6 +836,9 @@ class Conn {
       const mismatch = !it || (args.expect.id !== undefined && it.id !== args.expect.id) || (args.expect.count !== undefined && it.count !== args.expect.count) || (args.expect.fingerprint !== undefined && it.fingerprint !== args.expect.fingerprint);
       if (mismatch) return { body: errorBody('conflict', 'expected item changed') };
     }
+    if (['set_item_live', 'remove_item_live', 'move_item_live', 'move_item'].includes(a.id) && !args.expect) {
+      return this.inventoryAction(a.id, PLAYERS.find((x) => x.id === args.target), subArgs);
+    }
     if (a.id === 'teleport' && !args.expect) {
       const x = subArgs.x;
       const z = subArgs.z;
@@ -819,6 +850,85 @@ class Conn {
     }
     // The mock never modifies any other game state.
     return { body: { ok: true, data: { ok: false, message: 'mock: action recognised, not executed' } } };
+  }
+
+  /** set_item_live / remove_item_live / move_item(_live) on the fake inventory (NOTES D24). */
+  inventoryAction(id, p, a) {
+    const bad = (m) => ({ body: errorBody('invalid_args', m) });
+    const conflict = (m) => ({ body: errorBody('conflict', m) });
+    const done = (message, result) => ({ body: { ok: true, data: { ok: true, message, ...(result ? { result } : {}) } } });
+    if (!p.online) return { body: errorBody('offline', 'player is offline') };
+    const where = (cName, sName) => {
+      if (typeof cName !== 'string' || !p.inv[cName]) return null;
+      const c = p.inv[cName];
+      const key = slotKey(sName, cName);
+      if (key === null) return null;
+      const okKey = cName === 'equipment' ? EQUIP_SLOTS.includes(key) : Number(key) < c.size;
+      return okKey ? { c, key, cName } : null;
+    };
+    const idOf = (it) => (it ? it.id : AIR);
+    const src = where(a.container, a.slot);
+    if (!src) return bad('container/slot is not valid');
+    const cur = src.c.slots[src.key];
+
+    if (id === 'set_item_live') {
+      if (a.expected_id !== undefined && idOf(cur) !== a.expected_id) return conflict('slot changed');
+      const it = a.item;
+      if (!it || typeof it !== 'object' || typeof it.id !== 'string' || !/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(it.id)) return bad('item.id required');
+      const n = it.count === undefined ? 1 : it.count;
+      if (!Number.isInteger(n) || n < 1 || n > 64) return bad('item.count must be 1..64');
+      src.c.slots[src.key] = finishItem({ id: it.id, count: n });
+      return done('item set');
+    }
+    if (id === 'remove_item_live') {
+      if (a.expected_id !== undefined && idOf(cur) !== a.expected_id) return conflict('slot changed');
+      if (!cur) return conflict('slot is empty');
+      delete src.c.slots[src.key];
+      return done('item removed');
+    }
+    // move_item_live (cross-container) / move_item (same container)
+    const dst = where(id === 'move_item' ? a.container : a.destination_container ?? a.container, a.destination_slot);
+    if (!dst) return bad('destination is not valid');
+    if (dst.cName === src.cName && dst.key === src.key) return bad('source and destination are the same slot');
+    const dcur = dst.c.slots[dst.key];
+    if (!cur || (a.expected_id !== undefined && cur.id !== a.expected_id)) return conflict('source changed');
+    if (id === 'move_item') {
+      if (a.expected_count !== undefined && cur.count !== a.expected_count) return conflict('source count changed');
+      if (a.expected_fingerprint !== undefined && cur.fingerprint !== a.expected_fingerprint) return conflict('source fingerprint changed');
+    }
+    if (!BRK.has('move-stale-ok')) {
+      if (a.destination_expected_id !== undefined && idOf(dcur) !== a.destination_expected_id) return conflict('destination changed');
+      if (id === 'move_item') {
+        if (a.destination_expected_count !== undefined && (dcur ? dcur.count : 0) !== a.destination_expected_count) return conflict('destination count changed');
+        if (a.destination_expected_fingerprint !== undefined && (dcur ? dcur.fingerprint : 'none') !== a.destination_expected_fingerprint) return conflict('destination fingerprint changed');
+      }
+    }
+    const armorOk = (cName, key, it) => {
+      if (BRK.has('move-armor-unchecked') || !it) return true;
+      if (cName !== 'equipment' || !['head', 'chest', 'legs', 'feet'].includes(key)) return true;
+      return ARMOR_SLOT_OF(it.id) === key;
+    };
+    if (!dcur) {
+      if (!armorOk(dst.cName, dst.key, cur)) return conflict('item does not fit the destination slot');
+      dst.c.slots[dst.key] = cur;
+      delete src.c.slots[src.key];
+      return done('moved', { op: 'move', moved: cur.count });
+    }
+    if (BRK.has('move-no-swap')) return conflict('destination is occupied');
+    if (a.destination_expected_id === undefined && !BRK.has('move-stale-ok')) return conflict('destination is occupied and no destination_expected_id was given');
+    const same = sameItem(cur, dcur);
+    const max = BRK.has('move-overstack') ? 1000 : maxStack(cur.id);
+    if (same && dcur.count < max) {
+      const moved = Math.min(max - dcur.count, cur.count);
+      dst.c.slots[dst.key] = finishItem({ ...dcur, count: dcur.count + moved });
+      if (moved === cur.count) delete src.c.slots[src.key];
+      else src.c.slots[src.key] = finishItem({ ...cur, count: cur.count - moved });
+      return done('stacked', { op: 'stack', moved });
+    }
+    if (!armorOk(dst.cName, dst.key, cur) || !armorOk(src.cName, src.key, dcur)) return conflict('item does not fit the destination slot');
+    dst.c.slots[dst.key] = cur;
+    src.c.slots[src.key] = dcur;
+    return done('swapped', { op: 'swap', moved: cur.count });
   }
 
   assetsManifest(args) {

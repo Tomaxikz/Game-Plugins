@@ -8,99 +8,144 @@ class Float {
 
 function f(v) { return new Float(v); }
 
-function utf8Len(s) { return Buffer.byteLength(s, 'utf8'); }
+// ---- encoder: one reusable growable buffer, no per-byte array pushes ---------------------------------------
+// The scratch buffer is module-level and the encoder is not re-entrant (no callbacks run while encoding).
+let buf = Buffer.allocUnsafe(64 * 1024);
+let pos = 0;
+const MAX_KEEP = 1024 * 1024; // do not hold on to a buffer larger than this between calls
 
-function encodeInt(n, out) {
+function ensure(n) {
+  if (pos + n <= buf.length) return;
+  let size = buf.length * 2;
+  while (size < pos + n) size *= 2;
+  const nb = Buffer.allocUnsafe(size);
+  buf.copy(nb, 0, 0, pos);
+  buf = nb;
+}
+
+function wInt(n) {
+  ensure(9);
   if (n >= 0) {
-    if (n < 0x80) out.push(n);
-    else if (n <= 0xff) out.push(0xcc, n);
-    else if (n <= 0xffff) { out.push(0xcd, (n >>> 8) & 0xff, n & 0xff); }
-    else if (n <= 0xffffffff) { const b = Buffer.alloc(5); b[0] = 0xce; b.writeUInt32BE(n, 1); out.push(...b); }
-    else { const b = Buffer.alloc(9); b[0] = 0xcf; b.writeBigUInt64BE(BigInt(n), 1); out.push(...b); }
-  } else {
-    if (n >= -32) out.push(n & 0xff);
-    else if (n >= -0x80) out.push(0xd0, n & 0xff);
-    else if (n >= -0x8000) { const b = Buffer.alloc(3); b[0] = 0xd1; b.writeInt16BE(n, 1); out.push(...b); }
-    else if (n >= -0x80000000) { const b = Buffer.alloc(5); b[0] = 0xd2; b.writeInt32BE(n, 1); out.push(...b); }
-    else { const b = Buffer.alloc(9); b[0] = 0xd3; b.writeBigInt64BE(BigInt(n), 1); out.push(...b); }
+    if (n < 0x80) buf[pos++] = n;
+    else if (n <= 0xff) { buf[pos++] = 0xcc; buf[pos++] = n; }
+    else if (n <= 0xffff) { buf[pos++] = 0xcd; buf[pos++] = n >>> 8; buf[pos++] = n & 0xff; }
+    else if (n <= 0xffffffff) { buf[pos++] = 0xce; buf.writeUInt32BE(n, pos); pos += 4; }
+    else { buf[pos++] = 0xcf; buf.writeBigUInt64BE(BigInt(n), pos); pos += 8; }
+  } else if (n >= -32) buf[pos++] = n & 0xff;
+  else if (n >= -0x80) { buf[pos++] = 0xd0; buf[pos++] = n & 0xff; }
+  else if (n >= -0x8000) { buf[pos++] = 0xd1; buf.writeInt16BE(n, pos); pos += 2; }
+  else if (n >= -0x80000000) { buf[pos++] = 0xd2; buf.writeInt32BE(n, pos); pos += 4; }
+  else { buf[pos++] = 0xd3; buf.writeBigInt64BE(BigInt(n), pos); pos += 8; }
+}
+
+function wFloat64(n) {
+  ensure(9);
+  buf[pos++] = 0xcb;
+  buf.writeDoubleBE(n, pos);
+  pos += 8;
+}
+
+function wStr(s) {
+  const len = Buffer.byteLength(s, 'utf8');
+  ensure(len + 5);
+  if (len < 32) buf[pos++] = 0xa0 | len;
+  else if (len <= 0xff) { buf[pos++] = 0xd9; buf[pos++] = len; }
+  else if (len <= 0xffff) { buf[pos++] = 0xda; buf[pos++] = len >>> 8; buf[pos++] = len & 0xff; }
+  else { buf[pos++] = 0xdb; buf.writeUInt32BE(len, pos); pos += 4; }
+  if (len === s.length) { for (let i = 0; i < len; i++) buf[pos + i] = s.charCodeAt(i); } // ASCII fast path
+  else buf.write(s, pos, len, 'utf8');
+  pos += len;
+}
+
+function wBin(b) {
+  const len = b.length;
+  ensure(len + 5);
+  if (len <= 0xff) { buf[pos++] = 0xc4; buf[pos++] = len; }
+  else if (len <= 0xffff) { buf[pos++] = 0xc5; buf[pos++] = len >>> 8; buf[pos++] = len & 0xff; }
+  else { buf[pos++] = 0xc6; buf.writeUInt32BE(len, pos); pos += 4; }
+  buf.set(b, pos);
+  pos += len;
+}
+
+function wArrayHeader(len) {
+  ensure(5);
+  if (len < 16) buf[pos++] = 0x90 | len;
+  else if (len <= 0xffff) { buf[pos++] = 0xdc; buf[pos++] = len >>> 8; buf[pos++] = len & 0xff; }
+  else { buf[pos++] = 0xdd; buf.writeUInt32BE(len, pos); pos += 4; }
+}
+
+function wMapHeader(len) {
+  ensure(5);
+  if (len < 16) buf[pos++] = 0x80 | len;
+  else if (len <= 0xffff) { buf[pos++] = 0xde; buf[pos++] = len >>> 8; buf[pos++] = len & 0xff; }
+  else { buf[pos++] = 0xdf; buf.writeUInt32BE(len, pos); pos += 4; }
+}
+
+const HIGH_UNITS = /[\ud800-￿]/; // UTF-16 code-unit order == UTF-8 byte order only below U+D800
+function compareKeys(a, b) { return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')); }
+function sortUtf8(keys) {
+  for (let i = 0; i < keys.length; i++) if (HIGH_UNITS.test(keys[i])) return keys.sort(compareKeys);
+  return keys.sort();
+}
+
+function encodeValue(v, sortKeys) {
+  if (v === null || v === undefined) { ensure(1); buf[pos++] = 0xc0; return; }
+  switch (typeof v) {
+    case 'boolean': ensure(1); buf[pos++] = v ? 0xc3 : 0xc2; return;
+    case 'number':
+      if (Number.isInteger(v)) wInt(v); else wFloat64(v);
+      return;
+    case 'bigint': wInt(Number(v)); return;
+    case 'string': wStr(v); return;
+    default: break;
   }
-}
-
-function encodeFloat64(n, out) {
-  const b = Buffer.alloc(9); b[0] = 0xcb; b.writeDoubleBE(n, 1); out.push(...b);
-}
-
-function encodeStr(s, out) {
-  const len = utf8Len(s);
-  if (len < 32) out.push(0xa0 | len);
-  else if (len <= 0xff) out.push(0xd9, len);
-  else if (len <= 0xffff) out.push(0xda, (len >>> 8) & 0xff, len & 0xff);
-  else { const b = Buffer.alloc(5); b[0] = 0xdb; b.writeUInt32BE(len, 1); out.push(...b); }
-  out.push(...Buffer.from(s, 'utf8'));
-}
-
-function encodeBin(buf, out) {
-  const len = buf.length;
-  if (len <= 0xff) out.push(0xc4, len);
-  else if (len <= 0xffff) out.push(0xc5, (len >>> 8) & 0xff, len & 0xff);
-  else { const b = Buffer.alloc(5); b[0] = 0xc6; b.writeUInt32BE(len, 1); out.push(...b); }
-  for (const x of buf) out.push(x);
-}
-
-function encodeArrayHeader(len, out) {
-  if (len < 16) out.push(0x90 | len);
-  else if (len <= 0xffff) out.push(0xdc, (len >>> 8) & 0xff, len & 0xff);
-  else { const b = Buffer.alloc(5); b[0] = 0xdd; b.writeUInt32BE(len, 1); out.push(...b); }
-}
-
-function encodeMapHeader(len, out) {
-  if (len < 16) out.push(0x80 | len);
-  else if (len <= 0xffff) out.push(0xde, (len >>> 8) & 0xff, len & 0xff);
-  else { const b = Buffer.alloc(5); b[0] = 0xdf; b.writeUInt32BE(len, 1); out.push(...b); }
-}
-
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Uint8Array) && !(v instanceof Float);
-}
-
-// Encode a value. opts.keySort: optional comparator for map keys (array of [key, value] -> sorted).
-function encodeValue(v, out, opts) {
-  if (v === null || v === undefined) { out.push(0xc0); return; }
-  if (v === true) { out.push(0xc3); return; }
-  if (v === false) { out.push(0xc2); return; }
-  if (v instanceof Float) { encodeFloat64(v.value, out); return; }
-  if (typeof v === 'number') {
-    if (Number.isInteger(v)) {
-      if (opts && opts.canonical) { encodeInt(v, out); return; }
-      encodeInt(v, out); return;
-    }
-    if (opts && opts.canonical) { encodeFloat64(v, out); return; }
-    encodeFloat64(v, out); return;
-  }
-  if (typeof v === 'bigint') { encodeInt(Number(v), out); return; }
-  if (typeof v === 'string') { encodeStr(v, out); return; }
-  if (v instanceof Uint8Array) { encodeBin(v, out); return; }
+  if (v instanceof Float) { wFloat64(v.value); return; }
+  if (v instanceof Uint8Array) { wBin(v); return; }
   if (Array.isArray(v)) {
-    encodeArrayHeader(v.length, out);
-    for (const x of v) encodeValue(x, out, opts);
+    wArrayHeader(v.length);
+    for (let i = 0; i < v.length; i++) encodeValue(v[i], sortKeys);
     return;
   }
-  if (isPlainObject(v)) {
-    const keys = Object.keys(v).filter((k) => v[k] !== undefined);
-    if (opts && opts.sortKeys) {
-      keys.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
-    }
-    encodeMapHeader(keys.length, out);
-    for (const k of keys) { encodeStr(k, out); encodeValue(v[k], out, opts); }
+  if (typeof v === 'object') {
+    let keys = Object.keys(v);
+    let n = 0;
+    for (let i = 0; i < keys.length; i++) if (v[keys[i]] !== undefined) keys[n++] = keys[i];
+    keys.length = n;
+    if (sortKeys) keys = sortUtf8(keys);
+    wMapHeader(n);
+    for (let i = 0; i < n; i++) { const k = keys[i]; wStr(k); encodeValue(v[k], sortKeys); }
     return;
   }
   throw new TypeError('unsupported value type for msgpack: ' + typeof v);
 }
 
+// opts.sortKeys: emit map keys in UTF-8 byte order (canonical form). Returns a fresh Buffer (a copy of the scratch).
 function encode(v, opts) {
-  const out = [];
-  encodeValue(v, out, opts || {});
-  return Buffer.from(out);
+  pos = 0;
+  try {
+    encodeValue(v, !!(opts && opts.sortKeys));
+    const out = Buffer.allocUnsafe(pos);
+    buf.copy(out, 0, 0, pos);
+    return out;
+  } finally {
+    if (buf.length > MAX_KEEP) buf = Buffer.allocUnsafe(64 * 1024);
+  }
+}
+
+// Same as encode() but returns a length-prefixed frame (4-byte big-endian length + body) in one allocation.
+function encodeFramed(v, maxFrame) {
+  pos = 4;
+  try {
+    encodeValue(v, false);
+    const len = pos - 4;
+    if (maxFrame !== undefined && len > maxFrame) throw Object.assign(new Error('frame too large'), { code: 'internal' });
+    const out = Buffer.allocUnsafe(pos);
+    buf.writeUInt32BE(len, 0);
+    buf.copy(out, 0, 0, pos);
+    return out;
+  } finally {
+    if (buf.length > MAX_KEEP) buf = Buffer.allocUnsafe(64 * 1024);
+  }
 }
 
 // Decoder: returns the decoded value; throws on malformed or trailing bytes.
@@ -159,4 +204,4 @@ function decode(buf) {
   return v;
 }
 
-module.exports = { encode, decode, Float, f };
+module.exports = { encode, encodeFramed, decode, Float, f };

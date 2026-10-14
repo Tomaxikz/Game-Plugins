@@ -7,6 +7,7 @@ import dev.playermanager.bridge.spi.ActionRequest;
 import dev.playermanager.bridge.spi.ActionResult;
 import dev.playermanager.bridge.spi.ActionSpec;
 import dev.playermanager.bridge.spi.McActions;
+import dev.playermanager.bridge.spi.MoveLogic;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -236,15 +237,47 @@ final class McActionSet {
     }
 
     private ActionResult move(ServerPlayer p, ActionRequest r, String destContainer) {
-        ItemStack cur = checked(p, r, false);
+        String srcContainer = str(r, "container");
+        Object srcSlot = r.args.get("slot");
         Object destSlot = r.args.get("destination_slot");
+        if (srcContainer.equals(destContainer) && slotEq(srcSlot, destSlot)) throw BridgeException.invalid("source and destination are the same slot");
+        ItemStack cur = checked(p, r, false);
         ItemStack at = Slots.get(p, destContainer, destSlot);
-        if (!McItems.isEmpty(at)) throw BridgeException.conflict("destination slot is not empty");
-        ItemStack copy = cur.copy();
-        Slots.set(p, destContainer, destSlot, copy);
-        Slots.set(p, str(r, "container"), r.args.get("slot"), null);
+        boolean destEmpty = McItems.isEmpty(at);
+        Object ec = r.args.get("destination_expected_count");
+        String efp = (String) r.args.get("destination_expected_fingerprint");
+        if (efp != null && !efp.equals("none") && !efp.matches("[0-9a-f]{64}")) throw BridgeException.invalid("bad destination_expected_fingerprint");
+        MoveLogic.verifyDestination((String) r.args.get("destination_expected_id"), ec == null ? null : Integer.valueOf(((Number) ec).intValue()),
+                efp, destEmpty ? null : ctx.items.rawNow(at));
+        MoveLogic.Plan plan = MoveLogic.plan(cur.getCount(), destEmpty, !destEmpty && ItemStack.isSameItemSameComponents(cur, at),
+                destEmpty ? 0 : at.getCount(), destEmpty ? 0 : Math.max(1, at.getMaxStackSize()),
+                fits(p, cur, destContainer, destSlot), destEmpty || fits(p, at, srcContainer, srcSlot));
+        if (plan.op.equals(MoveLogic.STACK)) {
+            ItemStack d = at.copy();
+            d.setCount(plan.destCount);
+            ItemStack s = cur.copy();
+            s.setCount(plan.srcCount);
+            Slots.set(p, destContainer, destSlot, d);
+            Slots.set(p, srcContainer, srcSlot, plan.srcCount <= 0 ? null : s);
+        } else if (plan.op.equals(MoveLogic.SWAP)) {
+            ItemStack a = cur.copy(), b = at.copy();
+            Slots.set(p, destContainer, destSlot, a);
+            Slots.set(p, srcContainer, srcSlot, b);
+        } else {
+            ItemStack a = cur.copy();
+            Slots.set(p, destContainer, destSlot, a);
+            Slots.set(p, srcContainer, srcSlot, null);
+        }
         Slots.sync(p);
-        return ActionResult.ok();
+        return ActionResult.ok(plan.result());
+    }
+
+    /** head/chest/legs/feet accept only items whose equipment slot is that slot; offhand, cursor and container slots accept anything. */
+    private static boolean fits(ServerPlayer p, ItemStack s, String container, Object slot) {
+        if (!container.equals("equipment")) return true;
+        String sl = String.valueOf(slot);
+        if (sl.equals("offhand")) return true;
+        return p.getEquipmentSlotForItem(s) == Slots.equipment(sl);
     }
 
     // ---- bans / whitelist / op

@@ -90,6 +90,26 @@ public final class BlockSlice {
     public static byte[] pack(int[] values, int bits) {
         long totalBits = (long) values.length * bits;
         byte[] out = new byte[(int) ((totalBits + 7) / 8)];
+        long acc = 0;
+        int accBits = 0, o = 0;
+        long mask = (1L << bits) - 1;
+        for (int v : values) {
+            acc = (acc << bits) | (v & mask);
+            accBits += bits;
+            while (accBits >= 8) {
+                accBits -= 8;
+                out[o++] = (byte) (acc >>> accBits);
+            }
+            acc &= (1L << accBits) - 1;
+        }
+        if (accBits > 0) out[o] = (byte) (acc << (8 - accBits));
+        return out;
+    }
+
+    /** Reference bit-at-a-time packer (kept for tests). */
+    static byte[] packSlow(int[] values, int bits) {
+        long totalBits = (long) values.length * bits;
+        byte[] out = new byte[(int) ((totalBits + 7) / 8)];
         long bitPos = 0;
         for (int v : values) {
             for (int b = bits - 1; b >= 0; b--) {

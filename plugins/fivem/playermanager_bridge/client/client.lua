@@ -75,9 +75,10 @@ RegisterNetEvent('pm:client:notify', function(p)
 end)
 
 -- Vehicle report: seat and body health are not readable on the server (games/fivem.md 5.2).
-CreateThread(function()
+-- RedM has no vehicle report: no thread at all. On GTA the loop runs at 250 ms in a vehicle and 500 ms on foot.
+if IS_GTA then CreateThread(function()
     while true do
-        Wait(250)
+        Wait(lastVehicle and 250 or 500)
         if IS_GTA then
             local ped = PlayerPedId()
             local veh = GetVehiclePedIsIn(ped, false)
@@ -99,4 +100,4 @@ CreateThread(function()
             end
         end
     end
-end)
+end) end

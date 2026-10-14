@@ -24,6 +24,27 @@ final class FakeGame implements GameProvider {
     volatile Consumer<GameEvent> sink = e -> { };
     final List<String> actionLog = new CopyOnWriteArrayList<>();
     volatile int sampleCalls;
+    final java.util.concurrent.atomic.AtomicInteger infoCalls = new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicInteger listCalls = new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicInteger getCalls = new java.util.concurrent.atomic.AtomicInteger();
+    volatile java.util.concurrent.CountDownLatch gate;
+    volatile Consumer<String> presence = id -> { };
+
+    @Override
+    public void setPresenceListener(Consumer<String> onChange) {
+        this.presence = onChange;
+    }
+
+    private void gate() {
+        java.util.concurrent.CountDownLatch g = gate;
+        if (g != null) {
+            try {
+                g.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
     volatile boolean drift;
     volatile Set<String> lastFields = Set.of();
     volatile int lastSlot = -1;
@@ -80,12 +101,15 @@ final class FakeGame implements GameProvider {
 
     @Override
     public Map<String, Object> serverInfo() {
+        infoCalls.incrementAndGet();
+        gate();
         return Map.of("name", "fake", "max_players", 20L, "online", 1L, "uptime", 5L, "worlds",
                 List.of(Map.of("world", "default", "name", "default", "loaded", true, "players", 1L)));
     }
 
     @Override
     public List<Map<String, Object>> playersList(boolean o, boolean sensitive) {
+        listCalls.incrementAndGet();
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("id", ID);
         p.put("name", "Steve");
@@ -101,6 +125,8 @@ final class FakeGame implements GameProvider {
 
     @Override
     public Map<String, Object> playerGet(String id, Set<String> fields, boolean sensitive) {
+        getCalls.incrementAndGet();
+        gate();
         if (!ID.equals(id)) {
             throw BridgeError.notFound("Player is not online");
         }

@@ -47,31 +47,106 @@ function createFiveMGame({ g = globalThis, fs, resourceName, platform = 'fivem',
     return ids.filter((s) => typeof s === 'string' && ID_TYPES.has(s.split(':')[0]));
   }
 
+  // Within one drain pass (beginBatch..endBatch) every request sees the same GetPlayers snapshot: N requests = 1 call.
+  let batchActive = false;
+  let batchOnline = null;
+  function beginBatch() { batchActive = true; batchOnline = null; }
+  function endBatch() { batchActive = false; batchOnline = null; }
   function onlineSources() {
+    if (batchActive && batchOnline) return batchOnline;
+    const out = readOnline();
+    if (batchActive) batchOnline = out;
+    return out;
+  }
+  function readOnline() {
     let list = [];
     try {
       if (typeof g.getPlayers === 'function') list = g.getPlayers() || [];
       else list = safe('GetPlayers') || [];
     } catch (e) { list = []; }
-    return list.map((s) => Number(s)).filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
-  }
-
-  // Roster entries: { source, id (first license), name, identifiers }. Players without license are skipped.
-  function roster() {
     const out = [];
-    for (const src of onlineSources()) {
-      const identifiers = identifiersOf(src);
-      const id = identifiers.find((s) => s.startsWith('license:'));
-      if (!id) { log('player ' + src + ' has no license identifier; not listed'); continue; }
-      out.push({ source: src, id, name: String(safe('GetPlayerName', src) ?? ''), identifiers });
+    for (let i = 0; i < list.length; i++) {
+      const n = Number(list[i]);
+      if (Number.isInteger(n) && n > 0 && n <= 65535) out.push(n);
     }
     return out;
   }
 
+  // Identity cache. Identifiers never change while a source is connected and reading them costs 1 + 2n natives per
+  // player, so they are read once per connection (dropped on playerDropped via forget(), and pruned whenever a source
+  // is absent from the online list). Names can change, so they are re-read at most every NAME_TTL_MS by the sampler
+  // (on-demand ops such as players.list always re-read). Players without a license are re-checked every RETRY_MS.
+  const NAME_TTL_MS = 5000;
+  const RETRY_MS = 5000;
+  const identities = new Map(); // source -> { id|null, identifiers, name, nameAt, at }
+  const slots = new Map();      // source -> reusable position sample record
+  function entryFor(src, now, freshName) {
+    let e = identities.get(src);
+    if (!e || (e.id === null && now - e.at >= RETRY_MS)) {
+      const identifiers = Object.freeze(identifiersOf(src));
+      const id = identifiers.find((s) => s.startsWith('license:')) || null;
+      if (!id && !e) log('player ' + src + ' has no license identifier; not listed');
+      e = { id, identifiers, name: '', nameAt: -Infinity, at: now };
+      identities.set(src, e);
+    }
+    if (e.id && (freshName || now - e.nameAt >= NAME_TTL_MS)) { e.name = String(safe('GetPlayerName', src) ?? ''); e.nameAt = now; }
+    return e;
+  }
+  function prune(online) {
+    if (identities.size <= online.length && slots.size <= online.length) return;
+    const live = new Set(online);
+    for (const k of identities.keys()) if (!live.has(k)) identities.delete(k);
+    for (const k of slots.keys()) if (!live.has(k)) slots.delete(k);
+  }
+  function peekIdentity(src) { const e = identities.get(src); return e && e.id ? { source: src, id: e.id, name: e.name, identifiers: e.identifiers } : null; }
+  function forget(src) { identities.delete(src); slots.delete(src); }
+
+  // Roster entries: { source, id (first license), name, identifiers }. Players without license are skipped.
+  function roster() {
+    const out = [];
+    const online = onlineSources();
+    prune(online);
+    const now = Date.now();
+    for (const src of online) {
+      const e = entryFor(src, now, true);
+      if (!e.id) continue;
+      out.push({ source: src, id: e.id, name: e.name, identifiers: e.identifiers });
+    }
+    return out;
+  }
+
+  // Looks one player up by license id without re-reading every player (identifiers come from the cache).
+  function findOnline(id) {
+    const online = onlineSources();
+    prune(online);
+    const now = Date.now();
+    for (const src of online) {
+      const e = entryFor(src, now, false);
+      if (e.id !== id) continue;
+      const fresh = entryFor(src, now, true);
+      return { source: src, id: fresh.id, name: fresh.name, identifiers: fresh.identifiers };
+    }
+    return null;
+  }
+
+  function onlineCount() {
+    const online = onlineSources();
+    prune(online);
+    const now = Date.now();
+    let n = 0;
+    for (const src of online) if (entryFor(src, now, false).id) n++;
+    return n;
+  }
+
+  function pingOf(src) {
+    const v = num(safe('GetPlayerPing', src), -1);
+    return v >= 0 ? v : null;
+  }
+
   function identityOf(src) {
-    const identifiers = identifiersOf(src);
-    const id = identifiers.find((s) => s.startsWith('license:'));
-    return id ? { source: src, id, name: String(safe('GetPlayerName', src) ?? ''), identifiers } : null;
+    forget(src);
+    const e = entryFor(src, Date.now(), true);
+    return e.id ? { source: src, id: e.id, name: e.name, identifiers: e.identifiers } : null;
   }
 
   // ---- per-player reads (main thread) -------------------------------------
@@ -106,14 +181,43 @@ function createFiveMGame({ g = globalThis, fs, resourceName, platform = 'fivem',
     return out;
   }
 
-  // Primitive copy for the positions sampler (quantised off-thread by the core).
+  // Position sampler: primitive copies into reusable per-player slots (no per-sample allocation beyond what the
+  // natives return). Per player: GetPlayerPed, GetEntityCoords, GetEntityHeading, GetEntityHealth (4 natives);
+  // the roster itself costs one GetPlayers. The returned batch object and its slots are reused across calls and
+  // must be consumed synchronously.
+  const batch = { list: [], n: 0 };
   function positionSamples() {
-    const out = [];
-    for (const p of roster()) {
-      const r = readPlayer(p.source, { withVehicle: false });
-      out.push({ id: p.id, name: p.name, source: p.source, coords: r.coords || null, heading: r.heading ?? 0, health: r.health ?? 0 });
+    const online = onlineSources();
+    prune(online);
+    const now = Date.now();
+    let n = 0;
+    for (let i = 0; i < online.length; i++) {
+      const src = online[i];
+      const e = entryFor(src, now, false);
+      if (!e.id) continue;
+      let slot = slots.get(src);
+      if (!slot || slot.id !== e.id) {
+        slot = { id: e.id, name: '', source: src, hasCoords: false, x: 0, y: 0, z: 0, heading: 0, health: 0, qx: 0, qy: 0, qz: 0, qyaw: 0, alive: false };
+        slots.set(src, slot);
+      }
+      slot.name = e.name;
+      const ped = num(safe('GetPlayerPed', src), 0);
+      slot.hasCoords = false; slot.heading = 0; slot.health = 0;
+      if (ped > 0) {
+        const c = safe('GetEntityCoords', ped);
+        if (c && (Array.isArray(c) ? c.length >= 3 : 'x' in c)) {
+          if (Array.isArray(c)) { slot.x = Number(c[0]); slot.y = Number(c[1]); slot.z = Number(c[2]); }
+          else { slot.x = Number(c.x); slot.y = Number(c.y); slot.z = Number(c.z); }
+          slot.hasCoords = true;
+        }
+        slot.heading = num(safe('GetEntityHeading', ped), 0);
+        slot.health = num(safe('GetEntityHealth', ped), 0);
+      }
+      batch.list[n++] = slot;
     }
-    return out;
+    batch.list.length = n;
+    batch.n = n;
+    return batch;
   }
 
   function serverInfo() {
@@ -306,7 +410,7 @@ function createFiveMGame({ g = globalThis, fs, resourceName, platform = 'fivem',
   function emitClient(event, src, payload) {
     call('emitNet', event, src, payload);
   }
-  function dropPlayer(src, reason) { call('DropPlayer', src, reason); }
+  function dropPlayer(src, reason) { batchOnline = null; call('DropPlayer', src, reason); }
   function setRoutingBucket(src, bucket) { call('SetPlayerRoutingBucket', src, bucket); }
   function setJob(src, fw, job, grade) {
     if (fw === 'esx') {
@@ -346,7 +450,7 @@ function createFiveMGame({ g = globalThis, fs, resourceName, platform = 'fivem',
 
   return {
     world, platform,
-    oneSyncEnabled, gameName, serverInfo, roster, identityOf, readPlayer, positionSamples,
+    oneSyncEnabled, gameName, serverInfo, roster, beginBatch, endBatch, findOnline, onlineCount, pingOf, identityOf, peekIdentity, forget, readPlayer, positionSamples,
     detectFramework, readFramework, inventorySource, readInventory, itemRecord, finishItem, weaponRecord,
     itemExists, itemCount, listImages, readImage, hasAssets, started,
     emitClient, dropPlayer, setRoutingBucket, setJob, addItem, removeItem, slotItem,
