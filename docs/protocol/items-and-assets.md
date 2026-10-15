@@ -119,7 +119,7 @@ Algorithm (all bridges identical):
 2. Encode the map as **canonical MessagePack**: map keys sorted ascending by UTF-8 byte order at every nesting level; integers in the smallest encoding; floats only as float64 (never when the value is integral: send int); strings as `str`; no `nil` values (drop the key); arrays keep their order; binary only as `bin`.
 3. `hash` = first **16 lowercase hex characters** of SHA-256 over those bytes.
 
-Test vector: render subset `{"id":"minecraft:stone"}` encodes as `81 a2 69 64 ae 6d 69 6e 65 63 72 61 66 74 3a 73 74 6f 6e 65` and gives `hash` = `027f2bef638386bd`. Every bridge repository must include this vector in its tests.
+Test vector: render subset `{"id":"minecraft:stone"}` encodes as `81 a2 69 64 af 6d 69 6e 65 63 72 61 66 74 3a 73 74 6f 6e 65` (`minecraft:stone` is 15 bytes, so the fixstr header is `af`) and gives `hash` = `90d892ebcdb67d59`. Every bridge repository and the panel must include this vector in their tests. (Earlier revisions printed `ae …` / `027f2bef638386bd`; that was wrong — bridge NOTES D17.)
 
 Asset keys (section 4) use the same hash length: an asset's `hash` is the first 16 hex of SHA-256 over the asset content (see `assets.get`).
 
@@ -152,7 +152,19 @@ An asset is addressed by a **key**. Item keys are `item:<id>` (default look) or 
 | `static` | One 2D icon. Optionally animated by a vertical frame strip. | `textures: { icon: {png, width, height, frames?, frametime?, interpolate?} }` |
 | `model` | JSON model for the panel's 3D/isometric renderer (MC block/item models). | `model`, `textures`, optional `tints` |
 | `special` | One of the special renderers the panel implements. | `special: {kind, ...params}`, optional `textures` |
+| `model_ref` | Like `model`, but some textures are vanilla and resolved panel-side (§4.6, D30). | `model`, `textures`, `vanilla_textures`, optional `tints` |
+| `geo` | GeckoLib / Bedrock geometry (§4.5, D27). | `geo`, `textures: {texture, emissive?}`, optional `display` |
 | `unavailable` | Client-only renderer or no art on this server. Panel shows the name plus its fallback icon; **never** fake art. | `unavailable_reason` |
+
+Panels treat any `render` they do not know as `unavailable`, so new modes are backward compatible (protocol stays 1).
+
+Common optional keys (bridge D25, D26, D28):
+
+| Key | Where | Meaning |
+|---|---|---|
+| `textures.layers` | `static` | Array of texture objects in draw order (bottom → top), sent when the icon has 2+ layers. Each may carry `tint_index`: the panel multiplies that layer's RGB by the item record's `tint[tint_index]` (0xRRGGBB; skip when absent), then alpha-composites it. `textures.icon` stays present (all layers composed, untinted) as the fallback for panels that ignore `layers`. |
+| `emissive` | any texture object (`icon`, `layers[*]`, model `textures[*]`, geo `textures.*`) | Either a same-size texture object `{png, width, height, frames?…}` drawn **unlit** (full brightness) on top of its texture, or `true` meaning the texture itself is fully emissive. |
+| `approximate` | asset | `true` when the item is drawn by mod code in-game (`builtin/entity`, NeoForge `obj`) and the bridge sent the model's texture (`particle`, then `layer0`, then the first texture) as a `static` icon. Real art from the mod, not its in-game look; the panel may badge it. |
 
 ### 4.1 `static`
 
@@ -210,6 +222,14 @@ Colours are dye names (`white`..`black`); `pattern` is a pattern id (`minecraft:
   "special": { "kind": "head", "profile": { "name": "Notch", "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "texture_url": "https://textures.minecraft.net/texture/..." } } }
 ```
 
+### 4.5 `geo` (GeckoLib, D27)
+
+`{render: "geo", geo: <the selected "minecraft:geometry" entry of the .geo.json, unchanged>, textures: {texture: {png…}, emissive?: {png…}}, display?: {gui: {rotation, translation, scale}}}`. Bones form a hierarchy (`parent`, `pivot`, `rotation`); cubes have `origin`, `size`, `inflate`, `mirror` and box `uv` or per-face `uv`. Idle pose only (no animations). The bridge finds model and texture by GeckoLib's file conventions for the item id; mods that name files differently stay `unavailable`. Panels that do not render Bedrock geometry treat `geo` as `unavailable`.
+
+### 4.6 `model_ref` (D30)
+
+Exactly like `model` (flattened model, `textures` holds the PNGs the server has, optional `tints`), plus `vanilla_textures`: sorted array of texture keys (`minecraft:block/oak_planks`, no `.png`) referenced by `model.textures` but not present in `textures`. Only `minecraft:` keys may be listed; a missing non-vanilla texture still makes the asset `unavailable` / `model_unresolved`. The panel resolves each listed key from its own vanilla texture source (the one used for vanilla item icons, pinned to the server's game version) and then renders it as `model`. A model with no `elements` and `layer0..N` textures (`minecraft:item/generated`) is drawn as flat icon layers.
+
 ### 4.4 `unavailable`
 
 ```json
@@ -260,7 +280,15 @@ Request args: `keys` (array of strings, **max 64**; more -> `invalid_args`), opt
 
 Response data: `assets`: array of results in request order, each as defined in section 4, always with `key`, `hash`, `render`. Unknown keys return an entry with `render: "unavailable"` and `unavailable_reason: "not_found"` (the call itself still succeeds).
 
-`hash` of an asset = first 16 hex of SHA-256 over canonical MessagePack of `{render, model?, special?, tints?, textures: {key: {sha: <SHA-256 of png bytes>, width, height, frames?, frametime?, interpolate?, frame_order?, frame_times?}}}` so the panel can verify and cache consistently.
+`hash` of an asset = first 16 hex of SHA-256 over canonical MessagePack of `{render, model?, special?, tints?, geo?, display?, approximate?, vanilla_textures?, textures}` (bridge D29), where every texture object becomes `{sha: <SHA-256 hex of the png bytes>, width, height, frames?, frametime?, interpolate?, frame_order?, frame_times?, tint_index?, emissive?}` (`emissive` is `true` or the same texture form, recursively) and `textures.layers` becomes an array of texture forms in draw order. Assets without the new keys hash exactly as before. The panel verifies every asset against this hash before caching it.
+
+Test vectors (png arrays are raw bytes; only their SHA-256 is hashed):
+
+| Asset | `hash` |
+|---|---|
+| `{render:"static", textures:{icon:{png:[1,2,3], width:16, height:16}}}` | `6344382965f9dfa3` |
+| `{render:"static", approximate:true, textures:{icon:{png:[1,2,3],w16,h16}, layers:[{png:[4],w16,h16}, {png:[5],w16,h16, tint_index:1, emissive:{png:[6],w16,h16}}]}}` | `1169035018238026` |
+| `{render:"model_ref", model:{textures:{all:"minecraft:block/stone"}}, vanilla_textures:["minecraft:block/stone"], textures:{}}` | `e97db73138fe84c1` |
 
 Large answers: when the encoded response would exceed 4 MiB the bridge returns as many **whole assets** as fit (at least one), then:
 

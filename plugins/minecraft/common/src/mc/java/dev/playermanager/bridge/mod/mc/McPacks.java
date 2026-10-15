@@ -1,16 +1,17 @@
 package dev.playermanager.bridge.mod.mc;
 
+import dev.playermanager.bridge.assets.PackScanner;
 import dev.playermanager.bridge.assets.PackSource;
 import dev.playermanager.bridge.spi.PackSourceProvider;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Enumeration;
-import java.util.LinkedHashSet;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -26,21 +27,29 @@ import java.util.zip.ZipFile;
  */
 final class McPacks implements PackSourceProvider {
     private final Ctx ctx;
-    private final Map<String, PackSource> cache = new ConcurrentHashMap<String, PackSource>();
+    private final PackScanner scanner;
     private final Map<String, Boolean> hasAssets = new ConcurrentHashMap<String, Boolean>();
 
-    McPacks(Ctx ctx) { this.ctx = ctx; }
+    McPacks(Ctx ctx) {
+        this.ctx = ctx;
+        this.scanner = new PackScanner(ctx.root, ctx.log);
+    }
 
+    /** Pack stack, lowest priority first: mod jars, then the shared plugin-pack stack (Polymer files included), operator paths on top. */
     public List<PackSource> packs() {
-        Set<Path> seen = new LinkedHashSet<Path>();
-        List<PackSource> out = new ArrayList<PackSource>();
         Path root = ctx.root;
-        for (String p : ctx.config.platformStrings("asset_paths", new ArrayList<String>())) addCandidate(out, seen, resolve(root, p), false);
-        String rp = serverPropertiesPack(root);
-        if (rp != null && !rp.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) addCandidate(out, seen, resolve(root, rp), false);
+        List<PackSource> out = new ArrayList<PackSource>();
+        Set<String> seen = new HashSet<String>();
         for (LoaderHooks.ModEntry m : ctx.hooks.mods()) {
-            if (m.path != null) addCandidate(out, seen, m.path.toAbsolutePath().normalize(), true);
+            Path p = m.path == null ? null : m.path.toAbsolutePath().normalize();
+            if (p != null && (Files.isDirectory(p) || jarHasAssets(p))) for (PackSource s : scanner.expand(p)) if (seen.add(s.label())) out.add(s);
         }
+        List<Path> server = new ArrayList<Path>();
+        String rp = serverPropertiesPack(root);
+        if (rp != null && !rp.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) server.add(resolve(root, rp));
+        List<Path> operator = new ArrayList<Path>();
+        for (String p : ctx.config.platformStrings("asset_paths", new ArrayList<String>())) operator.add(resolve(root, p));
+        for (PackSource s : scanner.stack(server, operator, Collections.<String>emptyList())) if (seen.add(s.label())) out.add(s);
         return out;
     }
 
@@ -63,10 +72,6 @@ final class McPacks implements PackSourceProvider {
         }
     }
 
-    private PackSource pack(Path p) {
-        return cache.computeIfAbsent(p.toString(), k -> PackSource.of(p));
-    }
-
     /** Cheap check of the zip central directory: does the jar ship assets (models/textures/items)? Cached per path + mtime + size. */
     private boolean jarHasAssets(Path p) {
         try {
@@ -86,25 +91,5 @@ final class McPacks implements PackSourceProvider {
         } catch (IOException e) {
             return false;
         }
-    }
-
-    private void addCandidate(List<PackSource> out, Set<Path> seen, Path p, boolean mod) {
-        try {
-            if (!seen.add(p)) return;
-            if (Files.isRegularFile(p) && (p.toString().endsWith(".zip") || p.toString().endsWith(".jar"))) {
-                if (!mod || jarHasAssets(p)) out.add(pack(p));
-                return;
-            }
-            if (!Files.isDirectory(p)) return;
-            if (Files.isDirectory(p.resolve("assets"))) { out.add(pack(p)); return; }
-            if (mod) return;
-            try (DirectoryStream<Path> ds = Files.newDirectoryStream(p, "*.zip")) {
-                int n = 0;
-                for (Path z : ds) {
-                    if (n++ >= 3) break;
-                    out.add(pack(z));
-                }
-            }
-        } catch (IOException | RuntimeException ignored) { }
     }
 }

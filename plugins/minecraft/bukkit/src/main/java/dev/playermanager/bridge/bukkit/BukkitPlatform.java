@@ -39,6 +39,9 @@ final class BukkitPlatform implements Platform {
         this.chunks = new BukkitChunks(ctx);
     }
 
+    /** Starts listening for the resource packs the server sends (SHA-1 match against local zips). */
+    void hookSentPacks() { packs.sent.register(); }
+
     public PlatformInfo info() { return info; }
     public BridgeLog log() { return ctx.log; }
     public Scheduler scheduler() { return ctx.scheduler; }

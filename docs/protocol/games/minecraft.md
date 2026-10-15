@@ -19,7 +19,7 @@ Short names used below: **Bukkit family** = paper, spigot, folia. **Mod loaders*
 
 - Supported Minecraft range is set by `releases.md` (`game_versions` of the universal jar: `>=1.8.8`); versions older than 1.12 are best effort and not covered by the tables below.
 - Java < 16 bridges use junixsocket (shaded) when possible, otherwise `transport: "tcp"` with `.playermanager/token` (README §2).
-- Proxies report `game_version` as the proxy's newest supported protocol version string (e.g. `"1.21.4"`), plus `protocol_range` in `hello.game` (see §10).
+- Proxies report `game_version` as the proxy's newest supported protocol version string (e.g. `"1.21.4"`), plus `protocol_range` in `hello.game_info` (see §10).
 
 ## 2. Ids
 
@@ -374,7 +374,7 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 | action: broadcast | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | action: move_all | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
 | action: mute / unmute | partial | partial | partial | partial | partial | ✗ | ✗ | ✗ | Only through LiteBans/AdvancedBan |
-| `backends` in `hello.game` / `server.info.game` (backend names, player counts) | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
+| `backends` in `hello.game_info` / `server.info.game` (backend names, player counts) | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | |
 
 ## 10. Proxies
 
@@ -392,7 +392,7 @@ Proxy bridges (Velocity, BungeeCord; Waterfall is end-of-life and treated as Bun
 
 How the panel finds the backend bridge:
 
-1. The proxy bridge's `hello.game` includes `backends: [{ "name": "lobby", "address": "10.0.0.5:25565", "players": 12 }]`, and `server.info.game.backends` returns the same list with live player counts. (`address` here is the backend's configured socket address, not a player IP, and is sent without `include_sensitive`.)
+1. The proxy bridge's `hello.game_info` includes `backends: [{ "name": "lobby", "address": "10.0.0.5:25565", "players": 12 }]`, and `server.info.game.backends` returns the same list with live player counts. (`address` here is the backend's configured socket address, not a player IP, and is sent without `include_sensitive`.)
 2. Each backend is another panel-managed server (or not). The panel matches a proxy backend `name` to a panel server using the **Player Manager server alias** configured in the panel settings (default: the backend's panel server name, lower-cased), falling back to matching `address`. `server` in a player row is that same name.
 3. For `player.get` on a proxied player the panel calls the proxy bridge for network data **and** the bridge of the panel server mapped from `server` for world data (health, inventory, ...). Plugin messaging between proxy and backend is **not** used because it only works while a player is online; the panel aggregates the two bridges itself.
 4. If no backend bridge is mapped/available, the panel shows the network-level fields only (everything marked ✗ for proxies in §9 is omitted, not null).

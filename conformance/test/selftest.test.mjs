@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { encode, decode, PmFloat, isInt, isFloat, toHex } from '../lib/msgpack.mjs';
-import { canonicalBytes, hash16, TEST_VECTOR, sha256Hex, renderSubsetOf } from '../lib/canonical.mjs';
+import { canonicalBytes, hash16, TEST_VECTOR, sha256Hex, renderSubsetOf, assetHash } from '../lib/canonical.mjs';
 import { encodeFrame, FrameReader, frameHeader, FrameError, MAX_FRAME } from '../lib/framing.mjs';
 import { buildSurface, chunkSurfaceErrors, surfaceHash, voidHash, packU16LE, packI16LE, unpackU16LE, unpackI16LE, NO_FLOOR } from '../lib/chunks.mjs';
 import { itemErrors, containersErrors, blocksErrors, findKeyPaths, gameSectionErrors } from '../lib/schema.mjs';
@@ -558,5 +558,30 @@ describe('documented erratum output', () => {
   test('the selftest records the D17 vector decision', () => {
     assert.equal(TEST_VECTOR.hash, '90d892ebcdb67d59');
     assert.equal(TEST_VECTOR.documentedHash, '027f2bef638386bd');
+  });
+});
+
+describe('asset hash with layers, emissive and vanilla references (NOTES.md D29, D30)', () => {
+  // Vectors computed independently with a minimal canonical msgpack encoder in Python.
+  const png = (...b) => Uint8Array.from(b);
+  test('an asset without the new keys hashes as before', () => {
+    assert.equal(assetHash({ render: 'static', textures: { icon: { png: png(1, 2, 3), width: 16, height: 16 } } }), '6344382965f9dfa3');
+  });
+  test('layers, tint_index, emissive and approximate are covered', () => {
+    const a = {
+      render: 'static', approximate: true,
+      textures: {
+        icon: { png: png(1, 2, 3), width: 16, height: 16 },
+        layers: [
+          { png: png(4), width: 16, height: 16 },
+          { png: png(5), width: 16, height: 16, tint_index: 1, emissive: { png: png(6), width: 16, height: 16 } },
+        ],
+      },
+    };
+    assert.equal(assetHash(a), '1169035018238026');
+  });
+  test('model_ref covers vanilla_textures (NOTES.md D30)', () => {
+    const a = { render: 'model_ref', model: { textures: { all: 'minecraft:block/stone' } }, vanilla_textures: ['minecraft:block/stone'], textures: {} };
+    assert.equal(assetHash(a), 'e97db73138fe84c1');
   });
 });

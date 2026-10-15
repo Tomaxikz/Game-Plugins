@@ -137,26 +137,49 @@ export function manifestHash(entries) {
   return hash16(pairs);
 }
 
-const TEXTURE_META_KEYS = ['width', 'height', 'frames', 'frametime', 'interpolate', 'frame_order', 'frame_times'];
+const TEXTURE_META_KEYS = ['width', 'height', 'frames', 'frametime', 'interpolate', 'frame_order', 'frame_times', 'tint_index'];
+
+/** Hash form of one texture object (NOTES.md D29): png replaced by its SHA-256; emissive recursive. Null if malformed. */
+function textureForm(t) {
+  if (!t || typeof t !== 'object' || !(t.png instanceof Uint8Array)) return null;
+  const meta = { sha: sha256Hex(t.png) };
+  for (const mk of TEXTURE_META_KEYS) {
+    if (t[mk] !== undefined) meta[mk] = t[mk];
+  }
+  if (t.emissive === true) meta.emissive = true;
+  else if (t.emissive !== undefined) {
+    const e = textureForm(t.emissive);
+    if (e === null) return null;
+    meta.emissive = e;
+  }
+  return meta;
+}
 
 /**
- * Asset hash from an assets.get result entry (section 6). Textures carry `png` bytes; only the
- * SHA-256 of each png is hashed. Returns null for render "unavailable" (not verifiable here).
+ * Asset hash from an assets.get result entry (section 6, extended by NOTES.md D29/D30 for layers, emissive, geo,
+ * display, approximate and vanilla_textures). Only the SHA-256 of each png is hashed. Returns null for render "unavailable".
  */
 export function assetHash(asset) {
   if (asset.render === 'unavailable') return null;
   const obj = { render: asset.render };
-  if (asset.model !== undefined) obj.model = asset.model;
-  if (asset.special !== undefined) obj.special = asset.special;
-  if (asset.tints !== undefined) obj.tints = asset.tints;
+  for (const k of ['model', 'special', 'tints', 'geo', 'display', 'approximate', 'vanilla_textures']) {
+    if (asset[k] !== undefined) obj[k] = asset[k];
+  }
   const textures = {};
   for (const [k, t] of Object.entries(asset.textures ?? {})) {
-    if (!t || typeof t !== 'object' || !(t.png instanceof Uint8Array)) return null;
-    const meta = { sha: sha256Hex(t.png) };
-    for (const mk of TEXTURE_META_KEYS) {
-      if (t[mk] !== undefined) meta[mk] = t[mk];
+    if (k === 'layers' && Array.isArray(t)) {
+      const layers = [];
+      for (const l of t) {
+        const f = textureForm(l);
+        if (f === null) return null;
+        layers.push(f);
+      }
+      textures.layers = layers;
+      continue;
     }
-    textures[k] = meta;
+    const f = textureForm(t);
+    if (f === null) return null;
+    textures[k] = f;
   }
   obj.textures = textures;
   return hash16(obj);

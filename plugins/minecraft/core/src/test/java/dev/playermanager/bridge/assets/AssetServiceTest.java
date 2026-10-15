@@ -301,13 +301,13 @@ class AssetServiceTest {
         assertEquals("static", a.get("render"));
     }
 
-    @Test void packsOrderedFirstWins() throws Exception {
+    @Test void packsOrderedLastWins() throws Exception {
         Path other = tmp.resolve("other");
         Files.createDirectories(other.resolve("assets/examplemod/textures/item"));
         Files.createDirectories(other.resolve("assets/examplemod/models/item"));
         Files.write(other.resolve("assets/examplemod/textures/item/ruby.png"), png(32, 32, 0));
         Files.write(other.resolve("assets/examplemod/models/item/ruby.json"), "{\"parent\":\"item/generated\",\"textures\":{\"layer0\":\"examplemod:item/ruby\"}}".getBytes(StandardCharsets.UTF_8));
-        AssetService s2 = new AssetService(() -> Arrays.asList(PackSource.of(other), PackSource.of(packDir)), null, BridgeLog.STDERR, bg);
+        AssetService s2 = new AssetService(() -> Arrays.asList(PackSource.of(packDir), PackSource.of(other)), null, BridgeLog.STDERR, bg);
         @SuppressWarnings("unchecked")
         Map<String, Object> a = (Map<String, Object>) ((List<Object>) s2.get(Collections.singletonList("item:examplemod:ruby"), null).get("assets")).get(0);
         @SuppressWarnings("unchecked")

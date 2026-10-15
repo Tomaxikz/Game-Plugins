@@ -73,6 +73,7 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
                     .javaMajor(Versions.javaMajor())
                     .build();
             BukkitPlatform platform = new BukkitPlatform(ctx, info, events);
+            platform.hookSentPacks();
             try {
                 platform.chunks.setBlockListener(new BukkitChunkEvents(platform.chunks));       // registered on the first chunks.subscribe
             } catch (Throwable t) {

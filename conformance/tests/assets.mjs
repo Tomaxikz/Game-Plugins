@@ -5,7 +5,7 @@ import { num } from '../lib/msgpack.mjs';
 import { manifestHash, assetHash } from '../lib/canonical.mjs';
 import { okData, errCode } from './helpers.mjs';
 
-const RENDERS = ['static', 'model', 'special', 'unavailable'];
+const RENDERS = ['static', 'model', 'model_ref', 'special', 'geo', 'unavailable']; // geo: D27, model_ref: D30
 const REASONS = ['client_only_renderer', 'vanilla_assets_panel_side', 'no_art_on_server', 'model_unresolved', 'not_found', 'too_large'];
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -33,6 +33,20 @@ async function listAll(ctx, limit = 2) {
   }
   fail('listing did not terminate');
   return null;
+}
+
+/** PNG texture object check incl. an optional emissive overlay (NOTES.md D26). */
+function checkTexture(c, p, t) {
+  c.ok(isObj(t) && isBin(t.png), `${p}.png must be bin`);
+  if (!isObj(t) || !isBin(t.png)) return;
+  const sig = PNG_SIG.every((b, j) => t.png[j] === b);
+  c.ok(sig, `${p} is not a PNG (signature)`);
+  if (sig && t.frames === undefined) {
+    const w = (t.png[16] << 24) | (t.png[17] << 16) | (t.png[18] << 8) | t.png[19];
+    const h = (t.png[20] << 24) | (t.png[21] << 16) | (t.png[22] << 8) | t.png[23];
+    c.ok(w === num(t.width) && h === num(t.height), `${p} IHDR ${w}x${h} != declared ${t.width}x${t.height}`);
+  }
+  if (t.emissive !== undefined && t.emissive !== true) checkTexture(c, `${p}.emissive`, t.emissive);
 }
 
 export const tests = [
@@ -133,17 +147,33 @@ export const tests = [
           continue;
         }
         if (a.render === 'static') {
-          const icon = a.textures?.icon;
-          c.ok(isObj(icon) && isBin(icon.png), `${p}.textures.icon.png must be bin`);
-          if (isObj(icon) && isBin(icon.png)) {
-            const sig = PNG_SIG.every((b, j) => icon.png[j] === b);
-            c.ok(sig, `${p} icon is not a PNG (signature)`);
-            if (sig && icon.frames === undefined) {
-              const w = (icon.png[16] << 24) | (icon.png[17] << 16) | (icon.png[18] << 8) | icon.png[19];
-              const h = (icon.png[20] << 24) | (icon.png[21] << 16) | (icon.png[22] << 8) | icon.png[23];
-              c.ok(w === num(icon.width) && h === num(icon.height), `${p} IHDR ${w}x${h} != declared ${icon.width}x${icon.height}`);
+          checkTexture(c, `${p}.textures.icon`, a.textures?.icon);
+          const layers = a.textures?.layers;
+          if (layers !== undefined) {
+            // NOTES.md D25: 2+ layers in draw order, optional per-item tint index.
+            c.ok(Array.isArray(layers) && layers.length >= 2, `${p}.textures.layers must be an array of 2+ layers`);
+            for (const [j, l] of (Array.isArray(layers) ? layers : []).entries()) {
+              checkTexture(c, `${p}.textures.layers[${j}]`, l);
+              if (isObj(l) && l.tint_index !== undefined) c.ok(Number.isInteger(num(l.tint_index)) && num(l.tint_index) >= 0, `${p}.textures.layers[${j}].tint_index must be an int >= 0`);
             }
           }
+          if (a.approximate !== undefined) c.ok(a.approximate === true, `${p}.approximate must be true when present (D28)`);
+        }
+        if (a.render === 'model_ref') {
+          // NOTES.md D30: a model whose missing textures are vanilla keys the panel resolves itself.
+          const vt = a.vanilla_textures;
+          c.ok(isObj(a.model), `${p}.model must be an object`);
+          c.ok(Array.isArray(vt) && vt.length > 0, `${p}.vanilla_textures must be a non-empty array`);
+          if (Array.isArray(vt)) {
+            c.ok(vt.every((k) => typeof k === 'string' && k.startsWith('minecraft:') && !k.endsWith('.png')), `${p}.vanilla_textures must be minecraft: keys without .png`);
+            c.ok(vt.every((k, j) => j === 0 || vt[j - 1] < k), `${p}.vanilla_textures must be sorted and unique`);
+            c.ok(vt.every((k) => !(isObj(a.textures) && k in a.textures)), `${p}.vanilla_textures must not also be sent as PNGs`);
+          }
+        }
+        if (a.render === 'geo') {
+          // NOTES.md D27: Bedrock geometry entry plus its texture.
+          c.ok(isObj(a.geo) && Array.isArray(a.geo.bones), `${p}.geo must be a geometry object with bones`);
+          checkTexture(c, `${p}.textures.texture`, a.textures?.texture);
         }
         const recomputed = assetHash(a);
         if (recomputed !== null) {

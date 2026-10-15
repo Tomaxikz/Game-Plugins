@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -65,10 +66,10 @@ public final class AssetService {
             StringBuilder fp = new StringBuilder();
             for (PackSource p : packs) fp.append(p.fingerprint()).append('|');
             this.fingerprint = Hashes.sha256Hex(fp.toString().getBytes(StandardCharsets.UTF_8)).substring(0, 24);
-            // first pack wins (priority order given by the provider)
+            // later packs override earlier ones, like Minecraft's pack stack (the provider lists lowest priority first)
             for (PackSource p : packs) {
                 try {
-                    for (String f : p.list()) if (!files.containsKey(f)) files.put(f, p);
+                    for (String f : p.list()) files.put(f, p);
                 } catch (IOException e) {
                     // unreadable pack: skip
                 }
@@ -86,9 +87,12 @@ public final class AssetService {
         }
     }
 
-    private synchronized Index index() throws IOException {
+    private Index index() throws IOException { return index(false); }
+
+    /** @param force re-evaluate the pack list now (manifest requests); otherwise at most every 10 s. */
+    private synchronized Index index(boolean force) throws IOException {
         long now = System.currentTimeMillis();
-        if (index != null && now - indexCheckedAt < 10_000) return index;
+        if (index != null && now - indexCheckedAt < (force ? 1_000 : 10_000)) return index;
         List<PackSource> packs = provider.packs();
         StringBuilder fp = new StringBuilder();
         for (PackSource p : packs) fp.append(p.fingerprint()).append('|');
@@ -113,7 +117,7 @@ public final class AssetService {
      * @return response data. Throws {@code busy} while the index is still being built in the background.
      */
     public Map<String, Object> manifest(List<String> namespaces, String sinceHash, String cursor, int limit) throws IOException {
-        Index ix = index();
+        Index ix = index(true);
         if (!ix.fingerprint.equals(manifestFor)) {
             startBuild(ix);
             if (!ix.fingerprint.equals(manifestFor)) {
@@ -262,6 +266,10 @@ public final class AssetService {
                 String name = rest.substring(6, rest.length() - 5);
                 if (!ns.equals("minecraft")) { keys.add("item:" + ns + ":" + name); itemDefs.add(ns + ":" + name); }
             }
+            if (!ns.equals("minecraft") && rest.endsWith(".geo.json")) {
+                String sub = rest.startsWith("geckolib/models/item/") ? "geckolib/models/item/" : rest.startsWith("geo/item/") ? "geo/item/" : null;
+                if (sub != null) keys.add("item:" + ns + ":" + rest.substring(sub.length(), rest.length() - 9));
+            }
         }
         for (String f : ix.files.keySet()) {
             String[] p = splitAsset(f);
@@ -396,7 +404,13 @@ public final class AssetService {
                 used += size;
                 continue;
             }
-            // oversized: split textures into chunks
+            // oversized: split textures into chunks (only plain top-level textures can be split)
+            if (!chunkable(wire)) {
+                wire = unavailable(keys.get(i), "too_large");
+                results.add(wire);
+                used += MsgPack.encode(wire).length;
+                continue;
+            }
             List<Map<String, Object>> chunks = chunkAsset(wire);
             if (!results.isEmpty()) { more = true; next = i + ":" + chunk; break; }
             Map<String, Object> ch = chunks.get(Math.min(chunk, chunks.size() - 1));
@@ -410,6 +424,16 @@ public final class AssetService {
         out.put("more", more);
         if (more) out.put("cursor", next);
         return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean chunkable(Map<String, Object> wire) {
+        Object t = wire.get("textures");
+        if (!(t instanceof Map)) return false;
+        for (Object v : ((Map<String, Object>) t).values()) {
+            if (!(v instanceof Map) || ((Map<String, Object>) v).get("emissive") instanceof Map) return false;
+        }
+        return true;
     }
 
     @SuppressWarnings("unchecked")
@@ -507,15 +531,57 @@ public final class AssetService {
         Integer frametime;
         Boolean interpolate;
         List<Object> frameOrder, frameTimes;
+        Integer tintIndex;
+        Object emissive;      // Boolean.TRUE (fully emissive) or a same-size overlay Tex
+
+        Tex copy() {
+            Tex c = new Tex();
+            c.key = key; c.png = png; c.width = width; c.height = height; c.frames = frames; c.frametime = frametime;
+            c.interpolate = interpolate; c.frameOrder = frameOrder; c.frameTimes = frameTimes; c.tintIndex = tintIndex;
+            c.emissive = emissive;
+            return c;
+        }
     }
+
+    private abstract static class Part {
+        List<Object> tints = new ArrayList<Object>();
+        /** {@code minecraft:} texture keys the model uses but the server does not have (D30). */
+        final TreeSet<String> vanilla = new TreeSet<String>();
+    }
+
+    /** Generated item: one or more texture layers (layer0 at the bottom). */
+    private static final class GenPart extends Part {
+        final List<Tex> layers = new ArrayList<Tex>();      // layers the server has
+        final List<String> keys = new ArrayList<String>();   // every layer's texture key, draw order (layers + vanilla ones)
+    }
+
+    /** Element model with parents flattened. */
+    private static final class ModelPart extends Part {
+        Map<String, Object> textures = new LinkedHashMap<String, Object>();   // name -> asset texture key
+        Object elements;
+        Map<String, Object> display = new LinkedHashMap<String, Object>();
+        Object guiLight;
+        final Map<String, Tex> used = new LinkedHashMap<String, Tex>();
+    }
+
+    static final List<String> DYES = Collections.unmodifiableList(Arrays.asList(
+            "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+            "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"));
 
     private final class Resolver {
         final Index ix;
         final String key;
+        final String itemId;
+        String geoName;
         final Map<String, Tex> texCache = new HashMap<String, Tex>();
-        List<Object> tints = new ArrayList<Object>();
 
-        Resolver(Index ix, String key) { this.ix = ix; this.key = key; }
+        Resolver(Index ix, String key) {
+            this.ix = ix; this.key = key;
+            String r = key.startsWith("item:") ? key.substring(5) : key;
+            int at = r.indexOf('@');
+            this.itemId = at < 0 ? r : r.substring(0, at);
+            this.geoName = this.itemId;
+        }
 
         Map<String, Object> resolve() throws Unresolved {
             if (!key.startsWith("item:")) throw new Unresolved("not_found");
@@ -548,10 +614,15 @@ public final class AssetService {
 
         Map<String, Object> fromDefinition(String loc) throws Unresolved {
             String[] p = split(loc);
+            geoName = loc;
             byte[] items = ix.read("assets/" + p[0] + "/items/" + p[1] + ".json");
             if (items != null) return fromItemDef(parse(items));
             byte[] model = ix.read("assets/" + p[0] + "/models/item/" + p[1] + ".json");
-            if (model == null) throw new Unresolved("not_found");
+            if (model == null) {
+                Map<String, Object> g = geoAsset(null);
+                if (g == null) throw new Unresolved("not_found");
+                return g;
+            }
             return fromModel(p[0] + ":item/" + p[1]);
         }
 
@@ -620,7 +691,6 @@ public final class AssetService {
             return null;
         }
 
-        @SuppressWarnings("unchecked")
         Map<String, Object> fromItemDef(Map<String, Object> def) throws Unresolved {
             Object root = def.get("model");
             if (root == null) throw new Unresolved("model_unresolved");
@@ -632,76 +702,139 @@ public final class AssetService {
             if (depth > 24 || !(nodeO instanceof Map)) throw new Unresolved("model_unresolved");
             Map<String, Object> n = (Map<String, Object>) nodeO;
             String type = strip(n.get("type"));
+            if (type.equals("empty")) throw new Unresolved("no_art_on_server");
+            if (type.equals("special")) return special(n);
+            if (type.equals("model") && n.get("model") instanceof String) return fromModel((String) n.get("model"), parseTints(n.get("tints")));
+            if (type.startsWith("neoforge:fluid_container")) return fluidContainer(n);
+            Part p = partOfNode(n, depth);
+            if (p == null) throw new Unresolved("no_art_on_server");
+            return toAsset(p);
+        }
+
+        /** Default-case selection of an item-model node; null for {@code minecraft:empty}. */
+        @SuppressWarnings("unchecked")
+        Part partOfNode(Object nodeO, int depth) throws Unresolved {
+            if (depth > 24 || !(nodeO instanceof Map)) throw new Unresolved("model_unresolved");
+            Map<String, Object> n = (Map<String, Object>) nodeO;
+            String type = strip(n.get("type"));
             if (type.equals("model")) {
-                collectTints(n.get("tints"));
                 if (!(n.get("model") instanceof String)) throw new Unresolved("model_unresolved");
-                return fromModel((String) n.get("model"));
+                Part p = partOfModel((String) n.get("model"));
+                applyTints(p, parseTints(n.get("tints")));
+                return p;
             }
             if (type.equals("composite")) {
                 Object ms = n.get("models");
-                if (ms instanceof List && !((List<Object>) ms).isEmpty()) return fromNode(((List<Object>) ms).get(0), depth + 1);
-                throw new Unresolved("model_unresolved");
+                if (!(ms instanceof List) || ((List<Object>) ms).isEmpty()) throw new Unresolved("model_unresolved");
+                List<Part> parts = new ArrayList<Part>();
+                for (Object m : (List<Object>) ms) {
+                    Part p = partOfNode(m, depth + 1);
+                    if (p != null) parts.add(p);
+                }
+                if (parts.isEmpty()) return null;
+                return merge(parts);
             }
             if (type.equals("condition")) {
                 Object d = n.get("on_false") != null ? n.get("on_false") : n.get("on_true");
-                return fromNode(d, depth + 1);
+                return partOfNode(d, depth + 1);
             }
             if (type.equals("select")) {
-                if (n.get("fallback") != null) return fromNode(n.get("fallback"), depth + 1);
+                if (n.get("fallback") != null) return partOfNode(n.get("fallback"), depth + 1);
                 Object cs = n.get("cases");
                 if (cs instanceof List && !((List<Object>) cs).isEmpty() && ((List<Object>) cs).get(0) instanceof Map) {
-                    return fromNode(((Map<String, Object>) ((List<Object>) cs).get(0)).get("model"), depth + 1);
+                    return partOfNode(((Map<String, Object>) ((List<Object>) cs).get(0)).get("model"), depth + 1);
                 }
                 throw new Unresolved("model_unresolved");
             }
             if (type.equals("range_dispatch")) {
-                if (n.get("fallback") != null) return fromNode(n.get("fallback"), depth + 1);
+                if (n.get("fallback") != null) return partOfNode(n.get("fallback"), depth + 1);
                 Object es = n.get("entries");
                 if (es instanceof List && !((List<Object>) es).isEmpty() && ((List<Object>) es).get(0) instanceof Map) {
-                    return fromNode(((Map<String, Object>) ((List<Object>) es).get(0)).get("model"), depth + 1);
+                    return partOfNode(((Map<String, Object>) ((List<Object>) es).get(0)).get("model"), depth + 1);
                 }
                 throw new Unresolved("model_unresolved");
             }
-            if (type.equals("empty")) throw new Unresolved("no_art_on_server");
-            if (type.equals("special")) return special(n);
+            if (type.equals("empty")) return null;
+            if (type.equals("special")) throw new Unresolved("client_only_renderer");
             throw new Unresolved("client_only_renderer");
         }
 
+        // ----- composite
+
+        /**
+         * Merges the parts of a {@code composite}. All element models: elements are concatenated (texture variables renamed
+         * {@code p<i>_<name>}, tint indices shifted). All generated: layers are stacked. Mixed: the element model is rendered
+         * and the generated parts are dropped (they have no 3D geometry).
+         */
         @SuppressWarnings("unchecked")
-        Map<String, Object> special(Map<String, Object> n) throws Unresolved {
-            Object sm = n.get("model");
-            String t = sm instanceof Map ? strip(((Map<String, Object>) sm).get("type")) : "";
-            String kind;
-            if (t.equals("chest")) kind = "chest";
-            else if (t.equals("head")) kind = "head";
-            else if (t.equals("shield")) kind = "shield";
-            else if (t.equals("banner")) kind = "banner";
-            else if (t.equals("bed")) kind = "bed";
-            else if (t.equals("shulker_box")) kind = "shulker_box";
-            else if (t.equals("decorated_pot")) kind = "decorated_pot";
-            else if (t.equals("conduit")) kind = "conduit";
-            else if (t.equals("trident")) kind = "trident";
-            else throw new Unresolved("client_only_renderer");
-            Map<String, Object> sp = new LinkedHashMap<String, Object>();
-            sp.put("kind", kind);
-            if (kind.equals("chest") && sm instanceof Map) {
-                Object tex = ((Map<String, Object>) sm).get("texture");
-                String v = "normal";
-                if (tex instanceof String) {
-                    String s = (String) tex;
-                    if (s.contains("trapped")) v = "trapped"; else if (s.contains("ender")) v = "ender"; else if (s.contains("copper")) v = "copper";
+        Part merge(List<Part> parts) {
+            if (parts.size() == 1) return parts.get(0);
+            List<ModelPart> models = new ArrayList<ModelPart>();
+            List<GenPart> gens = new ArrayList<GenPart>();
+            for (Part p : parts) { if (p instanceof ModelPart) models.add((ModelPart) p); else gens.add((GenPart) p); }
+            if (models.isEmpty()) {
+                GenPart g = new GenPart();
+                int off = 0;
+                for (GenPart x : gens) {
+                    g.keys.addAll(x.keys);
+                    g.vanilla.addAll(x.vanilla);
+                    for (Tex t : x.layers) {
+                        if (t.tintIndex != null && off > 0) { t = t.copy(); t.tintIndex += off; }
+                        g.layers.add(t);
+                    }
+                    off += x.tints.size();
                 }
-                sp.put("variant", v);
+                return g;
             }
-            Map<String, Object> asset = new LinkedHashMap<String, Object>();
-            asset.put("render", "special");
-            asset.put("special", sp);
-            return finish(asset, Collections.<String, Tex>emptyMap());
+            if (models.size() == 1) return models.get(0);
+            ModelPart out = new ModelPart();
+            List<Object> els = new ArrayList<Object>();
+            int tintOffset = 0;
+            for (int i = 0; i < models.size(); i++) {
+                ModelPart m = models.get(i);
+                String pre = "p" + i + "_";
+                for (Map.Entry<String, Object> e : m.textures.entrySet()) out.textures.put(pre + e.getKey(), e.getValue());
+                if (m.elements instanceof List) {
+                    for (Object eo : (List<Object>) m.elements) {
+                        if (!(eo instanceof Map)) continue;
+                        Map<String, Object> el = new LinkedHashMap<String, Object>((Map<String, Object>) eo);
+                        if (el.get("faces") instanceof Map) {
+                            Map<String, Object> faces = new LinkedHashMap<String, Object>();
+                            for (Map.Entry<String, Object> fe : ((Map<String, Object>) el.get("faces")).entrySet()) {
+                                if (!(fe.getValue() instanceof Map)) continue;
+                                Map<String, Object> f = new LinkedHashMap<String, Object>((Map<String, Object>) fe.getValue());
+                                if (f.get("texture") instanceof String && ((String) f.get("texture")).startsWith("#")) {
+                                    f.put("texture", "#" + pre + ((String) f.get("texture")).substring(1));
+                                }
+                                if (f.get("tintindex") instanceof Number) {
+                                    f.put("tintindex", ((Number) f.get("tintindex")).intValue() + tintOffset);
+                                }
+                                faces.put(fe.getKey(), f);
+                            }
+                            el.put("faces", faces);
+                        }
+                        els.add(el);
+                    }
+                }
+                out.used.putAll(m.used);
+                out.vanilla.addAll(m.vanilla);
+                for (Object t : m.tints) {
+                    Map<String, Object> tm = new LinkedHashMap<String, Object>((Map<String, Object>) t);
+                    tm.put("index", ((Number) tm.get("index")).intValue() + tintOffset);
+                    out.tints.add(tm);
+                }
+                tintOffset += m.tints.size();
+                if (out.display.isEmpty() && !m.display.isEmpty()) out.display = m.display;
+                if (out.guiLight == null) out.guiLight = m.guiLight;
+            }
+            out.elements = els;
+            return out;
         }
 
-        void collectTints(Object t) {
-            if (!(t instanceof List)) return;
-            tints = new ArrayList<Object>();
+        @SuppressWarnings("unchecked")
+        List<Object> parseTints(Object t) {
+            List<Object> out = new ArrayList<Object>();
+            if (!(t instanceof List)) return out;
             int idx = 0;
             for (Object o : (List<Object>) t) {
                 Map<String, Object> e = new LinkedHashMap<String, Object>();
@@ -714,45 +847,131 @@ public final class AssetService {
                 else if (type.equals("foliage")) e.put("source", "foliage");
                 else if (type.equals("water")) e.put("source", "water");
                 else e.put("source", "item_tint");
-                tints.add(e);
+                out.add(e);
             }
+            return out;
+        }
+
+        // ----- special renderers (items-and-assets 4.3): parameters only, never geometry
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> special(Map<String, Object> n) throws Unresolved {
+            Object sm = n.get("model");
+            Map<String, Object> smm = sm instanceof Map ? (Map<String, Object>) sm : null;
+            String t = smm != null ? strip(smm.get("type")) : "";
+            Map<String, Object> sp = specialParams(t, smm, itemId);
+            if (sp == null) throw new Unresolved("client_only_renderer");
+            return specialAsset(sp);
+        }
+
+        Map<String, Object> specialAsset(Map<String, Object> sp) {
+            Map<String, Object> asset = new LinkedHashMap<String, Object>();
+            asset.put("render", "special");
+            asset.put("special", sp);
+            return finish(asset, Collections.<String, Tex>emptyMap());
         }
 
         // ----- model flattening
         final class Flat {
-            boolean generated;
+            boolean generated, builtinEntity, custom;
+            String defaultTint;
             Map<String, Object> textures = new LinkedHashMap<String, Object>();
             Map<String, Object> display = new LinkedHashMap<String, Object>();
             Object elements;
             Object guiLight;
+            Set<String> emissiveNames;      // texture variables with NeoForge neoforge_data.light_emission > 0
+            List<Flat> children;            // composite loader
         }
 
         Flat flatten(String loc, int depth) throws Unresolved {
             if (depth > MAX_PARENT_DEPTH) throw new Unresolved("model_unresolved");
             String[] p = split(loc);
-            Map<String, Object> json = null;
             byte[] b = ix.read("assets/" + p[0] + "/models/" + p[1] + ".json");
-            if (b != null) json = parse(b);
-            else if (p[0].equals("minecraft")) {
+            if (b != null) return flattenJson(parse(b), depth);
+            if (p[0].equals("minecraft")) {
                 if (BuiltinModels.isGenerated(p[1])) {
                     Flat f = new Flat();
                     f.generated = true;
                     return f;
                 }
-                json = BuiltinModels.get(p[1]);
+                if (BuiltinModels.isBuiltinEntity(p[1])) {
+                    Flat f = new Flat();
+                    f.builtinEntity = true;
+                    return f;
+                }
+                Map<String, Object> json = BuiltinModels.get(p[1]);
+                if (json != null) return flattenJson(json, depth);
             }
-            if (json == null) throw new Unresolved("model_unresolved");
-            Flat f;
+            throw new Unresolved("model_unresolved");
+        }
+
+        Flat flattenRef(Object ref, int depth) throws Unresolved {
+            if (ref instanceof String) return flatten((String) ref, depth + 1);
+            if (ref instanceof Map) return flattenJson(castMap(ref), depth + 1);
+            throw new Unresolved("model_unresolved");
+        }
+
+        /**
+         * Parent chain + model loaders. Loader ids are matched without their {@code neoforge:}/{@code forge:} prefix:
+         * composite (children), separate_transforms (gui perspective, else base), item_layers / fluid_container / bucket
+         * (generated layers), elements (plain), empty; anything else (obj, conditional, mod loaders) is flagged {@code custom}.
+         */
+        Flat flattenJson(Map<String, Object> json, int depth) throws Unresolved {
+            if (depth > MAX_PARENT_DEPTH) throw new Unresolved("model_unresolved");
+            String loader = null;
+            if (json.get("loader") instanceof String) {
+                loader = (String) json.get("loader");
+                int c = loader.indexOf(':');
+                if (c > 0 && (loader.startsWith("neoforge:") || loader.startsWith("forge:"))) loader = loader.substring(c + 1);
+            }
+            if ("empty".equals(loader)) throw new Unresolved("no_art_on_server");
+            if ("separate_transforms".equals(loader)) {
+                Object persp = json.get("perspectives");
+                Object gui = persp instanceof Map ? castMap(persp).get("gui") : null;
+                Flat base = flattenRef(gui != null ? gui : json.get("base"), depth);
+                if (json.get("textures") instanceof Map) mergeTextures(base, castMap(json.get("textures")), false);
+                return base;
+            }
             Object parent = json.get("parent");
-            if (parent instanceof String) f = flatten((String) parent, depth + 1);
-            else f = new Flat();
-            Object t = json.get("textures");
-            if (t instanceof Map) f.textures.putAll((Map<String, Object>) t);
-            Object d = json.get("display");
-            if (d instanceof Map) f.display.putAll((Map<String, Object>) d);
+            Flat f = parent instanceof String ? flatten((String) parent, depth + 1) : new Flat();
+            if (json.get("textures") instanceof Map) mergeTextures(f, castMap(json.get("textures")), true);
+            if (json.get("display") instanceof Map) f.display.putAll(castMap(json.get("display")));
             if (json.get("elements") != null) f.elements = json.get("elements");
             if (json.get("gui_light") != null) f.guiLight = json.get("gui_light");
+            if (json.get("_tint") instanceof String) f.defaultTint = (String) json.get("_tint");
+            if (loader == null || loader.equals("elements")) return f;
+            if (loader.equals("composite")) {
+                if (!(json.get("children") instanceof Map)) throw new Unresolved("model_unresolved");
+                f.children = new ArrayList<Flat>();
+                for (Object c : castMap(json.get("children")).values()) f.children.add(flattenRef(c, depth));
+            } else if (loader.equals("item_layers")) {
+                f.generated = true;
+            } else if (loader.equals("fluid_container") || loader.equals("bucket")) {
+                f.generated = true;
+                Object base = f.textures.get("base");
+                if (base != null) f.textures.put("layer0", base);
+            } else {
+                f.custom = true;
+            }
             return f;
+        }
+
+        /** Texture entries are a reference string or (NeoForge) an object {@code {sprite, neoforge_data: {light_emission}}}. */
+        void mergeTextures(Flat f, Map<String, Object> textures, boolean override) {
+            for (Map.Entry<String, Object> e : textures.entrySet()) {
+                Object v = e.getValue();
+                if (v instanceof Map) {
+                    Map<String, Object> o = castMap(v);
+                    if (o.get("neoforge_data") instanceof Map && castMap(o.get("neoforge_data")).get("light_emission") instanceof Number
+                            && ((Number) castMap(o.get("neoforge_data")).get("light_emission")).intValue() > 0) {
+                        if (f.emissiveNames == null) f.emissiveNames = new HashSet<String>();
+                        f.emissiveNames.add(e.getKey());
+                    }
+                    v = o.get("sprite");
+                }
+                if (!(v instanceof String)) continue;
+                if (override) f.textures.put(e.getKey(), v); else if (!f.textures.containsKey(e.getKey())) f.textures.put(e.getKey(), v);
+            }
         }
 
         String texKey(Map<String, Object> textures, Object ref) {
@@ -765,43 +984,285 @@ public final class AssetService {
             return null;
         }
 
-        Map<String, Object> fromModel(String loc) throws Unresolved {
+        Map<String, Object> fromModel(String loc) throws Unresolved { return fromModel(loc, Collections.<Object>emptyList()); }
+
+        Map<String, Object> fromModel(String loc, List<Object> tints) throws Unresolved {
             Flat f = flatten(loc, 0);
+            if (f.builtinEntity || f.custom) return fromEntity(f);
+            Part p = partOfFlat(f);
+            applyTints(p, tints);
+            return toAsset(p);
+        }
+
+        Part partOfModel(String loc) throws Unresolved { return partOfFlat(flatten(loc, 0)); }
+
+        /** Items drawn by client code: vanilla special renderer by id, GeckoLib geometry, else the mod's texture (approximate). */
+        Map<String, Object> fromEntity(Flat f) throws Unresolved {
+            if (f.builtinEntity) {
+                Map<String, Object> sp = specialByItemId(itemId);
+                if (sp != null) return specialAsset(sp);
+                Map<String, Object> g = geoAsset(f.display);
+                if (g != null) return g;
+            }
+            Tex t = firstTexture(f);
+            if (t == null) throw new Unresolved(f.builtinEntity ? "client_only_renderer" : "model_unresolved");
+            Map<String, Object> asset = new LinkedHashMap<String, Object>();
+            asset.put("render", "static");
+            asset.put("approximate", Boolean.TRUE);
             Map<String, Tex> used = new LinkedHashMap<String, Tex>();
-            if (f.generated || f.elements == null) {
-                String l0 = texKey(f.textures, f.textures.get("layer0"));
-                if (l0 == null) throw new Unresolved("model_unresolved");
-                Tex t = loadTexture(l0, true);
-                if (t == null) throw new Unresolved("no_art_on_server");
-                used.put("icon", t);
+            used.put("icon", t);
+            return finish(asset, used);
+        }
+
+        /** particle, then layer0, then the first texture that exists. */
+        Tex firstTexture(Flat f) {
+            Tex t = textureOf(f, "particle");
+            if (t == null) t = textureOf(f, "layer0");
+            if (t != null) return t;
+            for (String n : f.textures.keySet()) {
+                t = textureOf(f, n);
+                if (t != null) return t;
+            }
+            return null;
+        }
+
+        Tex textureOf(Flat f, String name) {
+            Object ref = f.textures.get(name);
+            String tk = ref == null ? null : texKey(f.textures, ref);
+            return tk == null ? null : loadTexture(tk, true);
+        }
+
+        /** NeoForge {@code fluid_container} item model: the container itself (base layer); the dynamic fluid cannot be represented. */
+        Map<String, Object> fluidContainer(Map<String, Object> n) throws Unresolved {
+            Flat f = new Flat();
+            if (n.get("textures") instanceof Map) mergeTextures(f, castMap(n.get("textures")), true);
+            Object base = f.textures.get("base");
+            String tk = base == null ? null : texKey(f.textures, base);
+            Tex t = tk == null ? null : loadTexture(tk, true);
+            if (t == null) throw new Unresolved("no_art_on_server");
+            Map<String, Object> asset = new LinkedHashMap<String, Object>();
+            asset.put("render", "static");
+            Map<String, Tex> used = new LinkedHashMap<String, Tex>();
+            used.put("icon", t);
+            return finish(asset, used);
+        }
+
+        /**
+         * GeckoLib item/block geometry by file convention (GeckoLib 5 {@code geckolib/models/<item|block>/<name>.geo.json},
+         * GeckoLib 4 {@code geo/<item|block>/<name>.geo.json}; texture {@code textures/<item|block>/<name>.png}, glowmask
+         * {@code <name>_glowmask.png}). Exact name match only; the first {@code minecraft:geometry} entry, idle pose.
+         */
+        Map<String, Object> geoAsset(Map<String, Object> display) {
+            String[] p = split(geoName);
+            String[] subs = {"item", "block"};
+            for (int i = 0; i < 2; i++) {
+                String sub = subs[i];
+                byte[] g = ix.read("assets/" + p[0] + "/geckolib/models/" + sub + "/" + p[1] + ".geo.json");
+                if (g == null) g = ix.read("assets/" + p[0] + "/geo/" + sub + "/" + p[1] + ".geo.json");
+                if (g == null) continue;
+                Tex t = loadTexture(p[0] + ":" + sub + "/" + p[1], true);
+                if (t == null) t = loadTexture(p[0] + ":" + subs[1 - i] + "/" + p[1], true);
+                Object entry = firstGeometry(g);
+                if (t == null || entry == null) continue;
                 Map<String, Object> asset = new LinkedHashMap<String, Object>();
-                asset.put("render", "static");
+                asset.put("render", "geo");
+                asset.put("geo", entry);
+                if (display != null && display.get("gui") instanceof Map) {
+                    Map<String, Object> d = new LinkedHashMap<String, Object>();
+                    d.put("gui", display.get("gui"));
+                    asset.put("display", d);
+                }
+                Map<String, Tex> used = new LinkedHashMap<String, Tex>();
+                if (t.emissive instanceof Tex) {
+                    Tex base = t.copy();
+                    base.emissive = null;
+                    used.put("texture", base);
+                    used.put("emissive", (Tex) t.emissive);
+                } else {
+                    used.put("texture", t);
+                }
                 return finish(asset, used);
             }
-            // model render
-            Map<String, Object> resolvedTextures = new LinkedHashMap<String, Object>();
+            return null;
+        }
+
+        Object firstGeometry(byte[] json) {
+            try {
+                Object geos = parse(json).get("minecraft:geometry");
+                if (geos instanceof List) for (Object o : (List<Object>) geos) if (o instanceof Map) return o;
+            } catch (Unresolved ignored) {
+                // not valid JSON: no geometry
+            }
+            return null;
+        }
+
+        Part partOfFlat(Flat f) throws Unresolved {
+            if (f.children != null) {
+                List<Part> parts = new ArrayList<Part>(f.children.size());
+                for (Flat c : f.children) {
+                    for (Map.Entry<String, Object> e : f.textures.entrySet()) if (!c.textures.containsKey(e.getKey())) c.textures.put(e.getKey(), e.getValue());
+                    parts.add(partOfFlat(c));
+                }
+                return merge(parts);
+            }
+            if (f.builtinEntity || f.custom) throw new Unresolved("client_only_renderer");
+            if (f.generated || f.elements == null) {
+                GenPart g = new GenPart();
+                if (f.textures.get("layer0") == null) throw new Unresolved("model_unresolved");
+                for (int i = 0; i < 32; i++) {
+                    Object ref = f.textures.get("layer" + i);
+                    if (ref == null) continue;
+                    String tk = texKey(f.textures, ref);
+                    if (tk == null) throw new Unresolved("model_unresolved");
+                    Tex t = loadTexture(tk, true);
+                    if (t == null) {
+                        if (tk.startsWith("minecraft:")) { g.keys.add(tk); g.vanilla.add(tk); continue; }
+                        if (i == 0) throw new Unresolved("no_art_on_server");
+                        continue;     // a missing overlay layer is skipped, the base still shows
+                    }
+                    g.keys.add(tk);
+                    if (f.emissiveNames != null && f.emissiveNames.contains("layer" + i)) {
+                        t = t.copy();
+                        t.emissive = Boolean.TRUE;
+                    }
+                    g.layers.add(t);
+                }
+                return g;
+            }
+            ModelPart m = new ModelPart();
             for (String name : f.textures.keySet()) {
                 String tk = texKey(f.textures, f.textures.get(name));
                 if (tk == null) continue;
-                resolvedTextures.put(name, tk);
+                m.textures.put(name, tk);
             }
             Set<String> need = new HashSet<String>();
             collectFaceTextures(f.elements, f.textures, need);
             for (String tk : need) {
                 Tex t = loadTexture(tk, false);
-                if (t == null) throw new Unresolved("model_unresolved");
-                used.put(tk, t);
+                if (t != null) m.used.put(tk, t);
+                else if (tk.startsWith("minecraft:")) m.vanilla.add(tk);
+                else throw new Unresolved("model_unresolved");
             }
-            Map<String, Object> model = new LinkedHashMap<String, Object>();
-            if (f.guiLight != null) model.put("gui_light", f.guiLight);
-            model.put("textures", resolvedTextures);
-            model.put("display", f.display);
-            model.put("elements", f.elements);
+            m.elements = f.elements;
+            m.display = f.display;
+            m.guiLight = f.guiLight;
+            if (f.defaultTint != null) {
+                Map<String, Object> e = new LinkedHashMap<String, Object>();
+                e.put("index", 0);
+                e.put("source", f.defaultTint);
+                m.tints.add(e);
+            }
+            return m;
+        }
+
+        /** Records the item-definition tints; generated layer N whose tint N comes from the item gets {@code tint_index}. */
+        void applyTints(Part p, List<Object> tints) {
+            if (tints.isEmpty()) return;
+            p.tints = tints;
+            if (!(p instanceof GenPart)) return;
+            List<Tex> layers = ((GenPart) p).layers;
+            for (int i = 0; i < layers.size() && i < tints.size(); i++) {
+                if ("item_tint".equals(castMap(tints.get(i)).get("source"))) {
+                    Tex t = layers.get(i).copy();
+                    t.tintIndex = i;
+                    layers.set(i, t);
+                }
+            }
+        }
+
+        Map<String, Object> toAsset(Part p) throws Unresolved {
             Map<String, Object> asset = new LinkedHashMap<String, Object>();
-            asset.put("render", "model");
+            if (p instanceof GenPart) {
+                GenPart g = (GenPart) p;
+                List<Tex> layers = g.layers;
+                Map<String, Tex> used = new LinkedHashMap<String, Tex>();
+                if (!g.vanilla.isEmpty()) {
+                    Map<String, Object> model = new LinkedHashMap<String, Object>();
+                    Map<String, Object> tex = new LinkedHashMap<String, Object>();
+                    for (int i = 0; i < g.keys.size(); i++) tex.put("layer" + i, g.keys.get(i));
+                    model.put("parent", "minecraft:item/generated");
+                    model.put("textures", tex);
+                    for (Tex t : layers) used.put(t.key, t);
+                    asset.put("render", "model_ref");
+                    asset.put("model", model);
+                    asset.put("vanilla_textures", new ArrayList<Object>(g.vanilla));
+                    return finish(asset, used);
+                }
+                asset.put("render", "static");
+                if (layers.size() == 1) {
+                    Tex t = layers.get(0);
+                    if (t.tintIndex != null) { t = t.copy(); t.tintIndex = null; }
+                    used.put("icon", t);
+                    return finish(asset, used);
+                }
+                used.put("icon", compose(layers));
+                return finish(asset, used, layers);
+            }
+            ModelPart m = (ModelPart) p;
+            Map<String, Object> model = new LinkedHashMap<String, Object>();
+            if (m.guiLight != null) model.put("gui_light", m.guiLight);
+            model.put("textures", m.textures);
+            model.put("display", m.display);
+            model.put("elements", m.elements);
+            asset.put("render", m.vanilla.isEmpty() ? "model" : "model_ref");
             asset.put("model", model);
-            if (!tints.isEmpty()) asset.put("tints", tints);
-            return finish(asset, used);
+            if (!m.vanilla.isEmpty()) asset.put("vanilla_textures", new ArrayList<Object>(m.vanilla));
+            if (!m.tints.isEmpty()) asset.put("tints", m.tints);
+            return finish(asset, m.used);
+        }
+
+        /**
+         * Stacks generated-item layers (layer0 at the bottom, alpha-over) into one icon at the size of the largest layer
+         * (others scaled nearest-neighbour). Animated layers are composed frame by frame when every animated layer has the same
+         * frame count and timing; otherwise only frame 0 is used. Tints (tintindex N on layerN) are not applied: a static asset
+         * cannot carry them. If a layer is not decodable (interlaced PNG) layer0 alone is served.
+         */
+        Tex compose(List<Tex> layers) {
+            List<Png.Img> imgs = new ArrayList<Png.Img>();
+            for (Tex t : layers) {
+                Png.Img im = Png.decode(t.png);
+                if (im == null) return layers.get(0);
+                imgs.add(im);
+            }
+            int W = 0, H = 0;
+            for (Tex t : layers) if ((long) t.width * t.height > (long) W * H) { W = t.width; H = t.height; }
+            Tex firstAnim = null;
+            boolean sameAnim = true;
+            int frames = 1;
+            for (Tex t : layers) {
+                if (t.frames == null) continue;
+                if (firstAnim == null) { firstAnim = t; frames = t.frames; continue; }
+                if (!t.frames.equals(firstAnim.frames) || !eq(t.frametime, firstAnim.frametime) || !eq(t.interpolate, firstAnim.interpolate)
+                        || !eq(t.frameOrder, firstAnim.frameOrder) || !eq(t.frameTimes, firstAnim.frameTimes)) sameAnim = false;
+            }
+            if (!sameAnim) frames = 1;
+            if ((long) W * H * frames > Png.MAX_PIXELS) frames = 1;
+            int[] strip = new int[W * H * frames];
+            for (int k = 0; k < frames; k++) {
+                int[] acc = new int[W * H];
+                for (int i = 0; i < layers.size(); i++) {
+                    Tex t = layers.get(i);
+                    Png.Img im = imgs.get(i);
+                    int fk = t.frames == null ? 0 : k;
+                    int cols = Math.max(1, im.w / t.width);
+                    int sx = (fk % cols) * t.width, sy = (fk / cols) * t.height;
+                    Png.over(acc, Png.cropScale(im, sx, sy, t.width, t.height, W, H).argb);
+                }
+                System.arraycopy(acc, 0, strip, k * W * H, W * H);
+            }
+            Tex out = new Tex();
+            out.key = layers.get(0).key + "+" + (layers.size() - 1);
+            out.png = Png.encode(new Png.Img(W, H * frames, strip));
+            out.width = W;
+            out.height = H;
+            if (frames > 1 && firstAnim != null) {
+                out.frames = frames;
+                out.frametime = firstAnim.frametime;
+                out.interpolate = firstAnim.interpolate;
+                out.frameOrder = firstAnim.frameOrder;
+                out.frameTimes = firstAnim.frameTimes;
+            }
+            return out;
         }
 
         @SuppressWarnings("unchecked")
@@ -839,6 +1300,17 @@ public final class AssetService {
                     applyMcmeta(t, parse(meta));
                 } catch (Exception e) {
                     // ignore broken mcmeta
+                }
+            }
+            for (String suffix : EMISSIVE_SUFFIXES) {
+                byte[] em = ix.read(path.substring(0, path.length() - 4) + suffix + ".png");
+                int[] es = Png.size(em);
+                if (es != null && es[0] == sz[0] && es[1] == sz[1]) {
+                    Tex e = t.copy();
+                    e.key = texKey + suffix;
+                    e.png = em;
+                    t.emissive = e;
+                    break;
                 }
             }
             texCache.put(texKey, t);
@@ -888,36 +1360,28 @@ public final class AssetService {
             }
         }
 
-        /** Adds key/hash and the wire textures; hash = items-and-assets.md section 6. */
-        Map<String, Object> finish(Map<String, Object> asset, Map<String, Tex> used) {
-            Map<String, Object> hashTex = new LinkedHashMap<String, Object>();
+        Map<String, Object> finish(Map<String, Object> asset, Map<String, Tex> used) { return finish(asset, used, null); }
+
+        /** Adds key, wire textures and the asset hash (items-and-assets.md section 6 + NOTES D29). */
+        Map<String, Object> finish(Map<String, Object> asset, Map<String, Tex> used, List<Tex> layers) {
             Map<String, Object> wireTex = new LinkedHashMap<String, Object>();
-            for (Map.Entry<String, Tex> e : used.entrySet()) {
-                Tex t = e.getValue();
-                Map<String, Object> h = new LinkedHashMap<String, Object>();
-                h.put("sha", Hashes.sha256Hex(t.png));
-                texMeta(h, t);
-                hashTex.put(e.getKey(), h);
-                Map<String, Object> w = new LinkedHashMap<String, Object>();
-                w.put("png", t.png);
-                texMeta(w, t);
-                wireTex.put(e.getKey(), w);
+            for (Map.Entry<String, Tex> e : used.entrySet()) wireTex.put(e.getKey(), texForm(e.getValue()));
+            if (layers != null) {
+                List<Object> wl = new ArrayList<Object>(layers.size());
+                for (Tex t : layers) wl.add(texForm(t));
+                wireTex.put("layers", wl);
             }
-            Map<String, Object> hashInput = new LinkedHashMap<String, Object>();
-            hashInput.put("render", asset.get("render"));
-            if (asset.get("model") != null) hashInput.put("model", asset.get("model"));
-            if (asset.get("special") != null) hashInput.put("special", asset.get("special"));
-            if (asset.get("tints") != null) hashInput.put("tints", asset.get("tints"));
-            hashInput.put("textures", hashTex);
             Map<String, Object> out = new LinkedHashMap<String, Object>();
             out.put("key", key);
-            out.put("hash", Hashes.hash16(hashInput));
             out.putAll(asset);
             if (!wireTex.isEmpty()) out.put("textures", wireTex);
+            out.put("hash", assetHash(out));
             return out;
         }
 
-        void texMeta(Map<String, Object> m, Tex t) {
+        Map<String, Object> texForm(Tex t) {
+            Map<String, Object> m = new LinkedHashMap<String, Object>();
+            m.put("png", t.png);
             m.put("width", t.width);
             m.put("height", t.height);
             if (t.frames != null) m.put("frames", t.frames);
@@ -925,8 +1389,68 @@ public final class AssetService {
             if (t.interpolate != null) m.put("interpolate", t.interpolate);
             if (t.frameOrder != null) m.put("frame_order", t.frameOrder);
             if (t.frameTimes != null) m.put("frame_times", t.frameTimes);
+            if (t.tintIndex != null) m.put("tint_index", t.tintIndex);
+            if (t.emissive instanceof Tex) m.put("emissive", texForm((Tex) t.emissive));
+            else if (t.emissive != null) m.put("emissive", Boolean.TRUE);
+            return m;
         }
     }
+
+    /** Emissive sibling textures: GeckoLib glowmask (verified in GeckoLib 4 and 5 sources), Continuity/Iris and OptiFine style. */
+    private static final String[] EMISSIVE_SUFFIXES = {"_glowmask", "_emissive", "_e"};
+
+    private static final String[] HASHED_KEYS = {"model", "special", "tints", "geo", "display", "approximate", "vanilla_textures"};
+
+    /**
+     * Asset hash (items-and-assets.md section 6, NOTES D29): first 16 hex of SHA-256 over canonical MessagePack of
+     * {@code {render, model?, special?, tints?, geo?, display?, approximate?, textures}} where every texture object
+     * (also {@code textures.layers[*]} and {@code emissive}, recursively) has its {@code png} replaced by {@code sha}.
+     */
+    @SuppressWarnings("unchecked")
+    static String assetHash(Map<String, Object> wire) {
+        Map<String, Object> in = new LinkedHashMap<String, Object>();
+        in.put("render", wire.get("render"));
+        for (String k : HASHED_KEYS) if (wire.get(k) != null) in.put(k, wire.get(k));
+        Map<String, Object> tex = new LinkedHashMap<String, Object>();
+        Object wt = wire.get("textures");
+        if (wt instanceof Map) {
+            for (Map.Entry<String, Object> e : ((Map<String, Object>) wt).entrySet()) {
+                Object v = e.getValue();
+                if (v instanceof List) {
+                    List<Object> l = new ArrayList<Object>();
+                    for (Object o : (List<Object>) v) l.add(hashTexture((Map<String, Object>) o));
+                    tex.put(e.getKey(), l);
+                } else {
+                    tex.put(e.getKey(), hashTexture((Map<String, Object>) v));
+                }
+            }
+        }
+        in.put("textures", tex);
+        return Hashes.hash16(in);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> hashTexture(Map<String, Object> t) {
+        Map<String, Object> h = new LinkedHashMap<String, Object>();
+        for (Map.Entry<String, Object> e : t.entrySet()) {
+            String k = e.getKey();
+            if (k.equals("png")) h.put("sha", Hashes.sha256Hex((byte[]) e.getValue()));
+            else if (k.equals("emissive") && e.getValue() instanceof Map) h.put(k, hashTexture((Map<String, Object>) e.getValue()));
+            else h.put(k, e.getValue());
+        }
+        return h;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(Object o) { return (Map<String, Object>) o; }
+
+    private static boolean eq(Object a, Object b) { return a == null ? b == null : a.equals(b); }
+
+    static Map<String, Object> specialParams(String type, Map<String, Object> model, String itemId) {
+        return SpecialParams.specialParams(type, model, itemId);
+    }
+
+    static Map<String, Object> specialByItemId(String itemId) { return SpecialParams.specialByItemId(itemId); }
 
     private static String[] split(String loc) {
         int c = loc.indexOf(':');

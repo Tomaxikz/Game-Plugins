@@ -64,7 +64,7 @@ Must be the first request on every connection. In TCP fallback mode a missing/wr
 | `capabilities.actions` | ActionSpec[] | See below |
 | `capabilities.features` | string[] | Free-form feature flags, see table below |
 | `integrations` | string[] | opt; third-party plugins/resources the bridge detected and uses (e.g. `luckperms`, `litebans`, `ox_inventory`, `es_extended`). Informational; capabilities already reflect their effect. |
-| `game` | object | opt; game-specific hello extras, keys defined **only** in `games/<game>.md` (e.g. Minecraft proxies: `protocol_range`, `modded`, `backends`). Same rule as `player.get.game`. |
+| `game_info` | object | opt; game-specific hello extras, keys defined **only** in `games/<game>.md` (e.g. Minecraft proxies: `protocol_range`, `modded`, `backends`). The same data is in `server.info.game`, which the panel reads. (`hello.game` is the game-id string above; bridge NOTES D18.) |
 | `limits.max_frame` | int | Bytes; ≤ 4194304 |
 | `limits.positions_min_interval_ms` | int | Effective floor for `positions.subscribe.interval_ms` (from `config.json`, default 250) |
 | `limits.max_inflight` | int | Max concurrent requests per connection before `busy` |

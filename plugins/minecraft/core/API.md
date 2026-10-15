@@ -148,12 +148,27 @@ Core already rejects slices over 262144 cells and radius outside 1..32 before ca
 
 ## 8. Assets
 
-`PackSourceProvider.packs()` returns `assets.PackSource`s in priority order (first wins): `PackSource.of(path)` for a folder, zip or **mod jar**
-(`assets/<ns>/{models,textures,items}/...`; a single wrapping folder inside a zip is tolerated). Core handles: key enumeration, 1.21.4+ `items/*.json`
-default-case resolution (`condition` → `on_false`, `select`/`range_dispatch` → fallback/first, `composite` → first, `special` → kind), `custom_model_data`
-overrides, parent flattening (including a small built-in cube/`cube_all`/`cube_column`/`cube_bottom_top`/`block/block` family, authored in `BuiltinModels`), `.mcmeta`
-animation, asset hash (§6), manifest paging / `since_hash`, 4 MiB chunking, disk cache under `.playermanager/cache/assets/` keyed by pack fingerprint (mtime+size).
-`minecraft:` ids without pack data → `unavailable` / `vanilla_assets_panel_side`. Return an empty list if no pack exists; `assets.*` stay advertised only when you return a non-null provider.
+`PackSourceProvider.packs()` returns `assets.PackSource`s **lowest priority first; a later pack overrides an earlier one** (Minecraft's pack stack):
+`PackSource.of(path)` for a folder, zip or **mod jar** (`assets/<ns>/{models,textures,items}/...`; a single wrapping folder inside a zip is tolerated).
+Do not build the list yourself: `assets.PackScanner(root, log).stack(serverPacks, operatorPaths, sentSha1)` returns the whole stack (generic scan of
+`plugins/*/`, known generated packs of Nexo/Oraxen/ItemsAdder/CraftEngine/ModelEngine/BetterModel/MythicCrucible/Nova/HMCCosmetics/Polymer, the server's local
+pack, operator `platform.asset_paths`, and on top the local zip whose SHA-1 equals the pack the server sends). Call it from `packs()` (it runs on the request
+thread, never the game thread; results are cached by path + mtime + size). `PackScanner.expand(path)` turns one path into pack sources (mod jars). The list is
+re-read lazily: at most once a second on `assets.manifest`, every 10 s on `assets.get`. Bukkit reference: `bukkit/PackLocator`, `SentPacks`; mods: `McPacks`.
+
+Core resolves, per key `item:<id>[@<model>]`:
+* 1.21.4+ `items/*.json` default case (`condition` -> `on_false`, `select`/`range_dispatch` -> fallback/first), `custom_model_data` overrides, parent flattening, `.mcmeta` animation.
+* `minecraft:` parents from our own geometry (`BuiltinModels`: cube family, slab, stairs, fences, walls, panes, cross, carpet, buttons, plates, doors, trapdoors, torches, orientable, leaves; unknown vanilla parents stay `model_unresolved`).
+* **D25 layers**: 2+ `layerN` -> `textures.icon` (composed, untinted) + `textures.layers` (draw order, `tint_index` where the item definition's `tints[N]` is item-supplied, animation fields).
+* **D26 emissive**: `<tex>_glowmask|_emissive|_e.png` of the same size, or NeoForge `neoforge_data.light_emission` -> `emissive` (overlay texture object or `true`).
+* **D27 geo**: GeckoLib files by exact item name (`geckolib/models/{item|block}/<n>.geo.json` or `geo/...`) when the item has no model or a `builtin/entity` model -> `render: "geo"` (`geo` = first `minecraft:geometry` entry, `textures.texture`, optional `textures.emissive`).
+* **D28 fallback**: `builtin/entity`, `obj` and unknown model loaders with a texture -> `static` + `approximate: true`.
+* **Model loaders** (id without the `neoforge:`/`forge:` prefix): `composite` (children merged), `separate_transforms` (gui perspective, else base), `item_layers`, `fluid_container`/`bucket` (base layer), `elements` (plain), `empty`; `minecraft:composite` in `items/*.json` merges parts (elements merged, generated parts stacked, mixed -> element model, any unresolvable part -> unresolved).
+* **Special renderers**: params from the `minecraft:special` model or the vanilla item id (`SpecialParams`); per-instance data stays in the record's `components`.
+* **D30 `model_ref`**: a model whose only missing textures are `minecraft:` keys is returned as `render: "model_ref"` + sorted `vanilla_textures`; any other missing texture -> `model_unresolved`.
+* **D29 hash**: `AssetService.assetHash(wireAsset)` is the only implementation (covers `layers`, `emissive`, `geo`, `display`, `approximate`, `vanilla_textures`).
+
+Also: manifest paging / `since_hash`, 4 MiB chunking (assets with `layers`/`emissive` that exceed the frame budget are `too_large`), disk cache under `.playermanager/cache/assets/` keyed by the pack-index fingerprint. `minecraft:` ids without pack data -> `unavailable` / `vanilla_assets_panel_side`. Return an empty list if no pack exists; `assets.*` stay advertised only when you return a non-null provider. Details and sources: `NOTES-section.md`.
 
 ## 8a. Chunk surfaces (`map.chunks`, `chunks.subscribe`) — stable
 
