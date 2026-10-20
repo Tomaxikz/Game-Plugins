@@ -43,6 +43,9 @@ public class FakeChunks implements ChunkSource {
         if (h != null && h.active()) h.dirty(w, cx, cz, false);
     }
 
+    /** Changes blocks with no event, like a command, WorldEdit or another plugin on Bukkit. */
+    public void changeSilently(int cx, int cz, ColumnSource cols) { loaded.put(pos(cx, cz), cols); }
+
     public void unload(int cx, int cz) { loaded.remove(pos(cx, cz)); }
 
     @Override public void attach(ChunkHub hub) { this.hub = hub; }

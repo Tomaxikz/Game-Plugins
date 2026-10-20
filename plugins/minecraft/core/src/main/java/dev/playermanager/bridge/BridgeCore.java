@@ -116,7 +116,10 @@ public final class BridgeCore {
             if (platform.positions() != null) {
                 positions = new PositionService(platform.positions(), timer, pool, log, subIds, config.positionsMinIntervalMs);
             }
-            if (platform.chunks() != null) chunks = new ChunkService(platform.chunks(), timer, pool, log, subIds);
+            if (platform.chunks() != null) {
+                chunks = new ChunkService(platform.chunks(), timer, pool, log, subIds);
+                if (platform.positions() != null) chunks.sweepWith(platform.positions());
+            }
             if (platform.assets() != null) assets = new AssetService(platform.assets(), files.cache, log, assetPool);
             ops = new Ops(this);
             if (!bind()) { stop(); return false; }

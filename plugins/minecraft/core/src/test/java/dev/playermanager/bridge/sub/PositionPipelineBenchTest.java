@@ -26,7 +26,7 @@ class PositionPipelineBenchTest {
             List<PositionSample> l = new ArrayList<PositionSample>(N);
             for (int i = 0; i < N; i++) {
                 if (rnd.nextInt(4) == 0) { x[i] += rnd.nextDouble() * 0.5; z[i] += rnd.nextDouble() * 0.5; yaw[i] = rnd.nextInt(360); }
-                l.add(new PositionSample(ids[i], names[i], "world", "minecraft:overworld", x[i], 64, z[i], yaw[i], 10f, "alive"));
+                l.add(new PositionSample(ids[i], names[i], "world", "minecraft:overworld", "normal", x[i], 64, z[i], yaw[i], 10f, "alive"));
             }
             out.add(l);
         }

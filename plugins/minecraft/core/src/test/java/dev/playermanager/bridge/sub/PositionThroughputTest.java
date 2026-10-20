@@ -36,7 +36,7 @@ class PositionThroughputTest {
         List<PositionSample> samples = new ArrayList<PositionSample>(n);
         for (int i = 0; i < n; i++) {
             if (rnd.nextInt(4) == 0) { x[i] += rnd.nextDouble() * 0.5; z[i] += rnd.nextDouble() * 0.5; }
-            samples.add(new PositionSample("00000000-0000-0000-0000-" + String.format("%012d", i), "Player" + i, "world", "minecraft:overworld", x[i], 64, z[i], rnd.nextInt(360), 10f, "alive"));
+            samples.add(new PositionSample("00000000-0000-0000-0000-" + String.format("%012d", i), "Player" + i, "world", "minecraft:overworld", "normal", x[i], 64, z[i], rnd.nextInt(360), 10f, "alive"));
         }
         long bytes = 0;
         for (Map<String, Object> f : s.computeAll(samples, now)) bytes += MsgPack.encode(f).length;

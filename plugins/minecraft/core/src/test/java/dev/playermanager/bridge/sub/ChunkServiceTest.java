@@ -282,4 +282,23 @@ class ChunkServiceTest {
         assertEquals(1, f.size(), "map.chunks seeds the baseline, so the next real change is sent");
         assertEquals(9L, ((Number) chunksOf(f.get(0)).get(0).get("cx")).longValue());
     }
+    @Test void sweepCatchesChangesWithoutEventsNearPlayersInTheirWorldOnly() {
+        java.util.List<dev.playermanager.bridge.spi.PositionSample> online = new ArrayList<>();
+        online.add(new dev.playermanager.bridge.spi.PositionSample("p", "P", "world", "minecraft:overworld", "normal", 8, 64, 8, 0f, 0f, "alive"));
+        svc.sweepWith(() -> java.util.concurrent.CompletableFuture.completedFuture(online));
+        chunks.load(chunks.overworld, 0, 0, land("minecraft:grass_block"));
+        chunks.load(chunks.overworld, 9, 9, land("minecraft:grass_block"));        // far from the player
+        subscribe(null);
+        ChunkSubscription nether = svc.subscribe(sink, chunks.nether, null);
+        nether.activate();
+        svc.request("world", "minecraft:overworld", Arrays.asList(new int[] {0, 0}, new int[] {9, 9}), 0, Deadline.in(1000));   // panel seeds
+        chunks.changeSilently(0, 0, land("minecraft:gold_block"));
+        chunks.changeSilently(9, 9, land("minecraft:gold_block"));
+        List<Map<String, Object>> f = tickTo(now.get() + ChunkService.SWEEP_MS);
+        assertEquals(1, f.size(), "the sweep reports the changed chunk near the player");
+        assertEquals(1, chunksOf(f.get(0)).size());
+        assertEquals(0L, ((Number) chunksOf(f.get(0)).get(0).get("cx")).longValue());
+        assertNull(nether.nextFrame(), "the player is in the overworld: the nether subscription gets nothing");
+        assertTrue(tickTo(now.get() + ChunkService.SWEEP_MS).isEmpty(), "unchanged surfaces are not sent again");
+    }
 }

@@ -9,14 +9,18 @@ import dev.playermanager.bridge.spi.ChunkSource;
 import dev.playermanager.bridge.spi.ChunkWorld;
 import dev.playermanager.bridge.spi.Deadline;
 import dev.playermanager.bridge.spi.LoadedChunk;
+import dev.playermanager.bridge.spi.PositionSample;
+import dev.playermanager.bridge.spi.PositionSource;
 import dev.playermanager.bridge.world.ChunkSurface;
 import dev.playermanager.bridge.world.SurfaceComputer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
@@ -37,6 +41,14 @@ public final class ChunkService implements ChunkHub {
     public static final long FLUSH_MS = 250;
     public static final int MAX_SNAPSHOTS_PER_TICK = 1024;
     public static final int MAX_REQUEST_CHUNKS = 256;
+    /**
+     * Sweep: changes made without block events (commands, WorldEdit, other plugins, pistons, falling blocks) are caught by
+     * re-checking loaded chunks near online players every SWEEP_MS. Unchanged surfaces are filtered by hash, so a sweep
+     * only costs snapshots (game-thread budget applies); at most SWEEP_MAX chunks per sweep, nearest to players first.
+     */
+    static final long SWEEP_MS = 5_000;
+    static final int SWEEP_RADIUS = 2;
+    static final int SWEEP_MAX = 256;
     /** Response budget of one {@code map.chunks} page (frame limit is 4 MiB). */
     static final int PAGE_BUDGET = 3 * 1024 * 1024 + 512 * 1024;
     private static final int MAX_REMEMBERED = 100_000;
@@ -59,6 +71,10 @@ public final class ChunkService implements ChunkHub {
     private volatile boolean active;
     private volatile long snapStartedAt;
     private ScheduledFuture<?> task;
+    private volatile PositionSource players;          // null: no sweep (platform has no position sampler)
+    private final AtomicBoolean sweeping = new AtomicBoolean();
+    private volatile long lastSweep;
+    private final Map<String, ChunkWorld> worldCache = new java.util.concurrent.ConcurrentHashMap<String, ChunkWorld>();
 
     public ChunkService(ChunkSource source, ScheduledExecutorService timer, Executor worker, BridgeLog log, AtomicInteger ids,
                         java.util.function.LongSupplier clockMillis) {
@@ -71,6 +87,9 @@ public final class ChunkService implements ChunkHub {
     }
 
     public ChunkSource source() { return source; }
+
+    /** Enables the change sweep with the platform's position sampler (the same one the live map uses). */
+    public void sweepWith(PositionSource players) { this.players = players; }
 
     // ------------------------------------------------------------------ ChunkHub
 
@@ -137,6 +156,7 @@ public final class ChunkService implements ChunkHub {
 
     /** One 250 ms step: request snapshots of ready dirty chunks, then flush the subscriptions. Visible for tests. */
     public void tick(final long nowMs) {
+        sweep(nowMs);
         gather(nowMs);
         for (ChunkSubscription s : subs) {
             if (s.isClosed()) continue;
@@ -207,6 +227,69 @@ public final class ChunkService implements ChunkHub {
                 }
             });
         }
+    }
+
+    /**
+     * Marks loaded chunks within SWEEP_RADIUS of every online player in a subscribed world for re-checking.
+     * O(players × (2r+1)²) with a HashSet for dedupe, capped at SWEEP_MAX keys.
+     */
+    private void sweep(long nowMs) {
+        final PositionSource ps = players;
+        if (ps == null || nowMs - lastSweep < SWEEP_MS || !sweeping.compareAndSet(false, true)) return;
+        lastSweep = nowMs;
+        CompletableFuture<List<PositionSample>> f;
+        try {
+            f = ps.sample();
+        } catch (Throwable t) {
+            sweeping.set(false);
+            return;
+        }
+        f.whenComplete(new BiConsumer<List<PositionSample>, Throwable>() {
+            public void accept(List<PositionSample> samples, Throwable err) {
+                try {
+                    if (err == null && samples != null) markNearPlayers(samples);
+                } catch (Throwable t) {
+                    log.debug("chunk sweep failed: " + t);
+                } finally {
+                    sweeping.set(false);
+                }
+            }
+        });
+    }
+
+    private void markNearPlayers(List<PositionSample> samples) {
+        Set<ChunkKey> marked = new HashSet<ChunkKey>();
+        for (int ring = 0; ring <= SWEEP_RADIUS && marked.size() < SWEEP_MAX; ring++) {      // nearest rings first
+            for (PositionSample p : samples) {
+                ChunkWorld w = worldOf(p.world, p.dimension);
+                if (w == null) continue;
+                int pcx = (int) Math.floor(p.x) >> 4, pcz = (int) Math.floor(p.z) >> 4;
+                for (int dx = -ring; dx <= ring; dx++) {
+                    for (int dz = -ring; dz <= ring; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) != ring) continue;          // this ring's border only
+                        ChunkKey k = new ChunkKey(w, pcx + dx, pcz + dz);
+                        if (!wantedBySomeone(k) || !marked.add(k)) continue;
+                        dirty(w, k.cx, k.cz, false);
+                        if (marked.size() >= SWEEP_MAX) return;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Contract world/dimension of a position sample → ChunkWorld (cached; null when this platform cannot serve it). */
+    private ChunkWorld worldOf(String world, String dimension) {
+        if (world == null) return null;
+        String key = dimension == null ? world : world + '\u0000' + dimension;
+        ChunkWorld w = worldCache.get(key);
+        if (w != null) return w;
+        try {
+            w = source.resolve(world, dimension);
+        } catch (Throwable t) {
+            return null;
+        }
+        if (worldCache.size() < 256) worldCache.put(key, w);
+        return w;
     }
 
     private boolean wantedBySomeone(ChunkKey k) {

@@ -46,11 +46,11 @@ public final class PositionSubscription extends Subscription {
 
     /** Quantised entry. */
     static final class Q {
-        final String id, name, world, dimension, state;
+        final String id, name, world, dimension, environment, state;
         final int x, y, z, yaw, pitch;
 
         Q(PositionSample s) {
-            id = s.id; name = s.name; world = s.world; dimension = s.dimension; state = s.state;
+            id = s.id; name = s.name; world = s.world; dimension = s.dimension; environment = s.environment; state = s.state;
             x = Quantize.pos(s.x); y = Quantize.pos(s.y); z = Quantize.pos(s.z);
             yaw = Quantize.angle(s.yaw); pitch = Quantize.angle(s.pitch);
         }
@@ -68,6 +68,7 @@ public final class PositionSubscription extends Subscription {
             m.put("name", name);
             m.put("world", world);
             if (dimension != null) m.put("dimension", dimension);
+            if (environment != null) m.put("environment", environment);
             m.put("x", x); m.put("y", y); m.put("z", z);
             m.put("yaw", yaw); m.put("pitch", pitch);
             m.put("state", state);

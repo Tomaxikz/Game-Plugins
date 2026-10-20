@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 
 class PositionDeltaTest {
     static PositionSample p(String id, double x, double yaw) {
-        return new PositionSample(id, "n" + id, "world", "minecraft:overworld", x, 64, 0, (float) yaw, 10f, "alive");
+        return new PositionSample(id, "n" + id, "world", "minecraft:overworld", "normal", x, 64, 0, (float) yaw, 10f, "alive");
     }
 
     static PositionSubscription sub(java.util.Set<String> worlds) {
@@ -73,7 +73,7 @@ class PositionDeltaTest {
 
     @Test void worldFilter() {
         PositionSubscription s = sub(new HashSet<>(Arrays.asList("nether")));
-        PositionSample n = new PositionSample("x", "x", "nether", "minecraft:the_nether", 0, 0, 0, 0, 0, "alive");
+        PositionSample n = new PositionSample("x", "x", "nether", "minecraft:the_nether", "nether", 0, 0, 0, 0, 0, "alive");
         Map<String, Object> f = s.compute(Arrays.asList(p("a", 1, 0), n), 0);
         assertEquals(1, ((List<?>) f.get("players")).size());
         // player leaves scope -> gone

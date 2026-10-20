@@ -31,7 +31,7 @@ final class BukkitPositions implements PositionSource {
         if (w == null) return null;
         WorldMap.Info wi = ctx.worlds.of(w);
         String state = p.isDead() ? "dead" : p.getGameMode() == GameMode.SPECTATOR ? "spectator" : "alive";
-        return new PositionSample(p.getUniqueId().toString(), p.getName(), wi.world, wi.dimension, tmp.getX(), tmp.getY(), tmp.getZ(), tmp.getYaw(), tmp.getPitch(), state);
+        return new PositionSample(p.getUniqueId().toString(), p.getName(), wi.world, wi.dimension, wi.environment, tmp.getX(), tmp.getY(), tmp.getZ(), tmp.getYaw(), tmp.getPitch(), state);
     }
 
     public CompletableFuture<List<PositionSample>> sample() {

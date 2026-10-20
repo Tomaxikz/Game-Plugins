@@ -38,7 +38,7 @@ public class FakePlatform implements Platform {
         FakeColumns land = new FakeColumns().fill(-64, 62, "minecraft:stone").fill(63, 63, "minecraft:dirt").fill(64, 64, "minecraft:grass_block");
         land.fill(3, 3, 64, 64, "minecraft:water").fill(3, 3, 62, 63, "minecraft:sand");
         chunks.load(chunks.overworld, 0, -6, land);
-        positions.add(new PositionSample(ALICE, "Alice", "world", "minecraft:overworld", 12.5, 64, -80.25, 90f, 10f, "alive"));
+        positions.add(new PositionSample(ALICE, "Alice", "world", "minecraft:overworld", "normal", 12.5, 64, -80.25, 90f, 10f, "alive"));
         registry.register(ActionSpec.of("kick", true, true, Field.text("reason", "Reason")), req -> main("kick " + req.target + " " + req.args.get("reason")));
         registry.register(ActionSpec.of("gamemode", true, false, Field.select("mode", "Mode", "survival", "creative", "adventure", "spectator").required()),
                 req -> main("gamemode " + req.args.get("mode")));

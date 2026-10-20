@@ -342,7 +342,7 @@ class LoopbackTest {
         // no frame while nothing changes (min interval is 250 ms)
         assertNull(c.next(900));
         // move
-        platform.positions.set(0, new dev.playermanager.bridge.spi.PositionSample(FakePlatform.ALICE, "Alice", "world", "minecraft:overworld", 12.75, 64, -80.25, 91f, 10f, "alive"));
+        platform.positions.set(0, new dev.playermanager.bridge.spi.PositionSample(FakePlatform.ALICE, "Alice", "world", "minecraft:overworld", "normal", 12.75, 64, -80.25, 91f, 10f, "alive"));
         Map<String, Object> f1 = nextStream(c, 3000);
         assertEquals(1L, f1.get("seq"));
         assertEquals(false, at(f1, "data", "key"));
@@ -369,7 +369,7 @@ class LoopbackTest {
         c.hello();
         c.call("positions.subscribe", m("interval_ms", 10));
         nextStream(c, 3000);
-        platform.positions.set(0, new dev.playermanager.bridge.spi.PositionSample(FakePlatform.ALICE, "Alice", "world", "minecraft:overworld", 100, 64, 0, 0f, 0f, "alive"));
+        platform.positions.set(0, new dev.playermanager.bridge.spi.PositionSample(FakePlatform.ALICE, "Alice", "world", "minecraft:overworld", "normal", 100, 64, 0, 0f, 0f, "alive"));
         long t0 = System.currentTimeMillis();
         nextStream(c, 3000);
         assertTrue(System.currentTimeMillis() - t0 >= 150);
