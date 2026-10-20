@@ -261,7 +261,7 @@ final class McPlayers implements PlayerProvider {
         pos.put("pitch", (double) p.getXRot());
         pos.put("world", ctx.worlds.folder);
         pos.put("dimension", dim);
-        pos.put("environment", McWorlds.environment(dim));
+        pos.put("environment", Mc.environment(Mc.level(p)));
         pos.put("world_name", ctx.worlds.nameOf(dim));
         return pos;
     }

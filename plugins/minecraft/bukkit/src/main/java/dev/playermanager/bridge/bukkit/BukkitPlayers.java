@@ -563,25 +563,16 @@ final class BukkitPlayers implements PlayerProvider {
             g.put("banned", bans.containsKey(id) ? RosterFiles.banObject(bans.get(id)) : null);
             return m;
         }
-        final Map<String, String> dimWorld = new LinkedHashMap<String, String>();
-        Function<String, String> worldOf = new Function<String, String>() {
+        WorldMap.Info wi = savedWorld(nbt);
+        Function<String, String> worldOf = new Function<String, String>() {   // saved dimension key -> contract world
             public String apply(String dim) {
-                String w = dimWorld.get(dim);
-                if (w == null) {
-                    for (World bw : ctx.worldList) {
-                        WorldMap.Info i = ctx.worlds.of(bw);
-                        if (i.dimension.equals(dim)) { w = i.world; break; }
-                    }
-                    if (w == null && !ctx.worldList.isEmpty()) w = ctx.worlds.of(ctx.worldList.get(0)).world;
-                    dimWorld.put(dim, w);
-                }
-                return w;
+                WorldMap.Info i = worldForKey(dim);
+                return i != null ? i.world : null;
             }
         };
-        String dim = OfflineData.dimensionId(nbt.get("Dimension"));
+        String dim = wi != null ? wi.dimension : OfflineData.dimensionId(nbt.get("Dimension"));
         m.put("dimension", dim);
-        String w = worldOf.apply(dim);
-        if (w != null) m.put("world", w);
+        if (wi != null) m.put("world", wi.world);
         List<Object> posL = OfflineData.list(nbt.get("Pos"));
         List<Object> rot = OfflineData.list(nbt.get("Rotation"));
         if (posL != null && posL.size() >= 3) {
@@ -591,6 +582,12 @@ final class BukkitPlayers implements PlayerProvider {
             pos.put("z", OfflineData.dbl(posL.get(2), 0));
             pos.put("yaw", rot != null && rot.size() > 0 ? OfflineData.dbl(rot.get(0), 0) : 0.0);
             pos.put("pitch", rot != null && rot.size() > 1 ? OfflineData.dbl(rot.get(1), 0) : 0.0);
+            if (wi != null) {
+                pos.put("world", wi.world);
+                pos.put("dimension", wi.dimension);
+                pos.put("environment", wi.environment);
+                pos.put("world_name", wi.name);
+            }
             m.put("position", pos);
         }
         m.put("health", OfflineData.dbl(nbt.get("Health"), 20));
@@ -664,5 +661,30 @@ final class BukkitPlayers implements PlayerProvider {
         Path dat = wf == null ? null : OfflineData.dataFile(wf, uuid.toString());
         if (dat == null) throw BridgeException.notFound("Unknown player");
         return OfflineData.containers(OfflineData.readNbt(dat));
+    }
+
+    /**
+     * The loaded world an offline player was saved in. Bukkit stores the world UUID (WorldUUIDMost/Least); vanilla's
+     * Dimension holds the world key, which for extra worlds (Multiverse etc.) is "minecraft:<lower-case name>", not a
+     * vanilla dimension id. O(worlds).
+     */
+    private WorldMap.Info savedWorld(Map<String, Object> nbt) {
+        List<World> worlds = ctx.worldList;
+        Object most = nbt.get("WorldUUIDMost"), least = nbt.get("WorldUUIDLeast");
+        if (most instanceof Number && least instanceof Number) {
+            UUID u = new UUID(((Number) most).longValue(), ((Number) least).longValue());
+            for (World w : worlds) if (u.equals(w.getUID())) return ctx.worlds.of(w);
+        }
+        return worldForKey(OfflineData.dimensionId(nbt.get("Dimension")));
+    }
+
+    /** A saved dimension key ("minecraft:smp" for extra worlds, vanilla ids for the main world's dimensions). O(worlds). */
+    private WorldMap.Info worldForKey(String dim) {
+        World vanilla = null;
+        for (World w : ctx.worldList) {
+            if (("minecraft:" + w.getName().toLowerCase(Locale.ROOT)).equals(dim)) return ctx.worlds.of(w);
+            if (vanilla == null && ctx.worlds.of(w).dimension.equals(dim)) vanilla = w;   // first = main world's dimension
+        }
+        return vanilla != null ? ctx.worlds.of(vanilla) : null;
     }
 }

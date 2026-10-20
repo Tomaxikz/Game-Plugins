@@ -13,6 +13,7 @@
 # * Optional: PM_BOT=1 joins an offline-mode test bot (mineflayer, npm-installed under $PM_WORK/bot) so the
 #   player-scoped tests have a player. PM_JAR=<path> uses a prebuilt universal jar. PM_JAVA_HOME overrides the JDK.
 #   PM_LEVEL_TYPE=minecraft:normal generates real terrain instead of the default flat world.
+#   PM_EXTRA_PLUGINS="a.jar b.jar" copies extra plugins into plugins/ (e.g. Multiverse-Core).
 # Exit codes: 0 pass, 1 conformance failure, 2 usage/setup error, 3 EULA not accepted (run pending), 4 server did not start.
 set -u
 set -o pipefail
@@ -105,6 +106,11 @@ fi
 rm -rf "$DIR"
 mkdir -p "$DIR/plugins"
 cp "$JAR" "$DIR/plugins/"
+# Optional: PM_EXTRA_PLUGINS="a.jar b.jar" adds other plugins (e.g. Multiverse-Core) to test against.
+for extra in ${PM_EXTRA_PLUGINS:-}; do
+  [[ -f "$extra" ]] || { echo "PM_EXTRA_PLUGINS: $extra not found" >&2; exit 2; }
+  cp "$extra" "$DIR/plugins/"
+done
 # Optional test helper: ViaVersion lets the (older) mineflayer bot join servers newer than mineflayer knows (PM_VIA=1).
 if [[ "${PM_VIA:-}" == "1" ]]; then
   for proj in viaversion viabackwards; do

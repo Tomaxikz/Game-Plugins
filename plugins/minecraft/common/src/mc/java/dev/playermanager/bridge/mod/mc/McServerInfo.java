@@ -39,7 +39,7 @@ final class McServerInfo implements ServerProvider {
                     Map<String, Object> wm = new LinkedHashMap<String, Object>();
                     wm.put("world", ctx.worlds.folder);
                     wm.put("dimension", dim);
-                    wm.put("environment", McWorlds.environment(dim));
+                    wm.put("environment", Mc.environment(l));
                     wm.put("name", ctx.worlds.nameOf(dim));
                     wm.put("players", l.players().size());
                     wm.put("loaded", true);

@@ -22,6 +22,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.players.NameAndId;
 import net.minecraft.server.players.UserBanListEntry;
@@ -43,6 +44,25 @@ final class Mc {
     private Mc() {}
 
     static String dimensionId(ServerLevel l) { return l.dimension().identifier().toString(); }
+
+    /**
+     * Contract environment (normal | nether | the_end | custom) from the level's dimension type, not its id: multi-world
+     * mods create extra levels ("multiworld:smp") that reuse the vanilla types. Mod-defined types fall back to the
+     * type's own sky and ceiling.
+     */
+    static String environment(ServerLevel l) {
+        String type = l.dimensionTypeRegistration().unwrapKey().map(k -> k.identifier().toString()).orElse("");
+        switch (type) {
+            case "minecraft:overworld": case "minecraft:overworld_caves": return "normal";
+            case "minecraft:the_nether": return "nether";
+            case "minecraft:the_end": return "the_end";
+            default:
+                DimensionType t = l.dimensionType();
+                if (t.skybox() == DimensionType.Skybox.OVERWORLD) return "normal";
+                if (t.skybox() == DimensionType.Skybox.END) return "the_end";
+                return t.hasCeiling() ? "nether" : "custom";
+        }
+    }
 
     static long millis() { return Util.getMillis(); }
 

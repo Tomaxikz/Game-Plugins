@@ -1,6 +1,6 @@
 # Items and assets
 
-Conventions (MessagePack, string keys, `bin` for binary, `snake_case`, omit = unsupported / `null` = known-empty, frames <= 4 MiB) come from `README.md`. This file defines the **encoded item record** used in every inventory/held-item response, the render modes, and the `assets.manifest` / `assets.get` operations.
+Conventions (MessagePack, string keys, `bin` for binary, `snake_case`, omit = unsupported / `null` = known-empty, frames <= 4 MiB) come from `README.md`. This file defines the **encoded item record** used in every inventory/held-item response, the render modes, the `assets.manifest` / `assets.get` operations, and what the raw pack files of the optional `pack.manifest` / `pack.get` operations contain (§11; wire shapes in `operations.md` §10a-10b).
 
 ## 1. Encoded item record
 
@@ -332,6 +332,8 @@ A single asset larger than 4 MiB is split across calls: the entry carries `chunk
 
 Bridges serve assets **only from files already present on that game server** (mod jars, the operator's own resource pack, the operator's `Assets.zip`, installed inventory resource images). A bridge must never bundle, embed, download, or redistribute Mojang, Hypixel Studios, Facepunch, Cfx.re or third-party mod/plugin art, and the panel extension does not ship such art either; the panel only caches what a bridge returned for that server. The `unavailable` mode exists so absent art is shown as absent, never replaced by invented or look-alike art.
 
+The same rule covers the raw files of `pack.*` (§11): a bridge serves only files that are already on the server, never files of the Minecraft server or client jar, never anything downloaded (a remote-only resource-pack URL is not fetched), and the panel keeps them only in its per-server cache.
+
 ## 10. Differences from the current panel (for the implementer)
 
 | Area | Today | Under this contract |
@@ -340,3 +342,35 @@ Bridges serve assets **only from files already present on that game server** (mo
 | Fingerprint | `player_manager_fingerprint` = SHA-256 (64 hex) over canonical **JSON** (sorted keys) of the NBT item (`data.rs::item_fingerprint`) | Bridge items use canonical **MessagePack** (section 3), same 64-hex length. The panel must treat the value as opaque and send back whatever the source that produced the item gave it; the two schemes never mix for one item. |
 | Icons | `GameIcon` tries a URL list per game (wiki, Prismarine, mcasset, Rust wiki, Hytale emoji category) | Bridge assets are tried first when the manifest lists the key; vanilla `minecraft:` keeps the existing URL list; Rust follows the cached-icon chain in `research/rust-item-images.md` (no per-view hotlinking). |
 | Armor/leather tint | `leatherColor(item.data)` | `tint[0]` of the record. |
+
+## 11. Raw pack files (`pack.manifest` / `pack.get`, optional)
+
+`assets.*` resolve one item at a time into a render-ready asset. The optional `pack.*` operations (`operations.md` §10a-10b, feature `pack`) instead hand the panel the **raw** block-state, model and texture files, so the panel's own block renderer (the 3D map) can draw modded and resource-pack blocks the way a client would. Minecraft Java only (Bukkit family and mod loaders; proxies do not offer them).
+
+### 11.1 The effective pack
+
+The effective pack is the set of client resources the server knows: what a client joining this server would load from server-side sources, merged the way the client merges them. One entry per path; when several sources have the same path, the higher one wins as a **whole file** (no JSON merging, like Minecraft's own pack stack for these file kinds).
+
+Sources, lowest priority first (the same stack `assets.*` use, §8):
+
+| # | Source | Platforms |
+|---|---|---|
+| 1 | Resources of the mods the loader has loaded, read from the mod files the loader already opened (the jar in `mods/`, a nested jar-in-jar, or a development folder). Never extracted to disk or copied into `.playermanager/cache/`. The game's own entry (`minecraft`) is skipped. | Fabric, NeoForge, Forge |
+| 2 | Pack folders and generated packs of plugins on disk: Nexo `plugins/Nexo/pack/`, Oraxen `plugins/Oraxen/pack/`, ItemsAdder `plugins/ItemsAdder/contents/*/resourcepack/` and its generated `plugins/ItemsAdder/output/` pack, and the other generators the bridge knows (CraftEngine, ModelEngine, ...). Mod-loader servers also scan these (e.g. Polymer). | all |
+| 3 | The `resource-pack` of `server.properties`, if it is a local file | all |
+| 4 | Operator paths from `.playermanager/config.json` `platform.asset_paths` | all |
+| 5 | The pack the server actually sends to clients, when a local zip with the same SHA-1 exists (Paper `getServerResourcePack`, `resource-pack-sha1`, packs sent by plugins) | Bukkit family |
+
+"Server pack over mods": anything a server-side pack provides replaces the mod file of the same path, as on a client that accepted the server pack.
+
+### 11.2 Rules
+
+- Only paths matching the `operations.md` §10a path rule are listed or served: `assets/<ns>/blockstates/**.json`, `assets/<ns>/models/**.json`, `assets/<ns>/textures/**.png` and `**.png.mcmeta`. Everything else (sounds, lang, fonts, shaders, atlases, `items/`) is never listed.
+- **Vanilla**: the bridge never serves files from the Minecraft server jar or client jar, and never downloads anything (§9). Server jars contain no client assets anyway. A `minecraft` namespace path appears only when one of the sources above ships its own file for it (an operator's pack or a mod replacing a vanilla texture); everything else in `minecraft:` the panel resolves itself.
+- A remote-only resource pack (an URL in `server.properties` without a local copy) is not part of the effective pack.
+- File `hash` = first 16 hex of SHA-256 over the file bytes; the listing `hash` covers the sorted `[path, hash]` list (`operations.md` §10a, with test vectors). The bridge caches hashes by file path + mtime + size and re-checks the source list at most once per second on `pack.manifest`.
+- `pack.get` returns the stored bytes unchanged. Files of the same path in lower sources are never visible.
+
+### 11.3 Caching (panel)
+
+The panel caches files by their `hash` in its per-server storage and fetches only paths whose `hash` it does not have; a changed listing `hash` means at least one file changed. Files are used only to render that server's blocks and are not shared between servers. Cache rules otherwise as §7.

@@ -35,13 +35,6 @@ final class McWorlds {
 
     static String dimension(ServerLevel l) { return Mc.dimensionId(l); }
 
-    static String environment(String dimension) {
-        if (dimension.equals("minecraft:overworld")) return "normal";
-        if (dimension.equals("minecraft:the_nether")) return "nether";
-        if (dimension.equals("minecraft:the_end")) return "the_end";
-        return "custom";
-    }
-
     String nameOf(String dimension) {
         if (dimension.equals("minecraft:overworld")) return levelName;
         return dimension;

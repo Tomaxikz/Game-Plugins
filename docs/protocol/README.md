@@ -5,8 +5,8 @@ This directory is the **source of truth** for what the Player Manager panel exte
 | File | Contents |
 |---|---|
 | `README.md` | Transport, file locations, framing, handshake, errors, conventions (this file) |
-| `operations.md` | Every operation: request args, response shape, errors, examples |
-| `items-and-assets.md` | Encoded item records, `assets.manifest` / `assets.get`, render modes, caching |
+| `operations.md` | Every operation: request args, response shape, errors, examples (including the optional 3D-map ops `map.volume`, `biomes.list`, `pack.manifest`, `pack.get`) |
+| `items-and-assets.md` | Encoded item records, `assets.manifest` / `assets.get`, render modes, caching, the effective pack behind `pack.*` (§11) |
 | `releases.md` | Bridge repository layout, release CI, release asset naming, `manifest.json` the panel installs from |
 | `games/minecraft.md` | Minecraft Java (Bukkit family, proxies, Fabric/NeoForge/Forge): ids, units, fields, actions |
 | `games/rust.md` | Rust (Oxide/uMod, Carbon) |
@@ -147,3 +147,13 @@ Bridges may add platform-specific keys under `"platform": { }`. The panel only e
 
 - `protocol` is an integer. Additive changes (new ops, new optional keys) do **not** bump it; removals or meaning changes do.
 - A bridge advertises exactly one `protocol`. The panel supports the current and previous protocol versions.
+- Optional ops: an op marked *optional* in `operations.md` may be left out of `capabilities.ops`; the panel then uses its own fallback (named in the op's section) and nothing else changes.
+
+### Additive revisions (protocol 1)
+
+| Date | Added | Optional | Fallback without it |
+|---|---|---|---|
+| 2026-10-19 | `map.volume` (feature `map.volume`): block states around the surface of loaded chunks for the 3D map (`operations.md` §6c, `games/minecraft.md` §6b) | yes | Region-file volume (saved terrain only) |
+| 2026-10-19 | `biomes.list` (feature `biomes`): live biome registry with climate and colour values (`operations.md` §6d) | yes | Built-in vanilla biome table |
+| 2026-10-19 | `pack.manifest`, `pack.get` (feature `pack`): raw block-state/model/texture files of the server's effective pack (`operations.md` §10a-10b, `items-and-assets.md` §11) | yes | Pack files the panel reads itself; no mod assets |
+| 2026-10-19 | `blocks.list` (feature `blocks`): block registry with map colours, shape/light flags and differing states for every block, mod blocks included (`operations.md` §6e, `games/minecraft.md` §6c) | yes | Built-in vanilla block colour table |
