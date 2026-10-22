@@ -36,6 +36,8 @@ final class Ctx {
     volatile BridgeConfig config = BridgeConfig.defaults();
     final ConcurrentHashMap<UUID, Long> joinedAt = new ConcurrentHashMap<UUID, Long>();
     final ConcurrentHashMap<UUID, String> brands = new ConcurrentHashMap<UUID, String>();
+    /** Last address each player connected from since start (the {@code banned_ips} group of players who are offline later). */
+    final dev.playermanager.bridge.util.IpBans.LastSeen lastIps = new dev.playermanager.bridge.util.IpBans.LastSeen();
     /** uuid -> {time (unix s), cause id} of the last death seen since the server started. */
     final ConcurrentHashMap<UUID, Object[]> lastDeaths = new ConcurrentHashMap<UUID, Object[]>();
 

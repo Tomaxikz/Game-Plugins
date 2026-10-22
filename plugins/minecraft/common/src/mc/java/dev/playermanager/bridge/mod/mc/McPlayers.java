@@ -6,6 +6,7 @@ import dev.playermanager.bridge.mod.RosterFiles;
 import dev.playermanager.bridge.proto.BridgeException;
 import dev.playermanager.bridge.spi.Deadline;
 import dev.playermanager.bridge.spi.PlayerProvider;
+import dev.playermanager.bridge.util.IpBans;
 import dev.playermanager.bridge.util.PlayerIds;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
@@ -75,7 +76,7 @@ final class McPlayers implements PlayerProvider {
                         r.joinedAt = j != null ? j.longValue() : System.currentTimeMillis();
                         r.brand = ctx.brands.get(r.id);
                         r.locale = lower(p.clientInformation().language());
-                        if (sensitive) r.ip = Mc.ip(p);
+                        r.ip = Mc.ip(p);
                         rows.add(r);
                     } catch (Throwable t) {
                         ctx.log.debug("players.list row skipped: " + t);
@@ -87,14 +88,15 @@ final class McPlayers implements PlayerProvider {
         return snap.thenApplyAsync(new Function<List<Row>, List<Map<String, Object>>>() {
             public List<Map<String, Object>> apply(List<Row> online) {
                 for (Row r : online) r.perms = ctx.perms.lookup(r.id);
-                return buildList(online, includeOffline);
+                return buildList(online, includeOffline, sensitive);
             }
         }, ctx.async);
     }
 
-    private List<Map<String, Object>> buildList(List<Row> online, boolean includeOffline) {
+    private List<Map<String, Object>> buildList(List<Row> online, boolean includeOffline, boolean sensitive) {
         ctx.roster.refreshNow();
         Map<String, Map<String, Object>> ops = ctx.roster.ops(), wl = ctx.roster.whitelist(), bans = ctx.roster.bans();
+        Set<String> bannedIps = IpBans.active(ctx.roster.bannedIps(), System.currentTimeMillis());
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         Set<String> seen = new LinkedHashSet<String>();
         for (Row r : online) {
@@ -111,6 +113,7 @@ final class McPlayers implements PlayerProvider {
             if (r.op || ops.containsKey(id)) groups.add("operators");
             if (wl.containsKey(id)) groups.add("whitelisted");
             if (bans.containsKey(id)) groups.add("banned");
+            if (r.ip != null && bannedIps.contains(r.ip)) groups.add("banned_ips");
             if (r.sleeping) groups.add("sleeping");
             if (r.perms != null) for (String g : r.perms.groups) if (!groups.contains(g)) groups.add(g);
             m.put("groups", groups);
@@ -121,13 +124,13 @@ final class McPlayers implements PlayerProvider {
             if (r.brand != null) client.put("brand", r.brand);
             if (r.locale != null) client.put("locale", r.locale);
             if (!client.isEmpty()) m.put("client", client);
-            if (r.ip != null) m.put("ip", r.ip);
+            if (sensitive && r.ip != null) m.put("ip", r.ip);
             Map<String, Object> g = new LinkedHashMap<String, Object>();
             g.put("offline_uuid", PlayerIds.isOfflineUuid(r.id, r.name));
             m.put("game", g);
             out.add(m);
         }
-        if (includeOffline) out.addAll(offlineRows(seen, ops, wl, bans));
+        if (includeOffline) out.addAll(offlineRows(seen, ops, wl, bans, bannedIps));
         return out;
     }
 
@@ -139,7 +142,7 @@ final class McPlayers implements PlayerProvider {
     }
 
     private List<Map<String, Object>> offlineRows(Set<String> seen, Map<String, Map<String, Object>> ops, Map<String, Map<String, Object>> wl,
-                                                  Map<String, Map<String, Object>> bans) {
+                                                  Map<String, Map<String, Object>> bans, Set<String> bannedIps) {
         Map<String, String> names = new LinkedHashMap<String, String>(ctx.roster.names());
         Map<String, Long> lastSeen = new LinkedHashMap<String, Long>();
         for (Path dir : playerdataDirs()) {
@@ -174,6 +177,8 @@ final class McPlayers implements PlayerProvider {
             if (ops.containsKey(id)) groups.add("operators");
             if (wl.containsKey(id)) groups.add("whitelisted");
             if (bans.containsKey(id)) groups.add("banned");
+            String last = ctx.lastIps.get(id);
+            if (last != null && bannedIps.contains(last)) groups.add("banned_ips");
             m.put("groups", groups);
             m.put("admin", ops.containsKey(id));
             Long ls = lastSeen.get(id);

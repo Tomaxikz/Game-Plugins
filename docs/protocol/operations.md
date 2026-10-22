@@ -19,10 +19,16 @@ Notation: `req` = required, `opt` = optional (omit the key to use the default). 
 | `positions.keyframe` | request | 2 s | T4 |
 | `events.subscribe` | subscription | 2 s (to ack) | T5 |
 | `map.chunks` | request | 5 s | T1, T3, T7 |
+| `map.volume` (optional) | request | 5 s | T1, T7 |
+| `biomes.list` (optional) | request | 2 s | T9 |
+| `blocks.list` (optional) | request | 2 s per page | T10 |
 | `chunks.subscribe` | subscription | 2 s (to ack) | T7 |
 | `positions.unsubscribe`, `events.unsubscribe`, `chunks.unsubscribe` | request | 2 s | none |
 | `action.run` | request | 5 s (10 s for `save`, `reload`, `wipe_data`) | T1, T6 |
 | `assets.manifest`, `assets.get` | request | see `items-and-assets.md` | see `items-and-assets.md` |
+| `pack.manifest`, `pack.get` (optional) | request | 10 s | T8 |
+
+Ops marked *optional* are additive (protocol stays 1, README §8). A bridge that does not implement one leaves it out of `capabilities.ops`; the panel then uses its own fallback, named in the op's section.
 
 ### Thread-safety notes (referenced above)
 
@@ -35,7 +41,10 @@ Notation: `req` = required, `opt` = optional (omit the key to use the default). 
 | T5 | Event listeners run on the game thread and only enqueue a small immutable record to the writer; they must never block on the socket. Queue cap per subscription is 1024 frames; on overflow drop oldest and emit one `{"type":"overflow","dropped":N}` event. |
 | T6 | Actions run on the game thread (or the owning region thread). Never run blocking I/O (disk, network) there; `save`/`reload` may be dispatched via the platform's command dispatcher. |
 
-- **T7 (chunk surfaces):** take an immutable snapshot of each chunk on the owning thread (Bukkit `ChunkSnapshot`, Folia region thread, loader `server.execute`), compute surfaces off-thread. Never load or generate a chunk for the panel: only chunks the game already has loaded are read. Budget ≤ 2 ms game-thread time per tick for snapshots; spread larger requests over several ticks.
+- **T7 (chunk surfaces):** take an immutable snapshot of each chunk on the owning thread (Bukkit `ChunkSnapshot`, Folia region thread, loader `server.execute`), compute surfaces off-thread. Never load or generate a chunk for the panel: only chunks the game already has loaded are read. Budget ≤ 2 ms game-thread time per tick for snapshots; spread larger requests over several ticks. `map.volume` uses the same snapshots, with block **states** included.
+- **T8 (pack files):** `pack.*` only read files (resource-pack folders and zips, mod files) on bridge worker threads, never on the game thread. Hashing runs in the background and is cached by file path + mtime + size; while the first index is built, `pack.manifest` answers `busy`.
+- **T9 (frozen registries):** the biome registry is fixed when the server starts (datapacks and mods included; `/reload` does not change worldgen registries). The bridge may read it once, on the game thread at startup or on a worker thread after the server has started, and cache the result for the server's lifetime. Never read it before the server finished loading its registries.
+- **T10 (block registry):** the block registry and every block state's properties are fixed once the server has started (mods register blocks during startup; datapacks and `/reload` cannot add blocks). Build the `blocks.list` answer once, in the background on a bridge worker thread after the server has started, and cache it for the server's lifetime. Read only the immutable values of each `BlockState` and evaluate level-dependent getters against an empty block getter at position 0, 0, 0 (`games/minecraft.md` §6c), never against a live level or chunk. Nothing runs on the game thread. Until the cache is ready, `blocks.list` answers `busy`.
 
 ## 1. `hello`
 
@@ -94,6 +103,12 @@ Must be the first request on every connection. In TCP fallback mode a missing/wr
 | `proxy` | Bridge is on a proxy; `players.list[].server` is populated, world data absent |
 | `map.chunks` | `map.chunks` works (surface of loaded chunks on request) |
 | `chunks.stream` | `chunks.subscribe` works (live surface updates) |
+| `map.volume` | `map.volume` works (block states around the surface of loaded chunks, §6c) |
+| `biomes` | `biomes.list` works (§6d) |
+| `blocks` | `blocks.list` works (§6e) |
+| `pack` | `pack.manifest` and `pack.get` work (§10a, §10b) |
+
+A feature is advertised exactly when its ops are in `capabilities.ops` (`pack` needs both `pack.*` ops). The panel decides by `capabilities.ops`; the feature flags are informational.
 
 ```json
 {
@@ -374,6 +389,184 @@ Surfaces of **already loaded** chunks, so the panel's map can draw terrain that 
 } }
 ```
 
+## 6c. `map.volume` (optional)
+
+Every block, with its full block state, in a band around the surface of **already loaded** chunks, so the panel's 3D map can draw real blocks (stairs, slabs, fences, plants) that are newer than the saved region files. **Optional** (feature `map.volume`). Without it, the panel builds the same volume from region files (`src/map/terrain/volume.rs`); the bridge's output must equal that layer for the same blocks, so live and saved chunks render identically.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | Game-doc world id, as in `map.chunks` |
+| `dimension` | string | opt | As in `map.chunks` (Minecraft: required when the world folder holds several dimensions) |
+| `chunks` | `[[cx, cz], …]` | req | Max **64** per request; duplicates are answered once |
+| `y_min` | int | opt | Lowest level the panel wants (inclusive). Narrows the band, never widens it |
+| `y_max` | int | opt | Highest level the panel wants (inclusive). `y_min > y_max` → `invalid_args` |
+
+**Response `data`**: `{ "chunks": [ ChunkVolume ], "missing": [[cx, cz], …] }`. `missing` lists requested chunks that are not loaded (the panel reads them from region files). Each requested chunk appears exactly once, in `chunks` or in `missing`, across all pages of one request.
+
+**ChunkVolume**
+
+| Key | Type | Notes |
+|---|---|---|
+| `cx`, `cz` | int | Chunk coordinates (block x = `cx * 16 + x`) |
+| `y0` | int | Y of the lowest level in `blocks` |
+| `height` | int | Number of levels, 0–160. `0` = the chunk has no block that is not air (then `palette` is `[]` and `blocks` is empty) |
+| `palette` | string[] | Block states used by `blocks`: `namespace:id`, or `namespace:id[key=value,…]` with **all** properties, sorted by key (bytewise), e.g. `minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]`. Each state appears once. Never contains an air id (below). Max 65535 entries |
+| `blocks` | bin, `height` × 256 × u16 LE | Index into `palette`, `index = ((y - y0) * 16 + z) * 16 + x` (local `x`, `z` 0–15). `65535` (0xFFFF) = air |
+| `biome_ids` | string[] | Biome ids used by `biome` (Minecraft: `minecraft:plains`) |
+| `biome` | bin, 256 × u16 LE | Per column, `index = z * 16 + x`: index into `biome_ids` of the biome at the surface block, the same biome `map.chunks` reports in `biome` (an all-air column: the biome at the world's minimum Y) |
+
+**Band rules** (identical to the panel's region-file volume layer):
+
+1. *Surface* of a column = the `map.chunks` surface block (`games/minecraft.md` §6a, its six-id air list). `lowest` = the lowest surface Y over the columns that have a surface block.
+2. *Air* in `blocks` = exactly `minecraft:air`, `minecraft:cave_air`, `minecraft:void_air` (index 65535). `minecraft:light`, `minecraft:barrier` and `minecraft:structure_void` are ordinary palette entries here; the panel decides whether to draw them. `highest` = the highest Y of any block in the chunk that is not air in this sense.
+3. `y0 = max(lowest - 4, world minimum Y, highest - 159)` and `height = highest - y0 + 1`: from 4 levels below the lowest surface up to the highest block, at most 160 levels, keeping the **top** ones.
+4. With `y_min` / `y_max`: `y0 = max(y0, y_min)`, the top level is `min(highest, y_max)`; if that leaves no level, `height` is 0.
+5. A chunk in which no column has a surface block has `height: 0`.
+
+**Limits**: at most 64 chunks per request. A full response can exceed one frame (64 × 160 levels × 512 B = 5 MiB), so the bridge returns as many **whole** chunks as fit in `limits.max_frame`, in request order, and adds `more: true` and `cursor` (opaque string). The panel repeats the same args plus `cursor` to get the rest; the last page has no `more` (or `more: false`). Same rule as `map.chunks`.
+
+**Threading**: T7. Snapshot each loaded chunk on its owning thread (block states and biomes), within the 2 ms per tick budget shared with `map.chunks`; build the arrays off-thread. Never load or generate a chunk; a chunk that is not loaded is `missing`.
+
+Errors: `invalid_args` (missing `world`, `chunks` not an array of `[cx, cz]` int pairs, more than 64 chunks, non-integer `y_min`/`y_max`, `y_min > y_max`), `not_found` (unknown world/dimension), `unsupported`, `timeout`.
+
+```json
+{ "id": 9, "op": "map.volume", "args": { "world": "world", "dimension": "minecraft:overworld", "chunks": [[0, -1], [1, -1]] } }
+{ "id": 9, "ok": true, "data": {
+  "chunks": [{ "cx": 0, "cz": -1, "y0": 59, "height": 14,
+    "palette": ["minecraft:grass_block[snowy=false]", "minecraft:dirt", "minecraft:short_grass",
+                "minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"],
+    "blocks": "<bin 7168 B>",
+    "biome_ids": ["minecraft:plains"], "biome": "<bin 512 B>" }],
+  "missing": [[1, -1]]
+} }
+```
+
+## 6d. `biomes.list` (optional)
+
+The server's live biome registry with the values the panel needs to tint grass, foliage and water exactly like the game. **Optional** (feature `biomes`). Without it, the panel uses its built-in vanilla biome table (`src/map/biomes/vanilla.rs`), which is wrong for datapack and mod biomes.
+
+**Args**: none (unknown args are ignored).
+
+**Response `data`**: `{ "biomes": [ Biome ] }`: every biome in the registry (vanilla, datapack and mod biomes), sorted by `id` (bytewise), each id once.
+
+| Key | Type | Notes |
+|---|---|---|
+| `id` | string | Namespaced biome id, the same ids `map.chunks` / `map.volume` report |
+| `temperature` | number | Base temperature from the biome's climate settings (not adjusted for height or position) |
+| `downfall` | number | Downfall from the climate settings |
+| `grass_color` | int \| null | Grass colour override, 0xRRGGBB; `null` = no override (the colour comes from the grass colormap) |
+| `foliage_color` | int \| null | Foliage colour override; `null` = from the foliage colormap |
+| `dry_foliage_color` | int \| null | Dry foliage colour override (Minecraft 1.21.5+); `null` when there is none or the game version has no such value |
+| `water_color` | int | Water colour, 0xRRGGBB; always present |
+| `grass_color_modifier` | string | `none`, `dark_forest` or `swamp` |
+
+Values are the registry's own values. The bridge does not compute colormap colours, apply modifiers or round anything. Colours are 24-bit (an alpha byte, where a version stores one, is dropped).
+
+**Threading**: T9 (frozen registry; read once, cache for the server's lifetime). The panel may cache the list until the bridge restarts (`bridge.json.started_at` changes).
+
+Errors: `unsupported`, `timeout`.
+
+```json
+{ "id": 10, "op": "biomes.list", "args": {} }
+{ "id": 10, "ok": true, "data": { "biomes": [
+  { "id": "minecraft:plains", "temperature": 0.8, "downfall": 0.4, "grass_color": null, "foliage_color": null,
+    "dry_foliage_color": null, "water_color": 4159204, "grass_color_modifier": "none" },
+  { "id": "minecraft:swamp", "temperature": 0.8, "downfall": 0.9, "grass_color": null, "foliage_color": 6975545,
+    "dry_foliage_color": 8082228, "water_color": 6388580, "grass_color_modifier": "swamp" }
+] } }
+```
+
+## 6e. `blocks.list` (optional)
+
+The server's live block registry with the values the panel needs to colour and classify every block on the 2D map, including mod blocks: the map colour vanilla maps use, a few shape and light flags, and the states that differ from the block's default. **Optional** (feature `blocks`). Without it, the panel uses its built-in vanilla colour table (`src/map/colors/`), which has no mod blocks and guesses for blocks it does not know.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `since_hash` | string | opt | `hash` the panel already has. When it equals the current `hash` (and `cursor` is absent), the answer is `{ "hash": …, "unchanged": true }` with no `blocks` |
+| `cursor` | string | opt | `next` from the previous page. With `cursor`, `since_hash` is ignored |
+
+Unknown args are ignored.
+
+**Response `data`**
+
+| Key | Type | Notes |
+|---|---|---|
+| `hash` | string | Identifies the whole answer (all pages). First 16 lowercase hex of SHA-256 over canonical MessagePack (`items-and-assets.md` §2 rules) of the complete `blocks` array, all pages joined in order, each entry exactly as sent. Same value on every page; it is stable across restarts and changes only when a block, a state or a value below changes. The panel treats it as opaque |
+| `unchanged` | bool | opt; `true` when `since_hash` matched. Then `blocks` and `next` are absent |
+| `blocks` | `[Block]` | Every block in the registry (vanilla and mod blocks, air included), sorted by `id` (bytewise), each id once across all pages |
+| `next` | string \| absent | Opaque cursor; omitted on the last page |
+
+**Block**
+
+| Key | Type | Notes |
+|---|---|---|
+| `id` | string | Namespaced block id, the same ids `map.chunks` / `map.volume` report, e.g. `create:andesite_casing` |
+| `map_color` | int \| null | Map colour of the default state, 0xRRGGBB: the base colour of its map colour entry (vanilla `MapColor#col`), without the per-pixel brightness shading maps apply. `null` = the block has no map colour (`MapColor.NONE`: vanilla maps leave it transparent) |
+| `flags` | int | Bitmask for the default state, table below |
+| `light` | int | Light emission of the default state, 0–15 |
+| `states` | `[State]` | opt; the states (other than the default) whose `map_color` or `flags` differ from the block's default. Sorted by `properties` (bytewise). Omitted when no state differs |
+
+**State**
+
+| Key | Type | Notes |
+|---|---|---|
+| `properties` | string | All properties of the state as `key=value`, keys sorted bytewise, joined with `,`, e.g. `axis=x,waterlogged=false`. Values as the game names them. `""` for a block without properties. With the block `id` this is the `map.volume` palette string: `id[properties]` |
+| `map_color` | int \| null | opt; present only when it differs from the block's `map_color` (`null` = this state has no map colour). Absent = same as the block |
+| `flags` | int | Bitmask for this state (always present, even when only `map_color` differs) |
+
+**Flags** (definitions per game in `games/minecraft.md` §6c):
+
+| Bit | Value | Name | Meaning |
+|---|---|---|---|
+| 0 | 1 | `air` | The state is air |
+| 1 | 2 | `liquid` | The state is a liquid block (water, lava, mod fluids); waterlogged blocks are not |
+| 2 | 4 | `can_occlude` | The state can hide the faces of its neighbours |
+| 3 | 8 | `full_cube` | Its collision shape is the full block |
+| 4 | 16 | `no_collision` | Its collision shape is empty |
+| 5 | 32 | `replaceable` | Placing a block replaces it (short grass, air, water) |
+| 6 | 64 | `emits_light` | Light emission > 0 |
+| 7 | 128 | `render_invisible` | The block model is not rendered (air, liquids, light, barrier, structure void) |
+| 8 | 256 | `block_entity` | It has a block entity, or the game draws it with a block entity renderer |
+| 9 | 512 | `waterloggable` | The block has a `waterlogged` property |
+
+Other bits are 0. The panel ignores bits it does not know, so later revisions may add bits.
+
+Values are the registry's own values. The bridge does not invent colours, map ids to vanilla or skip blocks it does not understand. Colours are 24-bit (an alpha byte, where a version stores one, is dropped). Per-state light levels are not sent: a state's `emits_light` flag says whether it gives light, `light` is the default state's level.
+
+**Paging**: the bridge fills each page with whole `Block` entries in `id` order until the next one would push the response past `limits.max_frame`, and adds `next`. The panel repeats the call with `cursor` (no `since_hash` needed) until a page has no `next`. If a page's `hash` differs from the first page's, the registry changed (the server restarted with other mods): the panel starts again without `cursor`. A single entry that does not fit in a frame on its own (tens of thousands of differing states) is sent without `states` and the bridge logs it once; the panel then uses the default values for every state of that block. A vanilla server fits in one page.
+
+**Caching**: the panel keeps the last full answer per server and sends its `hash` as `since_hash`; a match costs one small frame. The bridge builds its answer once and keeps it (T10).
+
+**Timeout**: 2 s per page. Building the answer can take longer than that on servers with many mods, so it runs in the background from server start; until it is ready the bridge answers `busy`. The panel uses its built-in table meanwhile and retries after about 1 s.
+
+**Threading**: T10.
+
+Errors: `busy` (answer still being built; retry after about 1 s), `invalid_args` (`since_hash` or `cursor` not a string, a `cursor` this bridge did not issue or no longer accepts: start again without it), `unsupported`, `timeout`.
+
+Test vector: for the three `blocks` entries in the example below, `hash` is `efeed82267412635` (canonical MessagePack drops the `null` `map_color` of `minecraft:air`, per the §2 rules). The single entry `[{ "id": "minecraft:air", "map_color": null, "flags": 177, "light": 0 }]` encodes as `91 83 a5 66 6c 61 67 73 cc b1 a2 69 64 ad 6d 69 6e 65 63 72 61 66 74 3a 61 69 72 a5 6c 69 67 68 74 00` and gives `4fa84a813b94a02a`. The example values are illustrative; the vectors are over these literal lists.
+
+```json
+{ "id": 13, "op": "blocks.list", "args": {} }
+{ "id": 13, "ok": true, "data": {
+  "hash": "efeed82267412635",
+  "blocks": [
+    { "id": "minecraft:air", "map_color": null, "flags": 177, "light": 0 },
+    { "id": "minecraft:furnace", "map_color": 7368816, "flags": 268, "light": 0, "states": [
+      { "properties": "facing=east,lit=true", "flags": 332 },
+      { "properties": "facing=north,lit=true", "flags": 332 },
+      { "properties": "facing=south,lit=true", "flags": 332 },
+      { "properties": "facing=west,lit=true", "flags": 332 } ] },
+    { "id": "minecraft:stone", "map_color": 7368816, "flags": 12, "light": 0 }
+  ] } }
+
+{ "id": 14, "op": "blocks.list", "args": { "since_hash": "efeed82267412635" } }
+{ "id": 14, "ok": true, "data": { "hash": "efeed82267412635", "unchanged": true } }
+```
+
 ## 7. Subscriptions
 
 Common: the response to a `*.subscribe` is `{"id":N,"ok":true,"data":{"sub":S}}`; frames then arrive as `{"sub":S,"seq":n,"data":{...}}` with `seq` starting at 0 and +1 per frame. A connection may hold at most one positions and one events subscription (a second → `busy`). **Keep-alive (defined here, once):** when no frame has been sent on a subscription for 60 s, the bridge sends the `ping` frame `{"sub":S,"seq":n,"data":{"type":"ping"}}` on it, on both positions and events subscriptions. It consumes a `seq`, has no other keys, is never listed in `types` (it is always sent) and resets the 120 s idle timer. Any other frame also resets the 60 s timer, so a busy subscription needs no pings. Panels ignore `ping` frames apart from the `seq` check. Unsubscribing: `positions.unsubscribe` / `events.unsubscribe` with `{sub}` → `{}`; unknown `sub` → `not_found`. Closing the connection drops all subscriptions.
@@ -564,6 +757,71 @@ Errors for `action.run`: `unsupported`, `invalid_args`, `not_found` (player/worl
 
 Fully specified in `items-and-assets.md` (manifest format, chunked `assets.get`, render modes, caching). Nothing else is defined here.
 
+## 10a. `pack.manifest` (optional)
+
+Lists the raw resource-pack files (block states, models, textures) of the **effective pack** this server knows: the files a client joining this server would load from server-side sources, one entry per path, after precedence. What goes into the effective pack, the precedence and the licensing rule are defined in `items-and-assets.md` §11; this section defines only the wire shape. **Optional** (feature `pack`, together with `pack.get`). Without it, the panel reads pack files it can reach itself (for example a local server resource pack through Wings) and has no mod assets.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `cursor` | string | opt | `next` from the previous page |
+
+**Response `data`**
+
+| Key | Type | Notes |
+|---|---|---|
+| `hash` | string | First 16 hex of SHA-256 over canonical MessagePack (`items-and-assets.md` §2 rules) of the full sorted `[[path, hash], …]` list. Same value on every page of one listing; it changes whenever any listed file changes |
+| `files` | `[{path, hash, size}]` | `path` as in the path rule below; `hash` = first 16 lowercase hex of SHA-256 over the file bytes; `size` = file size in bytes (int). Sorted by `path` bytewise, each path once |
+| `next` | string \| absent | Opaque cursor; omitted (or `null`) on the last page |
+
+Pages stay within `limits.max_frame`; the bridge picks the page size. An empty effective pack is `{ "hash": "9e076ceaf246b600", "files": [] }`.
+
+**Path rule** (the only paths `pack.*` ever list or serve): `assets/<namespace>/<kind>/<path>` where `<namespace>` matches `[a-z0-9_.-]+`, `<kind>` is `blockstates`, `models` or `textures`, `<path>` is one or more `/`-separated non-empty segments of `[a-z0-9_.-]`, no `.` or `..` segment, total length ≤ 512 bytes, and the file ends in `.json` (`blockstates`, `models`) or `.png` / `.png.mcmeta` (`textures`). Files that do not match (uppercase names, sounds, lang, fonts, shaders, atlases, `items/`) are not listed.
+
+Test vectors: file bytes `01 02 03` → file `hash` `039058c6f2c0cb49`. Listing `[["assets/examplemod/models/block/ruby_block.json", "0123456789abcdef"], ["assets/examplemod/textures/item/ruby.png", "039058c6f2c0cb49"]]` → `hash` `d664ed1c29d33d64`. Empty listing `[]` → `9e076ceaf246b600`.
+
+**Threading**: T8. Errors: `busy` (the index is being built for the first time or after a pack change; retry after about 1 s), `invalid_args` (bad `cursor`), `unsupported`, `timeout`.
+
+```json
+{ "id": 11, "op": "pack.manifest", "args": {} }
+{ "id": 11, "ok": true, "data": {
+  "hash": "d664ed1c29d33d64",
+  "files": [
+    { "path": "assets/examplemod/models/block/ruby_block.json", "hash": "0123456789abcdef", "size": 412 },
+    { "path": "assets/examplemod/textures/item/ruby.png", "hash": "039058c6f2c0cb49", "size": 3 } ] } }
+```
+
+## 10b. `pack.get` (optional)
+
+Returns the bytes of effective-pack files listed by `pack.manifest`.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `paths` | string[] | req | 1–64 paths, each matching the §10a path rule. More than 64, an empty list or any path that breaks the rule → `invalid_args` (nothing is served) |
+
+**Response `data`**
+
+| Key | Type | Notes |
+|---|---|---|
+| `files` | `[{path, data}]` | Request order. `data` = the file's bytes exactly as stored (bin; PNGs are not re-encoded, JSON is not re-formatted), so SHA-256 of `data` matches the manifest `hash` of the same pack revision |
+| `missing` | string[] | Requested paths that are not in the effective pack (or are excluded by the licensing rule, `items-and-assets.md` §9) |
+| `deferred` | string[] | opt; paths that exist but did not fit in this frame. Request them again |
+| `too_large` | string[] | opt; paths whose single file does not fit in one frame (larger than 3 MiB). The panel treats them as unavailable |
+
+Every requested path (duplicates counted once) appears in exactly one of `files`, `missing`, `deferred`, `too_large`. The bridge fills `files` with whole files in request order until the next one would push the response past `limits.max_frame`; it always serves at least the first file that fits on its own.
+
+**Threading**: T8. Errors: `invalid_args`, `busy` (as for `pack.manifest`), `unsupported`, `timeout`.
+
+```json
+{ "id": 12, "op": "pack.get", "args": { "paths": ["assets/examplemod/textures/item/ruby.png", "assets/examplemod/models/item/nope.json"] } }
+{ "id": 12, "ok": true, "data": {
+  "files": [ { "path": "assets/examplemod/textures/item/ruby.png", "data": "<bin 3 B>" } ],
+  "missing": ["assets/examplemod/models/item/nope.json"] } }
+```
+
 ## 11. Mapping to current panel types
 
 | Panel type | Source | Mapping |
@@ -574,4 +832,6 @@ Fully specified in `items-and-assets.md` (manifest format, chunked `assets.get`,
 | `PlayerData` (`source,warning,inventory,stats,achievements`) | `player.get` + `player.inventory` | `source`=`"bridge"`; `warning`=`""`; `inventory`=`player.inventory.containers` converted to panel items (§5); `stats`=`player.get` common section (HUD reads `health`, `max_health`, `food`, `saturation`, `experience`, `dimension`, `game_mode`; the panel adapter maps `experience` to its `experience_level/progress/total` keys and `game_mode` to `gamemode`) merged with `game` section (attributes, abilities, effects as defined by the game doc); `achievements`=`game.advancements`/equivalent per game doc. `captured_at`=receipt time. |
 | `PlayerPosition` / `Positions` | `positions.subscribe` frames | See §7.1; `Positions.live`=`true`, `observed_at`=`captured_at`=receipt time, `warnings`=`[]`. |
 | `ChatLine` / `ChatResponse` | `events.subscribe` (`chat`,`join`,`leave`,`death`,`advancement`) | See §7.2 table; `live_available`=`true` while subscribed. |
+| 3D map volume / tints / block art | `map.volume`, `biomes.list`, `pack.manifest` + `pack.get` (all optional) | `map.volume` chunks replace the region-file volume chunks of the same `cx`/`cz` (same JSON shape to the frontend, bins base64-encoded); `biomes.list` replaces the built-in biome table; `pack.*` files feed the block model/texture loader. Each falls back to the panel's own file decoding when the op is absent. |
+| 2D map block colours / block classes | `blocks.list` (optional) | Per-server table keyed by block id (and `properties` for listed states): `map_color` replaces the built-in colour of that id (`null` = draw nothing, look below), `flags` classify air, liquids, plants and light sources for the surface and shading rules. Ids missing from the answer, and servers without the op, use the built-in table. |
 | `Game` enum | `hello.game` | `minecraft_java`,`rust`,`hytale`,`fivem` map directly (`minecraft_bedrock`/`auto` are never reported by a bridge). |

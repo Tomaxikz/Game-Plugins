@@ -1,5 +1,6 @@
 package dev.playermanager.bridge.bukkit;
 
+import dev.playermanager.bridge.item.ItemRecords;
 import dev.playermanager.bridge.item.RawItem;
 import dev.playermanager.bridge.nbt.Nbt;
 import dev.playermanager.bridge.nbt.Snbt;
@@ -13,8 +14,11 @@ import java.util.Map;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Material;
+import org.bukkit.block.BlockState;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.LeatherArmorMeta;
@@ -67,6 +71,11 @@ final class ItemConverter {
 
     /** Must run on the server thread (after plugin load). Chooses the richest working strategy. */
     void probe() {
+        if (Boolean.getBoolean("pm.items.meta")) {      // test aid: behave like Spigot without NBT access
+            mode = Mode.META;
+            log.info("item encoding: ItemMeta only (bukkit_meta, forced by -Dpm.items.meta=true)");
+            return;
+        }
         try {
             ItemStack stone = new ItemStack(Material.STONE, 1);
             byte[] b = paperBytes(stone);
@@ -140,7 +149,12 @@ final class ItemConverter {
         return sn == null ? null : sn.toRaw();
     }
 
-    private RawItem.Meta readMeta(ItemStack s) {
+    /** {@code org.bukkit.inventory.meta.BundleMeta} (1.17+) is newer than the compile baseline. */
+    private static final Class<?> BUNDLE_META = Reflect.cls("org.bukkit.inventory.meta.BundleMeta");
+
+    private RawItem.Meta readMeta(ItemStack s) { return readMeta(s, 0); }
+
+    private RawItem.Meta readMeta(ItemStack s, int depth) {
         RawItem.Meta m = new RawItem.Meta();
         try {
             ItemMeta im = s.getItemMeta();
@@ -166,10 +180,40 @@ final class ItemConverter {
             else if (im instanceof PotionMeta && ((PotionMeta) im).hasColor()) c = ((PotionMeta) im).getColor();
             else if (im instanceof MapMeta && ((MapMeta) im).hasColor()) c = ((MapMeta) im).getColor();
             if (c != null && !(im instanceof LeatherArmorMeta && c.equals(Bukkit.getItemFactory().getDefaultLeatherColor()))) m.tint.add(Long.valueOf(c.asRGB()));
+            if (depth < ItemRecords.MAX_DEPTH) nestedContents(im, m, depth);
         } catch (Throwable t) {
             // keep what we have
         }
         return m;
+    }
+
+    /**
+     * Items inside a container block item (shulker box, chest, barrel ...: {@code BlockStateMeta} with an inventory holder state, slot =
+     * inventory slot) or a bundle ({@code BundleMeta#getItems}, slot = position). Meta mode only, where no NBT is available; children are
+     * read the same way, so a bundle in a shulker box nests, up to the record depth limit.
+     */
+    @SuppressWarnings("unchecked")
+    private void nestedContents(ItemMeta im, RawItem.Meta m, int depth) {
+        ItemStack[] stacks = null;
+        if (im instanceof BlockStateMeta) {
+            BlockStateMeta bm = (BlockStateMeta) im;
+            BlockState state = bm.hasBlockState() ? bm.getBlockState() : null;
+            if (state instanceof InventoryHolder) {
+                stacks = ((InventoryHolder) state).getInventory().getContents();
+            }
+        } else if (BUNDLE_META != null && BUNDLE_META.isInstance(im)) {
+            Object items = Reflect.call(im, "getItems");
+            if (items instanceof List) {
+                stacks = ((List<ItemStack>) items).toArray(new ItemStack[0]);
+            }
+        }
+        if (stacks == null) return;
+        for (int i = 0; i < stacks.length; i++) {
+            ItemStack c = stacks[i];
+            if (isAir(c)) continue;
+            m.contents.add(new RawItem(idOf(c.getType()), c.getAmount(), null, null, readMeta(c, depth + 1), Math.max(0, c.getType().getMaxDurability())));
+            m.contentSlots.add(Integer.valueOf(i));
+        }
     }
 
     // ------------------------------------------------------------------ record -> ItemStack

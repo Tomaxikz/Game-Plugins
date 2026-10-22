@@ -7,6 +7,7 @@ import dev.playermanager.bridge.net.Connection;
 import dev.playermanager.bridge.net.TcpTransport;
 import dev.playermanager.bridge.net.Transport;
 import dev.playermanager.bridge.net.UnixTransport;
+import dev.playermanager.bridge.pack.PackService;
 import dev.playermanager.bridge.proto.Capabilities;
 import dev.playermanager.bridge.proto.Ops;
 import dev.playermanager.bridge.spi.BridgeLog;
@@ -15,6 +16,8 @@ import dev.playermanager.bridge.sub.ChunkService;
 import dev.playermanager.bridge.sub.CommandRedactor;
 import dev.playermanager.bridge.sub.EventBus;
 import dev.playermanager.bridge.sub.PositionService;
+import dev.playermanager.bridge.world.BiomeCatalog;
+import dev.playermanager.bridge.world.BlockCatalog;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -61,7 +64,10 @@ public final class BridgeCore {
     private EventBus events;
     private PositionService positions;
     private AssetService assets;
+    private PackService pack;
     private ChunkService chunks;
+    private BiomeCatalog biomes;
+    private BlockCatalog blocks;
     private Ops ops;
     private final dev.playermanager.bridge.util.ReadCache readCache = new dev.playermanager.bridge.util.ReadCache(Long.getLong("pm.readcache.ms", 500L));
     private final Set<Connection> connections = java.util.Collections.newSetFromMap(new ConcurrentHashMap<Connection, Boolean>());
@@ -82,7 +88,10 @@ public final class BridgeCore {
     public EventBus events() { return events; }
     public PositionService positions() { return positions; }
     public AssetService assets() { return assets; }
+    public PackService pack() { return pack; }
     public ChunkService chunks() { return chunks; }
+    public BiomeCatalog biomes() { return biomes; }
+    public BlockCatalog blocks() { return blocks; }
     public Ops ops() { return ops; }
     public dev.playermanager.bridge.util.ReadCache readCache() { return readCache; }
 
@@ -121,6 +130,15 @@ public final class BridgeCore {
                 if (platform.positions() != null) chunks.sweepWith(platform.positions());
             }
             if (platform.assets() != null) assets = new AssetService(platform.assets(), files.cache, log, assetPool);
+            if (platform.pack() != null) pack = new PackService(platform.pack(), log);
+            if (platform.biomes() != null && capabilities.hasOp("biomes.list")) {
+                biomes = new BiomeCatalog(platform.biomes(), log);
+                biomes.start(pool);
+            }
+            if (platform.blocks() != null && capabilities.hasOp("blocks.list")) {
+                blocks = new BlockCatalog(platform.blocks(), log);
+                blocks.start(pool);
+            }
             ops = new Ops(this);
             if (!bind()) { stop(); return false; }
             running = true;
@@ -223,6 +241,7 @@ public final class BridgeCore {
         if (pool != null) pool.shutdownNow();
         if (timer != null) timer.shutdownNow();
         if (assetPool != null) assetPool.shutdownNow();
+        if (pack != null) pack.close();
         files.deleteQuietly(files.socket);
         files.deleteQuietly(files.bridgeJson);
     }

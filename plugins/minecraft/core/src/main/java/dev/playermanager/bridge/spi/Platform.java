@@ -17,6 +17,9 @@ public interface Platform {
     default NearbyProvider nearby() { return null; }          // player.nearby
     default PositionSource positions() { return null; }       // positions.subscribe / keyframe
     default PackSourceProvider assets() { return null; }      // assets.manifest / assets.get
+    default PackSourceProvider pack() { return null; }        // pack.manifest / pack.get: the effective pack's sources, lowest priority first
     default ChunkSource chunks() { return null; }             // map.chunks, chunks.subscribe / unsubscribe
+    default BiomeRegistry biomes() { return null; }           // biomes.list
+    default BlockRegistry blocks() { return null; }           // blocks.list
     default ActionRegistry actions() { return new ActionRegistry(); }
 }

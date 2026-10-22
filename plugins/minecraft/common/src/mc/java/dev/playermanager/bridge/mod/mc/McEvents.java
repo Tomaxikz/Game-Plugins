@@ -76,6 +76,8 @@ public final class McEvents {
     public void join(ServerPlayer p) {
         try {
             ctx.joinedAt.put(p.getUUID(), Long.valueOf(System.currentTimeMillis()));
+            String ip = Mc.ip(p);
+            if (ip != null) ctx.lastIps.record(p.getUUID().toString(), ip);
             changed(p);
             if (!wanted("join")) return;
             Map<String, Object> m = new LinkedHashMap<String, Object>();

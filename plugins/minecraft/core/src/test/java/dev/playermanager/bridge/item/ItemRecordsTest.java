@@ -151,4 +151,29 @@ class ItemRecordsTest {
                         .filter(e -> !e.getKey().equals("hash") && !e.getKey().equals("fingerprint")).collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, LinkedHashMap::new)))),
                 ItemRecords.fingerprintOf(RawItem.simple("minecraft:stick", 2)));
     }
+
+    @SuppressWarnings("unchecked")
+    @Test void bukkitMetaContainersNestWithSlotsAndChangeTheFingerprintOnly() {
+        RawItem.Meta inner = new RawItem.Meta();
+        inner.contents.add(RawItem.simple("minecraft:apple", 2));
+        inner.contentSlots.add(0);
+        RawItem.Meta box = new RawItem.Meta();
+        box.contents.add(new RawItem("minecraft:cobblestone", 64, null, null, new RawItem.Meta(), 0));
+        box.contentSlots.add(0);
+        box.contents.add(new RawItem("minecraft:bundle", 1, null, null, inner, 0));
+        box.contentSlots.add(3);
+        Map<String, Object> r = ItemRecords.build(new RawItem("minecraft:shulker_box", 1, null, null, box, 0));
+        assertEquals("bukkit_meta", r.get("encoding"));
+        List<Map<String, Object>> c = (List<Map<String, Object>>) r.get("contents");
+        assertEquals(2, c.size());
+        assertEquals("minecraft:cobblestone", c.get(0).get("id"));
+        assertEquals(0, c.get(0).get("slot"));
+        assertEquals(3, c.get(1).get("slot"));
+        List<Map<String, Object>> deeper = (List<Map<String, Object>>) c.get(1).get("contents");
+        assertEquals("minecraft:apple", deeper.get(0).get("id"));
+        Map<String, Object> empty = ItemRecords.build(new RawItem("minecraft:shulker_box", 1, null, null, new RawItem.Meta(), 0));
+        assertNull(empty.get("contents"));
+        assertEquals(empty.get("hash"), r.get("hash"));                           // no components: nothing in the render hash can depend on the contents
+        assertNotEquals(empty.get("fingerprint"), r.get("fingerprint"));
+    }
 }

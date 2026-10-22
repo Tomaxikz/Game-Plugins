@@ -59,10 +59,14 @@ values are never printed.
 | `lib/client.mjs` | request/response by id, out-of-order responses, subscriptions with seq tracking, raw frames |
 | `lib/schema.mjs`, `lib/protocol.mjs`, `lib/check.mjs` | validators and vocabularies |
 | `lib/chunks.mjs` | map chunk surfaces: air/water id lists, D23 hash, u16/i16 helpers, surface builder (mock) and validator (tests) |
+| `lib/volume.mjs` | map.volume: ChunkVolume validator, palette state rules (properties sorted bytewise), cell/band helpers, map.chunks surface column reader |
+| `lib/registry.mjs` | biomes.list and blocks.list validators, the blocks `hash` (6e) |
+| `lib/pack.mjs` | pack.* path rule (10a), file and listing hashes, manifest validator |
+| `lib/assetchunks.mjs` | reassembly of sliced `assets.get` answers (base, layers, emissive overlays) and the slice bookkeeping checks |
 | `lib/context.mjs`, `lib/runner.mjs` | run context (transport, hello, player, requirements) and the runner |
 | `tests/*.mjs` | the suite, registered in `tests/index.mjs` |
 | `profiles/*.json` | per-game expectations (sources cited inside each file) |
-| `mock/mock-bridge.mjs` | reference mock bridge with fake Minecraft data; `--break <name>` switches make it non-conformant (`--list-breaks`); `--chunk-churn` modifies the chunk under the first overworld player every 400 ms |
+| `mock/mock-bridge.mjs` | reference mock bridge with fake Minecraft data; `--break <name>` switches make it non-conformant (`--list-breaks`); `--chunk-churn` modifies the chunk under the first overworld player every 400 ms; `--no-optional-ops` leaves out the five optional 3D map ops and their features; `--busy-ms N` (default 1200) answers `busy` to `blocks.list` / `pack.*` for the first N ms after start |
 | `test/selftest.test.mjs` | selftest: codec, hash vectors, mock end to end in unix and tcp mode, each break |
 
 ## Running the selftest
@@ -73,8 +77,10 @@ node --test 'conformance/test/*.test.mjs'
 
 Covers: the codec round-trips, the hash test vector (D17), the item and render-hash rules, the
 Rust/FiveM/Minecraft block rules (unit level), the mock passing the whole suite in unix and tcp
-modes, `--slow` tests against a fast-timer mock, and one failing-test check per `--break`. About
-95 seconds, 75 tests (the chunk frame tests take 14 s each).
+modes, `--slow` tests against a fast-timer mock, one failing-test check per `--break`, the 3D map
+vectors (blocks `efeed82267412635` / `4fa84a813b94a02a`, pack `039058c6f2c0cb49` / `d664ed1c29d33d64` /
+`9e076ceaf246b600`) and validators. About 115 seconds, 145 tests (the chunk frame tests take 14 s each);
+green on Node 26 and Node 22.
 
 Run it with `node --test 'conformance/test/*.test.mjs'` (quote the glob so Node expands it; a bare directory argument fails on Node 22. Files are named
 `selftest.test.mjs`; the runner picks up `*.test.mjs`). The ping break (`no-ping`) takes
@@ -130,6 +136,31 @@ tcp mode, `--fast-timers` for the keep-alive tests). Each break and the test(s) 
 | `chunk-no-coalesce` | unix, `--allow-actions` | chunks.subscribe.frames |
 | `chunk-oversize-frame` | unix, `--allow-actions` | chunks.subscribe.frames |
 | `no-ping` | unix | ping.keepalive-60s (slow, `PM_SELFTEST_SLOW=1`) |
+| `asset-slice-gap`, `asset-slice-wrong-layer`, `asset-slice-bad-hash`, `asset-slice-hash-differs` | unix | assets.get.chunks |
+| `feature-biomes-missing` | unix | map3d.capability-consistency |
+| `feature-pack-half` | unix | map3d.capability-consistency |
+| `volume-air-in-palette` | unix | map.volume.schema |
+| `volume-wrong-band` | unix | map.volume.band |
+| `volume-unsorted-state` | unix | map.volume.schema |
+| `volume-bad-length` | unix | map.volume.schema |
+| `volume-biome-mismatch` | unix | map.volume.band |
+| `volume-dup-answer` | unix | map.volume.missing |
+| `volume-lose-on-page` | unix | map.volume.paging |
+| `volume-ignore-y` | unix | map.volume.y-range |
+| `volume-too-many-ok` | unix | map.volume.args |
+| `volume-missing-wrong` | unix | map.volume.missing |
+| `volume-surface-air` | unix | map.volume.band |
+| `volume-bad-y-order` | unix | map.volume.args |
+| `biomes-unsorted`, `biomes-bad-color`, `biomes-bad-modifier`, `biomes-no-plains`, `biomes-missing-chunk-biome` | unix | biomes.list.schema |
+| `blocks-wrong-hash`, `blocks-page-hash` | unix | blocks.list.hash |
+| `blocks-unsorted`, `blocks-state-same`, `blocks-bad-light` | unix | blocks.list.schema |
+| `blocks-since-ignored` | unix | blocks.list.since-hash |
+| `blocks-bad-cursor-ok` | unix | blocks.list.args |
+| `pack-bad-hash` | unix | pack.get.schema, pack.get.accounting |
+| `pack-listing-hash` | unix | pack.manifest.hash |
+| `pack-unsorted`, `pack-path-rule` | unix | pack.manifest.schema |
+| `pack-accounting`, `pack-deferred-lost`, `pack-dup-twice`, `pack-too-large-served` | unix | pack.get.accounting |
+| `pack-get-limit`, `pack-bad-path-served` | unix | pack.get.args |
 
 
 ## Test ids
@@ -209,6 +240,26 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `chunks.subscribe.ack` | chunks | op:chunks.subscribe, op:chunks.unsubscribe, hello | ack `{sub}`, no initial dump within 2.5 s (at most 4 organic chunks tolerated), second chunks subscription busy, unsubscribe `{}`, unknown sub not_found | pass |
 | `chunks.subscribe.args` | chunks | op:chunks.subscribe, hello | missing world invalid_args, unknown world not_found, malformed area invalid_args | pass |
 | `chunks.subscribe.frames` | chunks | op:chunks.subscribe, op:chunks.unsubscribe, op:action.run, actions, player, hello | (--allow-actions, teleport advertised) teleports the player ~3000 blocks and back; frames: schema, <= 64 chunks, no chunk twice within 2 s, no unchanged resend, seq, `dropped` positive int; area subscription gets only chunks inside the area | skip |
+| `map3d.capability-consistency` | map3d | hello | features `map.volume`, `biomes`, `blocks`, `pack` are advertised exactly when `map.volume`, `biomes.list`, `blocks.list`, `pack.manifest` + `pack.get` are (pack needs both ops) | pass |
+| `map.volume.schema` | map3d | op:map.volume | ChunkVolume shape around the player (or [0,0]): int fields, height 0..160, `blocks` = height x 512 B, `biome` 512 B, palette strings normalised (properties sorted bytewise, no duplicates, no air id), indices valid, height 0 has an empty palette; every requested chunk exactly once across the pages | pass |
+| `map.volume.band` | map3d | op:map.volume, op:map.chunks | against map.chunks for the same chunks: `y0 >= max(lowest - 4, highest - 159)` and equal to it unless it is the world minimum Y, top level holds the highest non-air block and is at least the highest surface, the surface block, water column and floor of every column agree, biome per column equals the map.chunks biome, no surface anywhere means height 0 (retried up to 3 times against live changes) | pass |
+| `map.volume.y-range` | map3d | op:map.volume | `y_min` / `y_max` narrow the band exactly (`y0 = max(y0, y_min)`, top `min(highest, y_max)`), never widen it, give height 0 when nothing is left, and the blocks equal the unfiltered slice; also on a multi-chunk request | pass |
+| `map.volume.missing` | map3d | op:map.volume | far chunks are in `missing`, never in `chunks`; duplicates in the request are answered once | pass |
+| `map.volume.paging` | map3d | op:map.volume | 64 chunks: `more` + `cursor` continue the same request, every chunk exactly once across all pages, in request order | pass |
+| `map.volume.args` | map3d | op:map.volume | 65 chunks, missing/malformed chunks, non-integer or string `y_min`/`y_max`, `y_min > y_max`, missing world: `invalid_args`; unknown world and unknown dimension: `not_found` | pass |
+| `biomes.list.schema` | registry | op:biomes.list | sorted unique ids, temperature/downfall numbers, 24-bit `water_color`, overrides int or null (key present), modifier enum, `minecraft:plains` present, two answers equal, every biome id map.chunks / map.volume report is listed | pass |
+| `blocks.list.schema` | registry | op:blocks.list | all pages: sorted unique ids, `map_color` int/null, flags/light ranges, `emits_light` agrees with `light`, states sorted by `properties` and differing from the default, `map_color` on a state only when it differs; air blocks carry the air flag, stone/water flags (unknown flag bits are counted, not failed) | pass |
+| `blocks.list.hash` | registry | op:blocks.list | one hash on every page, equal to SHA-256 (first 16 hex) of canonical MessagePack of all pages joined, stable across two reads | pass |
+| `blocks.list.since-hash` | registry | op:blocks.list | matching `since_hash` gives `{hash, unchanged: true}` and nothing else, another value gives the listing, `since_hash` is ignored with a cursor | pass |
+| `blocks.list.paging` | registry | op:blocks.list | each id once across pages, repeatable cursor chain (single page: noted, not failed) | pass |
+| `blocks.list.args` | registry | op:blocks.list | non-string `since_hash`/`cursor` and a cursor never issued: `invalid_args`; unknown args ignored | pass |
+| `blocks.list.matches-map` | registry | op:blocks.list | every block id in map.chunks / map.volume palettes is in the registry | pass |
+| `pack.manifest.schema` | pack | op:pack.manifest, op:pack.get | `{path, hash, size}`, every path matches the 10a path rule, sorted bytewise and unique | pass |
+| `pack.manifest.hash` | pack | same | one hash on every page, equal to the listing hash recomputed over the sorted `[path, hash]` list, stable | pass |
+| `pack.manifest.args` | pack | same | non-string cursor and a cursor never issued: `invalid_args` | pass |
+| `pack.get.schema` | pack | same | served bytes hash to the manifest hash and have the manifest size | pass |
+| `pack.get.accounting` | pack | same | up to 61 listed paths + an unknown path + a duplicate: each path in exactly one of `files` / `missing` / `deferred` / `too_large`, request order, deferred paths follow all served ones and can be requested again, the first file that fits is served, `too_large` only above 3 MiB | pass |
+| `pack.get.args` | pack | same | no paths, empty list, 65 paths, non-array, non-string, and 13 forms of path that break the rule (alone and after a valid path): `invalid_args` | pass |
 | `conn.eight-concurrent` | connection | hello | at least 8 concurrent connections are accepted and answered | pass |
 | `conn.max-inflight-busy` | connection | hello | max_inflight+4 requests sent at once: all answered, extras may be busy and nothing else | pass |
 | `conn.frame-oversize-rejected` | connection | hello | a frame header announcing more than 4 MiB is rejected or the connection closed; no ok response | pass |
@@ -222,6 +273,7 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `assets.manifest.empty-namespaces` | assets | op:assets.manifest | namespaces filter: an unknown namespace yields no entries | pass |
 | `assets.get.schema` | assets | op:assets.get | assets.get entries: key/hash/render, static icon PNG (signature, IHDR size), hash recomputes from texture sha | pass |
 | `assets.get.order-unknown` | assets | op:assets.get | assets.get keeps request order; unknown keys -> unavailable/not_found and the call still succeeds | pass |
+| `assets.get.chunks` | assets | op:assets.get, op:assets.manifest | sliced assets (`chunk {index, total, layer?}`): `more`/`cursor` followed to the end, slices reassembled in index order (base texture, `layers[n]`, emissive overlays), indices 0..total-1 once each, `png_offset`s contiguous and summing to `png_total`, one hash on every slice that equals the D29 hash of the reassembled asset (skipped when no asset is sliced) | pass |
 | `assets.get.too-many-keys` | assets | op:assets.get | assets.get with 65 keys is invalid_args (checked in args.assets.get-max-keys) | pass |
 | `assets.get.cursor` | assets | op:assets.get | assets.get: when more is true, the cursor continues the same request | skip |
 | `action.run.missing-action` | actions | op:action.run | action.run without an action id is invalid_args | pass |
@@ -259,6 +311,15 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `profile.fivem.identity` | profile | profile:fivem.identity, hello | FiveM: license: identifiers, game.server_id 1..65535 for online players, world gta5/rdr3, no dimension | skip |
 | `profile.hytale.world` | profile | profile:hytale.world, hello | Hytale: plain world-name strings, no dimension key, container sizes come from the build (not fixed) | skip |
 
+## Optional 3D map ops (map.volume, biomes.list, blocks.list, pack.manifest, pack.get)
+
+These ops are additive (`operations.md` 6c, 6d, 6e, 10a, 10b). Every test of an op is skipped with `<op> not advertised` unless the op is in `capabilities.ops`; the `pack.*` tests need both pack ops. `map3d.capability-consistency` always runs: a feature is advertised exactly when its ops are.
+
+- **busy.** `blocks.list`, `pack.manifest` and `pack.get` answer `busy` while their index is being built. The tests retry about once a second for up to 15 s; a bridge that is still busy then fails the test (later tests of the same op fail at once with the same message). The mock answers `busy` for the first 1.2 s after start (`--busy-ms`).
+- **Hashes.** The blocks `hash` and the pack listing `hash` are recomputed from what the bridge sent (canonical MessagePack, `items-and-assets.md` section 2 rules, so a `null` is dropped from the hash input). The selftest holds the three `pack` vectors (`039058c6f2c0cb49`, `d664ed1c29d33d64`, `9e076ceaf246b600`) and both `blocks.list` vectors (`efeed82267412635`, and the single air entry's bytes with `4fa84a813b94a02a`).
+- **Cross-checks against map.chunks.** `map.volume.band` reads `map.chunks` and `map.volume` for the same chunks and compares band, surface, water, floor and biome per column. A live server can change between the two reads, so a mismatch is retried (3 attempts) before it fails. The world minimum Y is learnt from the all-air columns of the surfaces (D23 b) or, if none, `y0` above the formula must be a multiple of 16.
+- **Interpretations** the contract leaves open are in `NOTES-section.md` (this directory).
+
 ## Profiles
 
 | Profile | Platforms | Game-specific checks |
@@ -266,7 +327,7 @@ The "Against mock" column is the unix run of the reference mock with default opt
 | `generic` | any | none beyond the protocol tests |
 | `minecraft-bukkit` | paper, spigot, folia | containers (inventory 36, equipment 5 named, ender_chest 27), world/dimension rules, UUID ids, namespaced items, typed `player.get.game` |
 | `minecraft-mod` | fabric, neoforge, forge | same MC checks; requires `assets` and the stream |
-| `minecraft-proxy` | velocity, bungeecord | feature `proxy`; `server.info.worlds == []`; no positions, nearby, inventory or assets ops; `backends` in `server.info.game` |
+| `minecraft-proxy` | velocity, bungeecord | feature `proxy`; `server.info.worlds == []`; no positions, nearby, inventory or assets ops, none of the chunk or 3D map ops (`map.volume`, `biomes.list`, `blocks.list`, `pack.*`); `backends` in `server.info.game` |
 | `rust` | oxide, carbon | SteamID64 string ids, no `dimension`, `server.info.game` keys, containers main 24 / belt 6 / wear 8, no assets |
 | `hytale` | hytale | plain world names, no `dimension`, container ids and sizes present |
 | `fivem` | fivem, redm | `license:<hex>` ids, `game.server_id` 1..65535, world `gta5` / `rdr3`, no `dimension` |

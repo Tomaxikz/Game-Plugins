@@ -2,7 +2,7 @@
   "name": "minecraft-proxy",
   "description": "Velocity and BungeeCord bridge. Network-level state only: no worlds, inventories, positions or assets.",
   "sources": [
-    "docs/protocol/games/minecraft.md sections 9-10"
+    "docs/protocol/games/minecraft.md sections 9-10 (6b and 6c: proxies never advertise the 3D map ops)"
   ],
   "game": "minecraft_java",
   "platforms": [
@@ -26,8 +26,13 @@
     "assets.manifest",
     "assets.get",
     "map.chunks",
+    "map.volume",
+    "biomes.list",
+    "blocks.list",
     "chunks.subscribe",
-    "chunks.unsubscribe"
+    "chunks.unsubscribe",
+    "pack.manifest",
+    "pack.get"
   ],
   "required_features": [
     "proxy"
@@ -37,7 +42,11 @@
     "inventory.write",
     "assets",
     "map.chunks",
-    "chunks.stream"
+    "chunks.stream",
+    "map.volume",
+    "biomes",
+    "blocks",
+    "pack"
   ],
   "required_player_fields": [],
   "required_containers": [],

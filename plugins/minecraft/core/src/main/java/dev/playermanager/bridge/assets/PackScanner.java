@@ -161,6 +161,12 @@ public final class PackScanner {
         List<Path> pluginDirs = children(plugins, true);
         for (Path pd : pluginDirs) {
             if (budget[0] <= 0 || budget[1] <= 0) break;
+            if (pd.getFileName().toString().startsWith(".") || exclude.contains(pd)) continue;
+            if (Files.isRegularFile(pd.resolve("pack.mcmeta")) && Files.isDirectory(pd.resolve("assets"))) {
+                budget[0]--;
+                found.add(pd);          // an unzipped pack placed directly in plugins/
+                continue;
+            }
             walk(pd, 1, budget, found, exclude);
         }
         return found;

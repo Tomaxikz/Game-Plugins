@@ -489,4 +489,121 @@ final class Mc {
 
     /** Only an already loaded (FULL) chunk, never loads or generates. Server thread only. */
     static net.minecraft.world.level.chunk.LevelChunk loadedChunk(ServerLevel l, int cx, int cz) { return l.getChunkSource().getChunkNow(cx, cz); }
+
+    // ------------------------------------------------------------------ block states (map.volume, blocks.list)
+
+    private static final java.util.concurrent.ConcurrentHashMap<net.minecraft.world.level.block.state.BlockState, String> STATE_STRINGS =
+            new java.util.concurrent.ConcurrentHashMap<net.minecraft.world.level.block.state.BlockState, String>();
+
+    /** Every property of a state as {@code key=value}, keys sorted bytewise, joined with {@code ,} ({@code ""} for none). */
+    static String propertyString(net.minecraft.world.level.block.state.BlockState st) {
+        java.util.Collection<net.minecraft.world.level.block.state.properties.Property<?>> props = st.getProperties();
+        if (props.isEmpty()) return "";
+        net.minecraft.world.level.block.state.properties.Property<?>[] sorted = props.toArray(new net.minecraft.world.level.block.state.properties.Property<?>[0]);
+        java.util.Arrays.sort(sorted, java.util.Comparator.comparing(net.minecraft.world.level.block.state.properties.Property::getName));
+        StringBuilder sb = new StringBuilder(32);
+        for (int i = 0; i < sorted.length; i++) {
+            if (i > 0) sb.append(',');
+            appendProperty(sb, st, sorted[i]);
+        }
+        return sb.toString();
+    }
+
+    private static <T extends Comparable<T>> void appendProperty(StringBuilder sb, net.minecraft.world.level.block.state.BlockState st,
+                                                                  net.minecraft.world.level.block.state.properties.Property<T> p) {
+        sb.append(p.getName()).append('=').append(p.getName(st.getValue(p)));
+    }
+
+    /** The {@code map.volume} palette string: id, or {@code id[key=value,...]} with every property sorted by key; cached per state. */
+    static String stateString(net.minecraft.world.level.block.state.BlockState st) {
+        String s = STATE_STRINGS.get(st);
+        if (s == null) {
+            String props = propertyString(st);
+            String id = blockId(st.getBlock());
+            s = props.isEmpty() ? id : id + "[" + props + "]";
+            STATE_STRINGS.put(st, s);
+        }
+        return s;
+    }
+
+    static boolean isLiquid(net.minecraft.world.level.block.state.BlockState st) { return st.liquid(); }
+
+    static boolean isReplaceable(net.minecraft.world.level.block.state.BlockState st) { return st.canBeReplaced(); }
+
+    /**
+     * Map colour of a state against an empty block getter at 0,0,0 as 0xRRGGBB (the base colour, no shading), or -1 for
+     * {@code MapColor.NONE}.
+     */
+    static int mapColor(net.minecraft.world.level.block.state.BlockState st) {
+        return rgb(st.getMapColor(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO));
+    }
+
+    /** {@code block.defaultMapColor()} as {@link #mapColor}. */
+    static int defaultMapColor(net.minecraft.world.level.block.Block b) { return rgb(b.defaultMapColor()); }
+
+    private static int rgb(net.minecraft.world.level.material.MapColor c) { return c == net.minecraft.world.level.material.MapColor.NONE ? -1 : c.col & 0xFFFFFF; }
+
+    static boolean isFullCollisionShape(net.minecraft.world.level.block.state.BlockState st) {
+        return st.isCollisionShapeFullBlock(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO);
+    }
+
+    static boolean hasNoCollision(net.minecraft.world.level.block.state.BlockState st) {
+        return st.getCollisionShape(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO).isEmpty();
+    }
+
+    /** The loader-independent light emission is {@code getLightEmission()}; NeoForge and Forge add an overload with level and position that mods override. */
+    private static final class LightAt {
+        static final java.lang.invoke.MethodHandle HANDLE = find();
+
+        private static java.lang.invoke.MethodHandle find() {
+            try {
+                return java.lang.invoke.MethodHandles.publicLookup().findVirtual(net.minecraft.world.level.block.state.BlockState.class, "getLightEmission",
+                        java.lang.invoke.MethodType.methodType(int.class, net.minecraft.world.level.BlockGetter.class, net.minecraft.core.BlockPos.class));
+            } catch (ReflectiveOperationException e) {
+                return null;
+            }
+        }
+    }
+
+    static int lightEmission(net.minecraft.world.level.block.state.BlockState st) {
+        java.lang.invoke.MethodHandle h = LightAt.HANDLE;
+        if (h == null) return st.getLightEmission();
+        try {
+            return (int) h.invokeExact(st, (net.minecraft.world.level.BlockGetter) net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO);
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
+    /** {@code RenderShape.INVISIBLE}. */
+    static boolean isRenderInvisible(net.minecraft.world.level.block.state.BlockState st) { return st.getRenderShape() == net.minecraft.world.level.block.RenderShape.INVISIBLE; }
+
+    /** The block entity flag: a block entity, or a render shape named {@code ENTITYBLOCK_ANIMATED} (that constant is gone in this generation; looked up by name for older ones). */
+    static boolean hasBlockEntityOrAnimatedRender(net.minecraft.world.level.block.state.BlockState st) {
+        return st.hasBlockEntity() || st.getRenderShape().name().equals("ENTITYBLOCK_ANIMATED");
+    }
+
+    static boolean isWaterloggable(net.minecraft.world.level.block.state.BlockState st) {
+        return st.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED);
+    }
+
+    // ------------------------------------------------------------------ biomes (biomes.list)
+
+    static Registry<net.minecraft.world.level.biome.Biome> biomeRegistry(MinecraftServer s) {
+        return s.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BIOME);
+    }
+
+    static String biomeKey(Registry<net.minecraft.world.level.biome.Biome> r, net.minecraft.world.level.biome.Biome b) { return keyOf(r, b); }
+
+    /**
+     * The values of one biome. Water colour, the three overrides and the modifier are in {@code BiomeSpecialEffects} in 26.x; the base
+     * temperature has a getter; {@code downfall} has none (the climate settings record is private), so the caller reads it.
+     */
+    static dev.playermanager.bridge.spi.BiomeInfo biomeInfo(String id, net.minecraft.world.level.biome.Biome b, float downfall) {
+        net.minecraft.world.level.biome.BiomeSpecialEffects fx = b.getSpecialEffects();
+        return new dev.playermanager.bridge.spi.BiomeInfo(id, b.getBaseTemperature(), downfall, fx.grassColorOverride().orElse(null),
+                fx.foliageColorOverride().orElse(null), fx.dryFoliageColorOverride().orElse(null), fx.waterColor(), fx.grassColorModifier().getSerializedName());
+    }
 }

@@ -70,5 +70,8 @@ public final class RawItem {
         public String model;
         public List<Long> tint = new ArrayList<Long>();
         public boolean unbreakable;
+        /** Nested items of a bundle or container block item (shulker box ...) and their slots, parallel lists; children are meta-mode items too. */
+        public final List<RawItem> contents = new ArrayList<RawItem>();
+        public final List<Integer> contentSlots = new ArrayList<Integer>();
     }
 }

@@ -3,8 +3,10 @@ package dev.playermanager.bridge.mod;
 import static org.junit.jupiter.api.Assertions.*;
 
 import dev.playermanager.bridge.world.ChunkSurface;
+import dev.playermanager.bridge.world.ChunkVolume;
 import dev.playermanager.bridge.world.ColumnSource;
 import dev.playermanager.bridge.world.SurfaceComputer;
+import dev.playermanager.bridge.world.VolumeComputer;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -20,10 +22,11 @@ class SectionedColumnsTest {
             return this;
         }
         public boolean empty() {
-            for (String v : blocks.values()) if (!SurfaceComputer.isAir(v)) return false;
+            for (String v : blocks.values()) if (!VolumeComputer.isAir(v)) return false;
             return true;
         }
-        public String block(int x, int y, int z) { String s = blocks.get((y << 8) | (z << 4) | x); return s == null ? "minecraft:air" : s; }
+        public String block(int x, int y, int z) { String s = state(x, y, z); int p = s.indexOf('['); return p < 0 ? s : s.substring(0, p); }
+        public String state(int x, int y, int z) { String s = blocks.get((y << 8) | (z << 4) | x); return s == null ? "minecraft:air" : s; }
         public String biome(int qx, int qy, int qz) { return biomeByQy[qy]; }
     }
 
@@ -63,7 +66,7 @@ class SectionedColumnsTest {
     @Test void scanStartIsTopOfHighestNonEmptySection() {
         SectionedColumns.Section[] s = stack(24);
         ((Fake) s[8]).fill(0, 3, "minecraft:stone");                   // y = 64..67, section 8 spans 64..79
-        ((Fake) s[12]).put(0, 0, 0, "minecraft:cave_air");              // only air-ish: still empty
+        ((Fake) s[12]).put(0, 0, 0, "minecraft:cave_air");              // only air: still empty
         SectionedColumns c = new SectionedColumns(-64, 320, s);
         assertEquals(79, c.scanStartY(0, 0));
         assertEquals(79, c.scanStartY(15, 15));
@@ -108,6 +111,32 @@ class SectionedColumnsTest {
         assertEquals("minecraft:plains", c.biomeId(0, 3, 0));
         assertEquals("minecraft:the_void", c.biomeId(0, -1000, 0));     // clamped to the world bottom
         assertEquals("minecraft:plains", new SectionedColumns(0, 32, new SectionedColumns.Section[] {null, null}).biomeId(0, 5, 0));
+    }
+
+    @Test void lightAndBarrierSectionsAreScannedSoTheVolumeFindsThem() {
+        SectionedColumns.Section[] s = stack(24);
+        ((Fake) s[8]).fill(0, 3, "minecraft:stone");                   // y 64..67
+        ((Fake) s[19]).put(2, 5, 2, "minecraft:barrier");               // y 245: a six-id "air", but a block for map.volume
+        SectionedColumns c = new SectionedColumns(-64, 320, s);
+        assertEquals(255, c.scanStartY(0, 0), "the barrier section is not empty");
+        ChunkSurface surface = SurfaceComputer.compute(0, 0, c);
+        ChunkVolume v = VolumeComputer.compute(0, 0, c, surface, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        assertEquals(245, v.y0 + v.height - 1);
+        assertEquals(160, v.height);
+    }
+
+    @Test void blockStateKeepsPropertiesAndIsAirOutsideTheStack() {
+        SectionedColumns.Section[] s = stack(24);
+        ((Fake) s[8]).put(1, 2, 3, "minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]");
+        SectionedColumns c = new SectionedColumns(-64, 320, s);
+        assertEquals("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]", c.blockState(1, 66, 3));
+        assertEquals("minecraft:oak_stairs", c.blockId(1, 66, 3));
+        assertEquals("minecraft:air", c.blockState(0, -65, 0));
+        assertEquals("minecraft:air", c.blockState(0, 320, 0));
+        assertEquals("minecraft:air", new SectionedColumns(0, 32, new SectionedColumns.Section[] {null, null}).blockState(0, 5, 0));
+        ChunkSurface a = SurfaceComputer.compute(0, 0, c);
+        ChunkVolume v = VolumeComputer.compute(0, 0, c, a, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        assertTrue(v.palette.contains("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"));
     }
 
     @Test void shallowWorldCapsScanStart() {

@@ -7,8 +7,10 @@ import dev.playermanager.bridge.spi.ChunkWorld;
 import dev.playermanager.bridge.spi.Deadline;
 import dev.playermanager.bridge.spi.LoadedChunk;
 import dev.playermanager.bridge.world.ChunkSurface;
+import dev.playermanager.bridge.world.ChunkVolume;
 import dev.playermanager.bridge.world.ColumnSource;
 import dev.playermanager.bridge.world.SurfaceComputer;
+import dev.playermanager.bridge.world.VolumeComputer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -57,6 +59,9 @@ final class BukkitChunks implements ChunkSource {
             ctx.log.debug("chunk listener toggle failed: " + t);
         }
     }
+
+    /** The snapshots hold block data on every supported version (1.13+), so {@code map.volume} is always available. */
+    @Override public boolean supportsVolume() { return true; }
 
     @Override public void attach(ChunkHub hub) {
         this.hub = hub;
@@ -133,19 +138,26 @@ final class BukkitChunks implements ChunkSource {
         }
     }
 
-    /** Debug aid ({@code -Dplaymanager.chunks.verify=true} or env {@code PM_CHUNKS_VERIFY=true}): compares the section-hinted scan with a full top-down scan. */
+    /**
+     * Debug aid ({@code -Dplayermanager.chunks.verify=true} or env {@code PM_CHUNKS_VERIFY=true}): compares the section-hinted scan with a
+     * full top-down scan, for the surface and for the {@code map.volume} band.
+     */
     private void verify(int cx, int cz, final ColumnSource cols) {
         ColumnSource full = new ColumnSource() {
             public int minY() { return cols.minY(); }
             public int maxYExclusive() { return cols.maxYExclusive(); }
             public int scanStartY(int x, int z) { return cols.maxYExclusive() - 1; }
             public String blockId(int x, int y, int z) { return cols.blockId(x, y, z); }
+            public String blockState(int x, int y, int z) { return cols.blockState(x, y, z); }
             public String biomeId(int x, int y, int z) { return cols.biomeId(x, y, z); }
         };
         ChunkSurface a = SurfaceComputer.compute(cx, cz, cols);
         ChunkSurface b = SurfaceComputer.compute(cx, cz, full);
-        if (!a.hash.equals(b.hash)) ctx.log.warn("chunk surface verify MISMATCH at " + cx + "," + cz);
-        else ctx.log.info("chunk surface verify ok " + cx + "," + cz + (a.isVoid ? " (void)" : ""));
+        ChunkVolume va = VolumeComputer.compute(cx, cz, cols, a, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        ChunkVolume vb = VolumeComputer.compute(cx, cz, full, b, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        boolean volume = va.y0 == vb.y0 && va.height == vb.height && va.palette.equals(vb.palette) && java.util.Arrays.equals(va.blocks, vb.blocks);
+        if (!a.hash.equals(b.hash) || !volume) ctx.log.warn("chunk surface verify MISMATCH at " + cx + "," + cz + (volume ? "" : " (volume)"));
+        else ctx.log.info("chunk surface verify ok " + cx + "," + cz + (a.isVoid ? " (void)" : " volume " + va.height + " levels, " + va.palette.size() + " states"));
     }
 
     @Override public CompletableFuture<List<LoadedChunk>> snapshot(ChunkWorld cw, final List<int[]> chunks, final Deadline deadline) {

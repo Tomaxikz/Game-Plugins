@@ -272,7 +272,17 @@ class AssetFeaturesTest {
         for (Map.Entry<String, String> e : textures.entrySet()) t.append(t.length() > 0 ? "," : "").append('"').append(e.getKey()).append("\":\"m:block/a\"");
         put("assets/m/models/item/probe.json", "{\"parent\":\"" + parent + "\",\"textures\":{" + t + "}}");
         Map<String, Object> a = get("item:m:probe");
-        assertEquals("model", a.get("render"), parent);
+        assertTrue(a.get("render").equals("model") || a.get("render").equals("model_ref"), parent + " -> " + a.get("render"));
+        return (Map<String, Object>) a.get("model");
+    }
+
+    /** A parent that ships its own default textures (vanilla ones): resolved without the child naming any, as {@code model_ref}. */
+    @SuppressWarnings("unchecked")
+    Map<String, Object> vanillaDefaults(String parent) throws Exception {
+        put("assets/m/models/item/probe.json", "{\"parent\":\"" + parent + "\"}");
+        Map<String, Object> a = get("item:m:probe");
+        assertEquals("model_ref", a.get("render"), parent);
+        assertFalse(((List<Object>) a.get("vanilla_textures")).isEmpty(), parent);
         return (Map<String, Object>) a.get("model");
     }
 
@@ -293,11 +303,21 @@ class AssetFeaturesTest {
                 {"block/template_torch", "torch", "1"}, {"block/template_torch_wall", "torch", "1"},
                 {"block/orientable", "front,side,top", "1"}, {"block/orientable_with_bottom", "front,side,top,bottom", "1"},
                 {"block/cube_directional", "down,up,north,south,east,west", "1"}, {"block/leaves", "all", "1"},
-                {"block/template_fence_gate", "texture", "6"}, {"block/template_fence_gate_open", "texture", "6"}};
+                {"block/template_fence_gate", "texture", "6"}, {"block/template_fence_gate_open", "texture", "6"},
+                {"block/thin_block", "texture", "1"}, {"block/template_single_face", "texture", "1"}, {"block/template_farmland", "dirt,top", "1"},
+                {"block/template_anvil", "body,top", "4"}, {"block/template_cauldron", "top,bottom,side,inside", "9"},
+                {"block/template_cauldron_level1", "top,bottom,side,inside,content", "10"}, {"block/template_cauldron_full", "top,bottom,side,inside,content", "10"},
+                {"block/cauldron", "", "9"}, {"block/hopper", "", "7"}, {"block/template_lantern", "lantern", "3"}, {"block/template_hanging_lantern", "lantern", "3"},
+                {"block/chain", "all", "2"}, {"block/lever", "base,lever", "2"}, {"block/lever_on", "base,lever", "2"}, {"block/ladder", "texture", "1"},
+                {"block/rail_flat", "rail", "1"}, {"block/rail_curved", "rail", "1"}, {"block/template_candle", "all", "1"}, {"block/template_two_candles", "all", "2"},
+                {"block/template_three_candles", "all", "3"}, {"block/template_four_candles", "all", "4"}, {"block/template_campfire", "log", "4"},
+                {"block/flower_pot", "", "6"}, {"block/flower_pot_cross", "plant", "8"}, {"block/tinted_flower_pot_cross", "plant", "8"}, {"block/crop", "crop", "4"},
+                {"block/cube_mirrored", "down,up,north,south,east,west", "1"}, {"block/cube_column_horizontal", "side,end", "1"},
+                {"block/orientable_vertical", "front,side", "1"}, {"block/template_glazed_terracotta", "pattern", "1"}};
         for (String[] c : cases) {
             Map<String, String> t = new LinkedHashMap<>();
-            for (String n : c[1].split(",")) t.put(n, "x");
-            Map<String, Object> model = modelOf("minecraft:" + c[0], t);
+            for (String n : c[1].split(",")) if (!n.isEmpty()) t.put(n, "x");
+            Map<String, Object> model = c[1].isEmpty() ? vanillaDefaults("minecraft:" + c[0]) : modelOf("minecraft:" + c[0], t);
             assertNull(model.get("parent"), c[0]);
             assertEquals(Integer.parseInt(c[2]), ((List<Object>) model.get("elements")).size(), c[0]);
         }
@@ -314,6 +334,35 @@ class AssetFeaturesTest {
         // unknown vanilla parent: never invented
         put("assets/m/models/item/probe.json", "{\"parent\":\"minecraft:block/some_unknown_vanilla_model\",\"textures\":{\"all\":\"m:block/a\"}}");
         assertEquals("model_unresolved", get("item:m:probe").get("unavailable_reason"));
+    }
+
+    // ------------------------------------------------------------------ regression: mod blocks on a vanilla parent the server does not have
+
+    /** Farmers Delight's canvas rug / cutting board: own elements on {@code block/thin_block}; item model is the block model. */
+    @SuppressWarnings("unchecked")
+    @Test void blockItemOnThinBlockParentResolvesWithOwnElements() throws Exception {
+        put("assets/m/models/block/rug.json", "{\"format_version\":\"1.9.0\",\"parent\":\"block/thin_block\",\"textures\":{\"particle\":\"m:block/rug\",\"rug\":\"m:block/rug\"},"
+                + "\"elements\":[{\"from\":[0,0,0],\"to\":[16,1,16],\"faces\":{\"up\":{\"uv\":[0,0,16,16],\"texture\":\"#rug\"},\"north\":{\"uv\":[0,1,16,2],\"texture\":\"#rug\",\"cullface\":\"north\"}}}]}");
+        put("assets/m/models/item/rug.json", "{\"parent\":\"m:block/rug\"}");
+        put("assets/m/items/rug.json", "{\"model\":{\"type\":\"minecraft:model\",\"model\":\"m:block/rug\"}}");
+        put("assets/m/textures/block/rug.png", solid(16, 16, 0xff884422));
+        Map<String, Object> a = get("item:m:rug");
+        assertEquals("model", a.get("render"));
+        assertEquals(1, ((List<Object>) ((Map<String, Object>) a.get("model")).get("elements")).size());
+        assertEquals(Collections.singleton("m:block/rug"), ((Map<String, Object>) a.get("textures")).keySet());
+        // the same model without elements inherits the parent's thin slab
+        put("assets/m/models/item/bare.json", "{\"parent\":\"minecraft:block/thin_block\",\"textures\":{\"texture\":\"m:block/rug\"}}");
+        assertEquals("model", get("item:m:bare").get("render"));
+    }
+
+    /** Farmers Delight's mug / Macaw's window bar: generated item models that name no or a missing texture have no art on the server. */
+    @Test void generatedItemWithoutAnyOrWithMissingTextureHasNoArt() throws Exception {
+        put("assets/m/models/item/mug.json", "{\"parent\":\"minecraft:item/generated\",\"display\":{\"thirdperson_righthand\":{\"scale\":[0.5,0.5,0.5]}}}");
+        assertEquals("no_art_on_server", get("item:m:mug").get("unavailable_reason"));
+        put("assets/m/models/item/bar.json", "{\"parent\":\"item/generated\",\"textures\":{\"layer0\":\"m:item/not_in_the_jar\"}}");
+        assertEquals("no_art_on_server", get("item:m:bar").get("unavailable_reason"));
+        put("assets/m/models/item/odd.json", "{\"parent\":\"item/generated\",\"textures\":{\"layer1\":\"m:item/not_in_the_jar\"}}");
+        assertEquals("model_unresolved", get("item:m:odd").get("unavailable_reason"));
     }
 
     // ------------------------------------------------------------------ special renderers

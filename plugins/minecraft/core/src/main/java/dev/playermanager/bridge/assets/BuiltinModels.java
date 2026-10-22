@@ -54,6 +54,14 @@ final class BuiltinModels {
         // every face takes its own texture variable (#down ... #east) like block/cube; the item shows it unrotated
         DEFS.put("block/cube_directional", "{\"parent\":\"minecraft:block/cube\",\"textures\":{\"particle\":\"#up\"}}");
         DEFS.put("block/cube_mirrored_all", "{\"parent\":\"minecraft:block/cube_all\"}");
+        // mirroring only flips the texture on the client; the item view shows the plain cube / column
+        DEFS.put("block/cube_mirrored", "{\"parent\":\"minecraft:block/cube\"}");
+        DEFS.put("block/cube_column_horizontal", "{\"parent\":\"minecraft:block/cube_column\"}");
+        DEFS.put("block/cube_column_mirrored", "{\"parent\":\"minecraft:block/cube_column\"}");
+        DEFS.put("block/orientable_vertical", "{\"parent\":\"minecraft:block/cube\",\"textures\":{\"particle\":\"#front\",\"down\":\"#side\",\"up\":\"#front\","
+                + "\"north\":\"#side\",\"east\":\"#side\",\"south\":\"#side\",\"west\":\"#side\"}}");
+        DEFS.put("block/template_glazed_terracotta", "{\"parent\":\"minecraft:block/cube\",\"textures\":{\"particle\":\"#pattern\",\"down\":\"#pattern\","
+                + "\"up\":\"#pattern\",\"north\":\"#pattern\",\"east\":\"#pattern\",\"south\":\"#pattern\",\"west\":\"#pattern\"}}");
     }
 
     // -------------------------------------------------------------- tiny builder
@@ -290,13 +298,196 @@ final class BuiltinModels {
             m.put("_tint", "foliage");
             return m;
         }
-        return null;
+        return buildShapes(path);
     }
 
     private static void addParticle(Map<String, Object> m, String ref) {
+        withTextures(m, "particle", ref);
+    }
+
+    /** Sets the model's own texture variables / defaults ({@code name, value, name, value, ...}). */
+    private static Map<String, Object> withTextures(Map<String, Object> m, String... nameValue) {
         Map<String, Object> t = new LinkedHashMap<String, Object>();
-        t.put("particle", ref);
+        for (int i = 0; i < nameValue.length; i += 2) t.put(nameValue[i], nameValue[i + 1]);
         m.put("textures", t);
+        return m;
+    }
+
+    private static Map<String, Object> model(List<El> els) { return block(els.toArray(new El[0])); }
+
+    /** Box whose four faces except {@code inward}/up/down use {@code outer}; the inward face {@code inner}, the top {@code top}. */
+    private static El wallBox(double x1, double y1, double z1, double x2, double y2, double z2, String inward, String outer, String inner, String top) {
+        El e = box(x1, y1, z1, x2, y2, z2);
+        for (String f : FACES) e.face(f, f.equals("up") ? top : f.equals(inward) ? inner : outer, null);
+        return e;
+    }
+
+    /** Four walls of a hollow rectangular vessel, thickness {@code t}. */
+    private static void vessel(List<El> out, double x1, double y1, double z1, double x2, double y2, double z2, double t, String outer, String inner, String top) {
+        out.add(wallBox(x1, y1, z1, x2, y2, z1 + t, "south", outer, inner, top));
+        out.add(wallBox(x1, y1, z2 - t, x2, y2, z2, "north", outer, inner, top));
+        out.add(wallBox(x1, y1, z1 + t, x1 + t, y2, z2 - t, "east", outer, inner, top));
+        out.add(wallBox(x2 - t, y1, z1 + t, x2, y2, z2 - t, "west", outer, inner, top));
+    }
+
+    /** A flat quad (zero thickness) showing the whole texture on each listed face. */
+    private static El plane(double x1, double y1, double z1, double x2, double y2, double z2, String tex, String... faces) {
+        El e = box(x1, y1, z1, x2, y2, z2);
+        for (String f : faces) e.face(f, tex, null, FULL_UV, -1);
+        return e;
+    }
+
+    private static final double[] FULL_UV = {0, 0, 16, 16};
+
+    private static Map<String, Object> cauldron(double contentY) {
+        List<El> els = new ArrayList<El>();
+        vessel(els, 0, 3, 0, 16, 16, 16, 2, "#side", "#inside", "#top");
+        els.add(box(2, 3, 2, 14, 4, 14).face("up", "#inside", null).face("down", "#bottom", null));
+        els.add(texBox("#side", 0, 0, 0, 2, 3, 2));
+        els.add(texBox("#side", 14, 0, 0, 16, 3, 2));
+        els.add(texBox("#side", 0, 0, 14, 2, 3, 16));
+        els.add(texBox("#side", 14, 0, 14, 16, 3, 16));
+        if (contentY > 0) els.add(plane(2, contentY, 2, 14, contentY, 14, "#content", "up"));
+        return withTextures(model(els), "particle", "#side");
+    }
+
+    private static Map<String, Object> lantern(double dy) {
+        double[] side = {0, 2, 6, 9};
+        El body = box(5, dy, 5, 11, 7 + dy, 11);
+        for (String f : new String[] {"north", "south", "west", "east"}) body.face(f, "#lantern", null, side, -1);
+        body.face("up", "#lantern", null).face("down", "#lantern", null);
+        return addParticleTo(block(body, texBox("#lantern", 6, 7 + dy, 6, 10, 9 + dy, 10), texBox("#lantern", 7, 9 + dy, 7, 9, 11 + dy, 9)), "#lantern");
+    }
+
+    private static Map<String, Object> addParticleTo(Map<String, Object> m, String ref) {
+        addParticle(m, ref);
+        return m;
+    }
+
+    private static Map<String, Object> lever(double angle) {
+        return addParticleTo(block(texBox("#base", 5, 0, 4, 11, 3, 12),
+                box(7, 1, 7, 9, 11, 9).rotate(8, 1, 8, "x", angle, false)
+                        .face("north", "#lever", null, new double[] {7, 6, 9, 16}, -1).face("south", "#lever", null, new double[] {7, 6, 9, 16}, -1)
+                        .face("west", "#lever", null, new double[] {7, 6, 9, 16}, -1).face("east", "#lever", null, new double[] {7, 6, 9, 16}, -1)
+                        .face("up", "#lever", null, new double[] {7, 6, 9, 8}, -1)), "#base");
+    }
+
+    /** {@code n} candles (1-4) of different heights on the block floor. */
+    private static Map<String, Object> candles(int n) {
+        double[][] all = {{7, 7, 6}, {5, 6, 5}, {9, 5, 6}, {6, 9, 5}, {9, 9, 4}};      // x, z, height; 2-4 candles use entries 1..n
+        List<El> els = new ArrayList<El>();
+        for (int i = n == 1 ? 0 : 1; i < (n == 1 ? 1 : n + 1); i++) {
+            double[] c = all[i];
+            els.add(texBox("#all", c[0], 0, c[1], c[0] + 2, c[2], c[1] + 2));
+        }
+        return addParticleTo(model(els), "#all");
+    }
+
+    private static Map<String, Object> campfire() {
+        List<El> els = new ArrayList<El>();
+        els.add(texBox("#log", 0, 0, 2, 16, 4, 6));
+        els.add(texBox("#log", 0, 0, 10, 16, 4, 14));
+        els.add(texBox("#log", 2, 4, 0, 6, 8, 16));
+        els.add(texBox("#log", 10, 4, 0, 14, 8, 16));
+        return addParticleTo(model(els), "#log");
+    }
+
+    private static List<El> flowerPot() {
+        List<El> els = new ArrayList<El>();
+        els.add(texBox("#flowerpot", 5, 0, 5, 11, 6, 6));
+        els.add(texBox("#flowerpot", 5, 0, 10, 11, 6, 11));
+        els.add(texBox("#flowerpot", 5, 0, 6, 6, 6, 10));
+        els.add(texBox("#flowerpot", 10, 0, 6, 11, 6, 10));
+        els.add(texBox("#flowerpot", 6, 0, 6, 10, 2, 10));
+        els.add(plane(6, 4, 6, 10, 4, 10, "#dirt", "up"));
+        return els;
+    }
+
+    private static Map<String, Object> pottedPlant(boolean tinted) {
+        List<El> els = flowerPot();
+        int tint = tinted ? 0 : -1;
+        els.add(box(0.8, 4, 8, 15.2, 20, 8).rotate(8, 8, 8, "y", 45, true).noShade()
+                .face("north", "#plant", null, new double[] {0, 0, 16, 16}, tint).face("south", "#plant", null, new double[] {0, 0, 16, 16}, tint));
+        els.add(box(8, 4, 0.8, 8, 20, 15.2).rotate(8, 8, 8, "y", 45, true).noShade()
+                .face("west", "#plant", null, new double[] {0, 0, 16, 16}, tint).face("east", "#plant", null, new double[] {0, 0, 16, 16}, tint));
+        Map<String, Object> m = withTextures(model(els), "particle", "#flowerpot", "dirt", "minecraft:block/dirt", "flowerpot", "minecraft:block/flower_pot");
+        if (tinted) m.put("_tint", "grass");
+        return m;
+    }
+
+    private static Map<String, Object> crop() {
+        List<El> els = new ArrayList<El>();
+        els.add(plane(4, 0, 0, 4, 16, 16, "#crop", "west", "east"));
+        els.add(plane(12, 0, 0, 12, 16, 16, "#crop", "west", "east"));
+        els.add(plane(0, 0, 4, 16, 16, 4, "#crop", "north", "south"));
+        els.add(plane(0, 0, 12, 16, 16, 12, "#crop", "north", "south"));
+        return addParticleTo(model(els), "#crop");
+    }
+
+    /** Parents with thin, hanging, hollow or multi-part shapes (see the class comment: our own boxes, approximate texture layout). */
+    private static Map<String, Object> buildShapes(String path) {
+        if (path.equals("block/thin_block")) return addParticleTo(block(texBox("#texture", 0, 0, 0, 16, 1, 16)), "#texture");
+        if (path.equals("block/template_single_face")) {
+            return addParticleTo(block(plane(0, 0, 0.1, 16, 16, 0.1, "#texture", "north", "south")), "#texture");
+        }
+        if (path.equals("block/template_farmland")) {
+            El e = box(0, 0, 0, 16, 15, 16);
+            for (String f : FACES) e.face(f, f.equals("up") ? "#top" : "#dirt", null);
+            return addParticleTo(block(e), "#dirt");
+        }
+        if (path.equals("block/template_anvil")) {
+            El top = box(3, 10, 0, 13, 16, 16);
+            for (String f : FACES) top.face(f, f.equals("up") ? "#top" : "#body", null);
+            return addParticleTo(block(texBox("#body", 2, 0, 2, 14, 4, 14), texBox("#body", 4, 4, 3, 12, 5, 13),
+                    texBox("#body", 6, 5, 4, 10, 10, 12), top), "#body");
+        }
+        if (path.equals("block/template_cauldron")) return cauldron(0);
+        if (path.equals("block/template_cauldron_level1")) return cauldron(9);
+        if (path.equals("block/template_cauldron_level2")) return cauldron(12);
+        if (path.equals("block/template_cauldron_full")) return cauldron(15);
+        if (path.equals("block/cauldron")) {
+            return withTextures(cauldron(0), "particle", "#side", "top", "minecraft:block/cauldron_top", "bottom", "minecraft:block/cauldron_bottom",
+                    "side", "minecraft:block/cauldron_side", "inside", "minecraft:block/cauldron_inner");
+        }
+        if (path.equals("block/hopper")) {
+            List<El> els = new ArrayList<El>();
+            els.add(box(2, 10, 2, 14, 11, 14).face("up", "#inside", null).face("down", "#side", null));
+            vessel(els, 0, 11, 0, 16, 16, 16, 2, "#side", "#inside", "#top");
+            els.add(texBox("#side", 4, 4, 4, 12, 10, 12));
+            els.add(texBox("#side", 6, 0, 6, 10, 4, 10));
+            return withTextures(model(els), "particle", "#side", "top", "minecraft:block/hopper_top", "side", "minecraft:block/hopper_outside",
+                    "inside", "minecraft:block/hopper_inside");
+        }
+        if (path.equals("block/template_lantern")) return lantern(0);
+        if (path.equals("block/template_hanging_lantern")) return lantern(1);
+        if (path.equals("block/chain") || path.equals("block/template_chain")) {
+            El a = box(6.5, 0, 8, 9.5, 16, 8).rotate(8, 8, 8, "y", 45, false)
+                    .face("north", "#all", null, new double[] {0, 0, 3, 16}, -1).face("south", "#all", null, new double[] {3, 0, 6, 16}, -1);
+            El b = box(8, 0, 6.5, 8, 16, 9.5).rotate(8, 8, 8, "y", 45, false)
+                    .face("east", "#all", null, new double[] {0, 0, 3, 16}, -1).face("west", "#all", null, new double[] {3, 0, 6, 16}, -1);
+            return addParticleTo(block(a, b), "#all");
+        }
+        if (path.equals("block/lever")) return lever(-45);
+        if (path.equals("block/lever_on")) return lever(45);
+        if (path.equals("block/ladder")) {
+            return block(plane(0, 0, 15.2, 16, 16, 15.2, "#texture", "north", "south"));
+        }
+        if (path.equals("block/rail_flat") || path.equals("block/rail_curved") || path.equals("block/template_rail_flat")) {
+            return addParticleTo(block(plane(0, 0.2, 0, 16, 0.2, 16, "#rail", "up", "down")), "#rail");
+        }
+        if (path.equals("block/template_candle")) return candles(1);
+        if (path.equals("block/template_two_candles")) return candles(2);
+        if (path.equals("block/template_three_candles")) return candles(3);
+        if (path.equals("block/template_four_candles")) return candles(4);
+        if (path.equals("block/template_campfire")) return campfire();
+        if (path.equals("block/flower_pot")) {
+            return withTextures(block(flowerPot().toArray(new El[0])), "particle", "#flowerpot", "dirt", "minecraft:block/dirt",
+                    "flowerpot", "minecraft:block/flower_pot");
+        }
+        if (path.equals("block/flower_pot_cross")) return pottedPlant(false);
+        if (path.equals("block/tinted_flower_pot_cross")) return pottedPlant(true);
+        if (path.equals("block/crop")) return crop();
+        return null;
     }
 
     /** Flat lookup of the parents above; a fresh copy each call, or null when we do not author that model. */

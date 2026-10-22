@@ -5,6 +5,7 @@ import dev.playermanager.bridge.nbt.Nbt;
 import dev.playermanager.bridge.proto.BridgeException;
 import dev.playermanager.bridge.spi.Deadline;
 import dev.playermanager.bridge.spi.PlayerProvider;
+import dev.playermanager.bridge.util.IpBans;
 import dev.playermanager.bridge.util.PlayerIds;
 import java.io.File;
 import java.io.IOException;
@@ -124,10 +125,7 @@ final class BukkitPlayers implements PlayerProvider {
                         r.joinedAt = j != null ? j.longValue() : System.currentTimeMillis();
                         r.brand = brand(p);
                         r.locale = lower(p.getLocale());
-                        if (sensitive) {
-                            InetSocketAddress a = p.getAddress();
-                            if (a != null && a.getAddress() != null) r.ip = a.getAddress().getHostAddress();
-                        }
+                        r.ip = Ctx.addressOf(p);
                         rows.add(r);
                     } catch (Throwable t) {
                         ctx.log.debug("players.list row skipped: " + t);
@@ -136,7 +134,29 @@ final class BukkitPlayers implements PlayerProvider {
                 return rows;
             }
         });
-        return snap.thenApplyAsync(new Function<List<OnlineRow>, List<Map<String, Object>>>() {
+        return snap.thenApplyAsync(new Function<List<OnlineRow>, List<OnlineRow>>() {
+            public List<OnlineRow> apply(List<OnlineRow> online) {
+                for (OnlineRow r : online) if (r.lp) r.perms = ctx.perms.lookupLuckPerms(r.id);       // LuckPerms is thread-safe: off the game thread
+                return online;
+            }
+        }, ctx.async).thenCompose(new Function<List<OnlineRow>, CompletableFuture<List<OnlineRow>>>() {
+            public CompletableFuture<List<OnlineRow>> apply(final List<OnlineRow> online) {
+                // players LuckPerms does not know: Vault, which stays on the game thread (one task for all of them)
+                boolean any = false;
+                if (ctx.perms.vaultFallback()) for (OnlineRow r : online) any |= r.lp && r.perms == null;
+                if (!any) return CompletableFuture.completedFuture(online);
+                return ctx.scheduler.global(new Callable<List<OnlineRow>>() {
+                    public List<OnlineRow> call() {
+                        for (OnlineRow r : online) {
+                            if (!r.lp || r.perms != null) continue;
+                            Player p = Bukkit.getPlayer(r.id);
+                            if (p != null) r.perms = ctx.perms.lookupVault(p);
+                        }
+                        return online;
+                    }
+                });
+            }
+        }).thenApplyAsync(new Function<List<OnlineRow>, List<Map<String, Object>>>() {
             public List<Map<String, Object>> apply(List<OnlineRow> online) {
                 return buildList(online, includeOffline, sensitive);
             }
@@ -146,10 +166,10 @@ final class BukkitPlayers implements PlayerProvider {
     List<Map<String, Object>> buildList(List<OnlineRow> online, boolean includeOffline, boolean sensitive) {
         ctx.roster.refreshNow();
         Map<String, Map<String, Object>> ops = ctx.roster.ops(), wl = ctx.roster.whitelist(), bans = ctx.roster.bans();
+        Set<String> bannedIps = IpBans.active(ctx.roster.bannedIps(), System.currentTimeMillis());
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         Set<String> seen = new LinkedHashSet<String>();
         for (OnlineRow r : online) {
-            if (r.lp) r.perms = ctx.perms.lookupLuckPerms(r.id);          // LuckPerms is thread-safe: off the game thread
             String id = r.id.toString();
             seen.add(id);
             Map<String, Object> m = new LinkedHashMap<String, Object>();
@@ -163,6 +183,7 @@ final class BukkitPlayers implements PlayerProvider {
             if (r.op || ops.containsKey(id)) groups.add("operators");
             if (wl.containsKey(id)) groups.add("whitelisted");
             if (bans.containsKey(id)) groups.add("banned");
+            if (r.ip != null && bannedIps.contains(r.ip)) groups.add("banned_ips");
             if (r.sleeping) groups.add("sleeping");
             if (r.perms != null) for (String g : r.perms.groups) if (!groups.contains(g)) groups.add(g);
             m.put("groups", groups);
@@ -173,18 +194,18 @@ final class BukkitPlayers implements PlayerProvider {
             if (r.brand != null) client.put("brand", r.brand);
             if (r.locale != null) client.put("locale", r.locale);
             if (!client.isEmpty()) m.put("client", client);
-            if (r.ip != null) m.put("ip", r.ip);
+            if (sensitive && r.ip != null) m.put("ip", r.ip);
             Map<String, Object> g = new LinkedHashMap<String, Object>();
             g.put("offline_uuid", PlayerIds.isOfflineUuid(r.id, r.name));
             m.put("game", g);
             out.add(m);
         }
-        if (includeOffline) out.addAll(offlineRows(seen, ops, wl, bans, sensitive));
+        if (includeOffline) out.addAll(offlineRows(seen, ops, wl, bans, bannedIps, sensitive));
         return out;
     }
 
     private List<Map<String, Object>> offlineRows(Set<String> seen, Map<String, Map<String, Object>> ops, Map<String, Map<String, Object>> wl,
-                                                  Map<String, Map<String, Object>> bans, boolean sensitive) {
+                                                  Map<String, Map<String, Object>> bans, Set<String> bannedIps, boolean sensitive) {
         Map<String, String> names = new LinkedHashMap<String, String>(ctx.roster.names());
         Map<String, Long> lastSeen = new LinkedHashMap<String, Long>();
         List<Path> dirs = playerdataDirs();
@@ -225,6 +246,8 @@ final class BukkitPlayers implements PlayerProvider {
             if (ops.containsKey(id)) groups.add("operators");
             if (wl.containsKey(id)) groups.add("whitelisted");
             if (bans.containsKey(id)) groups.add("banned");
+            String last = ctx.lastIps.get(id);
+            if (last != null && bannedIps.contains(last)) groups.add("banned_ips");
             m.put("groups", groups);
             m.put("admin", ops.containsKey(id));
             Long ls = lastSeen.get(id);
@@ -288,9 +311,23 @@ final class BukkitPlayers implements PlayerProvider {
                 if (err != null) { out.completeExceptionally(err); return; }
                 try {
                     if (m != null) {
-                        fillLuckPerms(uuid, m);
-                        Map<String, Object> r = ctx.resolve(m);
-                        out.complete(r);
+                        if (fillLuckPerms(uuid, m)) {
+                            // LuckPerms does not know this user: Vault, on the player's own thread
+                            ctx.withPlayer(uuid, new Ctx.PlayerWork<Perms.Result>() {
+                                public Perms.Result run(Player p) { return p == null ? null : ctx.perms.lookupVault(p); }
+                            }).whenCompleteAsync(new BiConsumer<Perms.Result, Throwable>() {
+                                public void accept(Perms.Result pr, Throwable e2) {
+                                    try {
+                                        if (pr != null) putPermissions(m, pr);
+                                        out.complete(ctx.<Map<String, Object>>resolve(m));
+                                    } catch (Throwable t) {
+                                        out.completeExceptionally(t);
+                                    }
+                                }
+                            }, ctx.async);
+                            return;
+                        }
+                        out.complete(ctx.<Map<String, Object>>resolve(m));
                     } else {
                         out.complete(offline(uuid, fields, sensitive, includeUnobtained, deadline));
                     }
@@ -302,18 +339,27 @@ final class BukkitPlayers implements PlayerProvider {
         return out;
     }
 
-    /** Replaces the permission placeholders left by {@link #onlineGame} with the LuckPerms answer (looked up off the game thread). */
+    /**
+     * Replaces the permission placeholders left by {@link #online} with the LuckPerms answer (looked up off the game thread).
+     *
+     * @return true when LuckPerms did not know the user and Vault can answer instead (the caller does that on the game thread)
+     */
     @SuppressWarnings("unchecked")
-    private void fillLuckPerms(UUID uuid, Map<String, Object> m) {
+    private boolean fillLuckPerms(UUID uuid, Map<String, Object> m) {
         Object g = m.get("game");
-        if (!(g instanceof Map) || !Boolean.TRUE.equals(((Map<String, Object>) g).remove("_pm_lp"))) return;
-        Map<String, Object> game = (Map<String, Object>) g;
+        if (!(g instanceof Map) || !Boolean.TRUE.equals(((Map<String, Object>) g).remove("_pm_lp"))) return false;
         Perms.Result pr = ctx.perms.lookupLuckPerms(uuid);
-        if (pr != null) {
-            game.put("groups", pr.groups);
-            game.put("primary_group", pr.primary);
-            game.put("permission_provider", pr.provider);
-        }
+        if (pr == null) return ctx.perms.vaultFallback();
+        putPermissions(m, pr);
+        return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void putPermissions(Map<String, Object> m, Perms.Result pr) {
+        Map<String, Object> game = (Map<String, Object>) m.get("game");
+        game.put("groups", pr.groups);
+        game.put("primary_group", pr.primary);
+        game.put("permission_provider", pr.provider);
     }
 
     // ---------------------------------------------------------------- online snapshot (entity/main thread)

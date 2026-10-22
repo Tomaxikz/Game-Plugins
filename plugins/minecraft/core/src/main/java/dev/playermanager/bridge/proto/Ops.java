@@ -51,8 +51,8 @@ public final class Ops {
             if ("save".equals(a) || "reload".equals(a) || "wipe_data".equals(a)) return 10000;
             return 5000;
         }
-        if (op.equals("map.chunks")) return 5000;
-        if (op.startsWith("assets.")) return 10000;
+        if (op.equals("map.chunks") || op.equals("map.volume")) return 5000;
+        if (op.startsWith("assets.") || op.startsWith("pack.")) return 10000;
         return 2000;
     }
 
@@ -74,11 +74,16 @@ public final class Ops {
             case "events.subscribe": return eventsSubscribe(c, args);
             case "events.unsubscribe": return unsubscribe(c, args, "events");
             case "map.chunks": return cached(op, args, null, d, () -> mapChunks(args, d));
+            case "map.volume": return cached(op, args, null, d, () -> mapVolume(args, d));
+            case "biomes.list": return core.biomes().list(d);
+            case "blocks.list": return blocksList(args);
             case "chunks.subscribe": return chunksSubscribe(c, args);
             case "chunks.unsubscribe": return unsubscribe(c, args, "chunks");
             case "action.run": return actionRun(args, d);
             case "assets.manifest": return assetsManifest(args);
             case "assets.get": return assetsGet(args);
+            case "pack.manifest": return core.pack().manifest(args.str("cursor", null));
+            case "pack.get": return packGet(args);
             default: throw BridgeException.unsupported("unknown operation '" + op + "'");
         }
     }
@@ -115,7 +120,8 @@ public final class Ops {
         m.put("bridge_version", info.bridgeVersion);
         m.put("capabilities", core.capabilities().toMap());
         if (!info.integrations.isEmpty()) m.put("integrations", info.integrations);
-        if (info.helloGame != null) m.put("game", merge(info.helloGame));
+        Map<String, Object> extras = info.helloGameSupplier != null ? info.helloGameSupplier.get() : info.helloGame;
+        if (extras != null) m.put("game", merge(extras));
         Map<String, Object> lim = new LinkedHashMap<String, Object>();
         lim.put("max_frame", Framing.MAX_FRAME);
         lim.put("positions_min_interval_ms", core.config().positionsMinIntervalMs);
@@ -342,10 +348,26 @@ public final class Ops {
     private Object mapChunks(Args a, Deadline d) {
         String world = Args.safeText("world", a.str("world"), 256);
         String dimension = a.has("dimension") ? Args.safeText("dimension", a.str("dimension"), 128) : null;
+        List<int[]> coords = chunkList(a, dev.playermanager.bridge.sub.ChunkService.MAX_REQUEST_CHUNKS);
+        return core.chunks().request(world, dimension, coords, cursorOf(a, coords.size()), d);
+    }
+
+    private Object mapVolume(Args a, Deadline d) {
+        String world = Args.safeText("world", a.str("world"), 256);
+        String dimension = a.has("dimension") ? Args.safeText("dimension", a.str("dimension"), 128) : null;
+        List<int[]> coords = chunkList(a, dev.playermanager.bridge.sub.ChunkService.MAX_VOLUME_CHUNKS);
+        int yMin = (int) a.integer("y_min", Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        int yMax = (int) a.integer("y_max", Integer.MAX_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        if (yMin > yMax) throw BridgeException.invalid("'y_min' must not exceed 'y_max'");
+        return core.chunks().volume(world, dimension, coords, cursorOf(a, coords.size()), yMin, yMax, d);
+    }
+
+    /** The {@code chunks} argument: at most {@code max} distinct {@code [cx, cz]} pairs, in request order (duplicates are answered once). */
+    private static List<int[]> chunkList(Args a, int max) {
         Object raw = a.raw().get("chunks");
         if (!(raw instanceof List)) throw BridgeException.invalid("'chunks' must be an array of [cx, cz]");
         List<?> list = (List<?>) raw;
-        if (list.size() > dev.playermanager.bridge.sub.ChunkService.MAX_REQUEST_CHUNKS) throw BridgeException.invalid("at most 256 chunks per request");
+        if (list.size() > max) throw BridgeException.invalid("at most " + max + " chunks per request");
         List<int[]> coords = new ArrayList<int[]>();
         Set<Long> seen = new HashSet<Long>();
         for (Object o : list) {
@@ -354,13 +376,21 @@ public final class Ops {
             int cz = chunkCoord("chunks", ((List<?>) o).get(1));
             if (seen.add(((long) cx << 32) | (cz & 0xffffffffL))) coords.add(new int[] {cx, cz});
         }
-        int cursor = 0;
+        return coords;
+    }
+
+    /** The {@code cursor} of a paged chunk answer: the index into the (deduplicated) request to continue from. */
+    private static int cursorOf(Args a, int size) {
         String cur = a.str("cursor", null);
-        if (cur != null) {
-            try { cursor = Integer.parseInt(cur); } catch (NumberFormatException e) { throw BridgeException.invalid("bad cursor"); }
-            if (cursor < 0 || cursor > coords.size()) throw BridgeException.invalid("bad cursor");
-        }
-        return core.chunks().request(world, dimension, coords, cursor, d);
+        if (cur == null) return 0;
+        int cursor;
+        try { cursor = Integer.parseInt(cur); } catch (NumberFormatException e) { throw BridgeException.invalid("bad cursor"); }
+        if (cursor < 0 || cursor > size) throw BridgeException.invalid("bad cursor");
+        return cursor;
+    }
+
+    private Object blocksList(Args a) {
+        return core.blocks().list(a.str("since_hash", null), a.str("cursor", null));
     }
 
     private Object chunksSubscribe(Connection c, Args a) {
@@ -413,6 +443,14 @@ public final class Ops {
         if (keys.size() > 64) throw BridgeException.invalid("at most 64 keys");
         for (String k : keys) Args.safeText("keys", k, 512);
         return core.assets().get(keys, a.str("cursor", null));
+    }
+
+    // ------------------------------------------------------------------ pack files
+
+    private Object packGet(Args a) {
+        List<String> paths = a.strings("paths");
+        if (paths == null) throw BridgeException.invalid("missing 'paths'");
+        return core.pack().get(paths);
     }
 
     // ------------------------------------------------------------------ action.run

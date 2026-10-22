@@ -2,6 +2,8 @@ package dev.playermanager.bridge.mod.mc;
 
 import dev.playermanager.bridge.BridgeCore;
 import dev.playermanager.bridge.spi.ActionRegistry;
+import dev.playermanager.bridge.spi.BiomeRegistry;
+import dev.playermanager.bridge.spi.BlockRegistry;
 import dev.playermanager.bridge.spi.BridgeLog;
 import dev.playermanager.bridge.spi.ChunkSource;
 import dev.playermanager.bridge.spi.InventoryProvider;
@@ -113,8 +115,11 @@ public final class McBridge {
         private final McPositions positions;
         private final McServerInfo serverInfo;
         private final McPacks packs;
+        private final PackSourceProvider effectivePack;
         private final McActionSet actions;
         private final McChunks chunks;
+        private final McBiomes biomes;      // null where this loader does not let the bridge read the climate settings
+        private final McBlocks blocks;
 
         ModPlatform(Ctx ctx, PlatformInfo info, McEvents events) {
             this.ctx = ctx;
@@ -125,8 +130,11 @@ public final class McBridge {
             this.positions = new McPositions(ctx);
             this.serverInfo = new McServerInfo(ctx);
             this.packs = new McPacks(ctx);
+            this.effectivePack = packs.effective();
             this.actions = new McActionSet(ctx, events);
             this.chunks = new McChunks(ctx);
+            this.biomes = McBiomes.create(ctx);
+            this.blocks = new McBlocks(ctx);
         }
 
         public PlatformInfo info() { return info; }
@@ -138,7 +146,10 @@ public final class McBridge {
         @Override public NearbyProvider nearby() { return nearby; }
         @Override public PositionSource positions() { return positions; }
         @Override public PackSourceProvider assets() { return packs; }
+        @Override public PackSourceProvider pack() { return effectivePack; }
         @Override public ActionRegistry actions() { return actions.registry(); }
         @Override public ChunkSource chunks() { return chunks; }
+        @Override public BiomeRegistry biomes() { return biomes; }
+        @Override public BlockRegistry blocks() { return blocks; }
     }
 }

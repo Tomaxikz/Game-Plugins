@@ -132,6 +132,7 @@ final class BukkitEvents implements Listener, PluginMessageListener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent e) {
         ctx.joinedAt.put(e.getPlayer().getUniqueId(), Long.valueOf(System.currentTimeMillis()));
+        ctx.rememberAddress(e.getPlayer());
         changed(e.getPlayer());
         if (!wanted("join")) return;
         Map<String, Object> m = new LinkedHashMap<String, Object>();

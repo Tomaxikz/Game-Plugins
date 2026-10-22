@@ -1,8 +1,10 @@
 package dev.playermanager.bridge.bukkit;
 
+import dev.playermanager.bridge.nearby.NearbyExtras;
 import dev.playermanager.bridge.proto.BridgeException;
 import dev.playermanager.bridge.spi.NearbyProvider;
 import dev.playermanager.bridge.world.BlockSlice;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -12,14 +14,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.Predicate;
 import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Chunk;
 import org.bukkit.ChunkSnapshot;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Sign;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
@@ -27,7 +36,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
-/** {@code player.nearby}: look vector, target, nearest entities, block slice via ChunkSnapshot (never force-loads chunks). */
+/**
+ * {@code player.nearby}: look vector, target, nearest entities, block slice via ChunkSnapshot (never force-loads chunks). The game
+ * thread only copies the chunk snapshots (blocks + biomes) and reads the block entities in range; palettes, the biome grid and
+ * packing run on the async pool.
+ */
 final class BukkitNearby implements NearbyProvider {
     private static final String VOID = "minecraft:void_air";
     private static final double REACH = 6.0;
@@ -173,11 +186,13 @@ final class BukkitNearby implements NearbyProvider {
         final int ox, y0, oz, sx, sy, sz;
         final int cx0, cz0, cx1, cz1;
         final ChunkSnapshot[] snaps;        // [(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)], null = not loaded / not ours
+        final List<NearbyExtras.Row> blockEntities;
         final WorldMap.Info world;
 
-        PendingSlice(int ox, int y0, int oz, int sx, int sy, int sz, int cx0, int cz0, int cx1, int cz1, ChunkSnapshot[] snaps, WorldMap.Info world) {
+        PendingSlice(int ox, int y0, int oz, int sx, int sy, int sz, int cx0, int cz0, int cx1, int cz1, ChunkSnapshot[] snaps,
+                     List<NearbyExtras.Row> blockEntities, WorldMap.Info world) {
             this.ox = ox; this.y0 = y0; this.oz = oz; this.sx = sx; this.sy = sy; this.sz = sz;
-            this.cx0 = cx0; this.cz0 = cz0; this.cx1 = cx1; this.cz1 = cz1; this.snaps = snaps; this.world = world;
+            this.cx0 = cx0; this.cz0 = cz0; this.cx1 = cx1; this.cz1 = cz1; this.snaps = snaps; this.blockEntities = blockEntities; this.world = world;
         }
 
         Map<String, Object> build() {
@@ -212,6 +227,11 @@ final class BukkitNearby implements NearbyProvider {
                     }
                 }
             }
+            NearbyExtras.addBlockEntities(s, blockEntities);
+            NearbyExtras.addBiomes(s, (x, y, z) -> {
+                ChunkSnapshot snap = snaps[((x >> 4) - cx0) * ncz + ((z >> 4) - cz0)];
+                return snap == null ? null : SnapshotBiomes.idAt(snap, x & 15, y, z & 15);
+            });
             Map<String, Object> m = s.toMap();
             m.put("world", world.world);
             m.put("dimension", world.dimension);
@@ -233,6 +253,7 @@ final class BukkitNearby implements NearbyProvider {
         int ox = bx - rad, oz = bz - rad;
         int cx0 = ox >> 4, cx1 = (ox + sx - 1) >> 4, cz0 = oz >> 4, cz1 = (oz + sz - 1) >> 4;
         ChunkSnapshot[] snaps = new ChunkSnapshot[(cx1 - cx0 + 1) * (cz1 - cz0 + 1)];
+        List<NearbyExtras.Row> rows = new ArrayList<NearbyExtras.Row>();
         boolean folia = ctx.env.folia;
         for (int cx = cx0; cx <= cx1; cx++) {
             for (int cz = cz0; cz <= cz1; cz++) {
@@ -241,9 +262,83 @@ final class BukkitNearby implements NearbyProvider {
                     Object owned = Reflect.callStatic("org.bukkit.Bukkit", "isOwnedByCurrentRegion", w, cx, cz);
                     ok = !Boolean.FALSE.equals(owned);
                 }
-                snaps[(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)] = ok ? w.getChunkAt(cx, cz).getChunkSnapshot() : null;
+                if (!ok) continue;
+                Chunk chunk = w.getChunkAt(cx, cz);
+                snaps[(cx - cx0) * (cz1 - cz0 + 1) + (cz - cz0)] = chunk.getChunkSnapshot(false, true, false);
+                blockEntities(chunk, ox, oz, sx, sz, y0, y1, rows);
             }
         }
-        return new PendingSlice(ox, y0, oz, sx, sy, sz, cx0, cz0, cx1, cz1, snaps, ctx.worlds.of(w));
+        return new PendingSlice(ox, y0, oz, sx, sy, sz, cx0, cz0, cx1, cz1, snaps, rows, ctx.worlds.of(w));
+    }
+
+    /** Paper: {@code Chunk#getTileEntities(Predicate, boolean)} (filter by position, no NBT copy), then {@code (boolean)}; Spigot: all snapshots. */
+    private static final Method TILES_IN = Reflect.method(Chunk.class, "getTileEntities", Predicate.class, boolean.class);
+    private static final Method TILES_LIVE = Reflect.method(Chunk.class, "getTileEntities", boolean.class);
+
+    /** Game-thread read of the block entities of one chunk inside the slice box (positions, ids, plain sign front text). */
+    private void blockEntities(Chunk chunk, final int ox, final int oz, final int sx, final int sz, final int y0, final int y1, List<NearbyExtras.Row> out) {
+        Object found;
+        try {
+            if (TILES_IN != null) {
+                found = TILES_IN.invoke(chunk, (Predicate<Block>) b -> inBox(b.getX(), b.getY(), b.getZ(), ox, oz, sx, sz, y0, y1), Boolean.FALSE);
+            } else if (TILES_LIVE != null) {
+                found = TILES_LIVE.invoke(chunk, Boolean.FALSE);
+            } else {
+                found = chunk.getTileEntities();
+            }
+        } catch (Throwable t) {
+            return;
+        }
+        if (found instanceof BlockState[]) {
+            for (BlockState bs : (BlockState[]) found) addRow(bs, ox, oz, sx, sz, y0, y1, out);
+        } else if (found instanceof Iterable) {
+            for (Object bs : (Iterable<?>) found) if (bs instanceof BlockState) addRow((BlockState) bs, ox, oz, sx, sz, y0, y1, out);
+        }
+    }
+
+    private static boolean inBox(int x, int y, int z, int ox, int oz, int sx, int sz, int y0, int y1) {
+        return x >= ox && x < ox + sx && z >= oz && z < oz + sz && y >= y0 && y <= y1;
+    }
+
+    private static void addRow(BlockState bs, int ox, int oz, int sx, int sz, int y0, int y1, List<NearbyExtras.Row> out) {
+        if (!inBox(bs.getX(), bs.getY(), bs.getZ(), ox, oz, sx, sz, y0, y1)) return;
+        List<String> text = null;
+        if (bs instanceof Sign) {
+            String[] lines = ((Sign) bs).getLines();
+            text = new ArrayList<String>(lines.length);
+            for (String l : lines) text.add(ChatColor.stripColor(l));
+        }
+        out.add(new NearbyExtras.Row(bs.getX(), bs.getY(), bs.getZ(), blockEntityId(bs.getType()), text));
+    }
+
+    private static final ConcurrentHashMap<Material, String> BE_IDS = new ConcurrentHashMap<Material, String>();
+
+    /**
+     * The block entity type id for a block: Bukkit exposes only the block, and for most block entities the two ids are equal ({@code chest},
+     * {@code furnace}, {@code hopper}). The families whose blocks share one block entity type are mapped to it (signs, banners, beds,
+     * shulker boxes, skulls, campfires, command blocks, spawners, bee nests, brushable blocks).
+     */
+    static String blockEntityId(Material m) {
+        String id = BE_IDS.get(m);
+        if (id == null) {
+            String block = ItemConverter.idOf(m);
+            String p = block.substring(block.indexOf(':') + 1);
+            String type;
+            if (p.endsWith("_hanging_sign")) type = "hanging_sign";
+            else if (p.endsWith("_sign")) type = "sign";
+            else if (p.endsWith("_banner")) type = "banner";
+            else if (p.endsWith("_bed")) type = "bed";
+            else if (p.endsWith("shulker_box")) type = "shulker_box";
+            else if (p.endsWith("_head") || p.endsWith("_skull")) type = "skull";
+            else if (p.equals("soul_campfire")) type = "campfire";
+            else if (p.endsWith("command_block")) type = "command_block";
+            else if (p.equals("spawner")) type = "mob_spawner";
+            else if (p.equals("bee_nest")) type = "beehive";
+            else if (p.startsWith("suspicious_")) type = "brushable_block";
+            else type = p;
+            id = block.substring(0, block.indexOf(':') + 1) + type;
+            BE_IDS.put(m, id);
+        }
+        return id;
     }
 }

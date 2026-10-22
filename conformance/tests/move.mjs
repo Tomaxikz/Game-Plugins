@@ -202,15 +202,18 @@ function moveTest({ id, title, body, only }) {
     async run(ctx) {
       const rig = await Rig.open(ctx, variant);
       let msg;
+      let failure = null;
       try {
         msg = await body(rig, ctx);
-      } finally {
-        const errs = await rig.cleanup();
-        if (errs.length) {
-          // eslint-disable-next-line no-unsafe-finally
-          throw new CheckFailed(`cleanup failed, the player's inventory may be left modified: ${errs.join('; ')}`);
-        }
+      } catch (e) {
+        failure = e;
       }
+      const errs = await rig.cleanup();
+      // The test player disconnecting mid-test (kicked, server-side mod required on the client...) is not a bridge fault.
+      const offline = (x) => /\bgot offline\b/.test(String(x?.message ?? x));
+      if ((failure && offline(failure)) || errs.some(offline)) throw new Skip('the test player went offline during the test');
+      if (failure) throw failure;
+      if (errs.length) throw new CheckFailed(`cleanup failed, the player's inventory may be left modified: ${errs.join('; ')}`);
       return msg;
     },
   });

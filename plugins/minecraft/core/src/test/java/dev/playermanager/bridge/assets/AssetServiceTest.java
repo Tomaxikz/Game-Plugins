@@ -285,6 +285,100 @@ class AssetServiceTest {
         assertArrayEquals(whole, joined.toByteArray());
     }
 
+    static byte[] noise(int w, int h, long seed) throws Exception {
+        Random rnd = new Random(seed);
+        BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) img.setRGB(x, y, rnd.nextInt() | 0xff000000);
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", o);
+        return o.toByteArray();
+    }
+
+    /** Joins the slices of an oversized layered asset exactly as the panel does and checks the result against the asset hash (D29). */
+    @SuppressWarnings("unchecked")
+    @Test void oversizedAssetWithLayersAndEmissiveIsSlicedPerTextureAndHashesAsAWhole() throws Exception {
+        byte[] l0 = noise(800, 600, 1), l1 = noise(800, 600, 2), glow = noise(800, 600, 3);
+        assertTrue(l0.length + l1.length + glow.length > 3 * 1024 * 1024);
+        put("assets/big/textures/item/l0.png", l0);
+        put("assets/big/textures/item/l1.png", l1);
+        put("assets/big/textures/item/l1_e.png", glow);
+        put("assets/big/models/item/lay.json", "{\"parent\":\"item/generated\",\"textures\":{\"layer0\":\"big:item/l0\",\"layer1\":\"big:item/l1\"}}");
+        svc = new AssetService(() -> Collections.<PackSource>singletonList(PackSource.of(packDir)), tmp.resolve("cache2"), BridgeLog.STDERR, bg);
+        Map<String, ByteArrayOutputStream> bytes = new LinkedHashMap<>();       // "icon", "layers.0", "layers.1", "layers.1.emissive"
+        Map<String, Map<String, Object>> meta = new LinkedHashMap<>();
+        String hash = null;
+        String cursor = null;
+        int seen = 0, total = -1;
+        do {
+            Map<String, Object> r = svc.get(Collections.singletonList("item:big:lay"), cursor);
+            List<Map<String, Object>> assets = (List<Map<String, Object>>) r.get("assets");
+            assertEquals(1, assets.size());
+            Map<String, Object> a = assets.get(0);
+            assertTrue(dev.playermanager.bridge.codec.MsgPack.encode(r).length < 4 * 1024 * 1024);
+            if (hash == null) hash = (String) a.get("hash");
+            assertEquals(hash, a.get("hash"));
+            Map<String, Object> ch = (Map<String, Object>) a.get("chunk");
+            assertEquals(seen++, ch.get("index"));
+            total = (Integer) ch.get("total");
+            Map<String, Object> textures = (Map<String, Object>) a.get("textures");
+            assertEquals(1, textures.size());
+            String key = textures.keySet().iterator().next();
+            Map<String, Object> t;
+            String path = key;
+            if (textures.get(key) instanceof List) {
+                assertEquals("layers", key);
+                assertEquals(1, ((List<Object>) textures.get(key)).size());
+                path = "layers." + ch.get("layer");
+                t = ((List<Map<String, Object>>) textures.get(key)).get(0);
+            } else {
+                assertNull(ch.get("layer"));
+                t = (Map<String, Object>) textures.get(key);
+            }
+            if (t.get("png") == null) {                       // overlay slice: the texture holds only its overlay
+                assertEquals(Collections.singleton("emissive"), t.keySet());
+                t = (Map<String, Object>) t.get("emissive");
+                path += ".emissive";
+            } else {
+                assertFalse(t.get("emissive") instanceof Map, "base slices do not repeat the overlay");
+            }
+            ByteArrayOutputStream acc = bytes.computeIfAbsent(path, k -> new ByteArrayOutputStream());
+            assertEquals(acc.size(), t.get("png_offset"));
+            byte[] part = (byte[]) t.get("png");
+            assertTrue(part.length <= AssetService.FRAME_BUDGET);
+            acc.write(part);
+            Map<String, Object> m = new LinkedHashMap<>(t);
+            m.remove("png"); m.remove("png_offset"); m.remove("png_total");
+            meta.put(path, m);
+            cursor = Boolean.TRUE.equals(r.get("more")) ? (String) r.get("cursor") : null;
+        } while (cursor != null);
+        assertEquals(total, seen);
+        assertEquals(new ArrayList<>(Arrays.asList("icon", "layers.0", "layers.1", "layers.1.emissive")), new ArrayList<>(bytes.keySet()));
+        assertArrayEquals(l0, bytes.get("layers.0").toByteArray());
+        assertArrayEquals(l1, bytes.get("layers.1").toByteArray());
+        assertArrayEquals(glow, bytes.get("layers.1.emissive").toByteArray());
+        // rebuild the full asset the way the panel does and verify the hash
+        Map<String, Object> full = new LinkedHashMap<>();
+        full.put("render", "static");
+        Map<String, Object> textures = new LinkedHashMap<>();
+        Map<String, Object> icon = new LinkedHashMap<>(meta.get("icon"));
+        icon.put("png", bytes.get("icon").toByteArray());
+        textures.put("icon", icon);
+        List<Object> layers = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            Map<String, Object> l = new LinkedHashMap<>(meta.get("layers." + i));
+            l.put("png", bytes.get("layers." + i).toByteArray());
+            if (i == 1) {
+                Map<String, Object> e = new LinkedHashMap<>(meta.get("layers.1.emissive"));
+                e.put("png", bytes.get("layers.1.emissive").toByteArray());
+                l.put("emissive", e);
+            }
+            layers.add(l);
+        }
+        textures.put("layers", layers);
+        full.put("textures", textures);
+        assertEquals(hash, AssetService.assetHash(full));
+    }
+
     @Test void zipPackWithWrappingFolderAndJarLayout() throws Exception {
         Path zip = tmp.resolve("pack.zip");
         try (ZipOutputStream z = new ZipOutputStream(Files.newOutputStream(zip))) {

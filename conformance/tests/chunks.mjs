@@ -15,6 +15,8 @@ const ORGANIC_TOLERANCE = 4;
 // Receipt-time jitter allowed on the 2 s per-chunk cooldown.
 const COOLDOWN_SLACK_MS = 250;
 
+export { resolveTarget, baseArgs, ring };
+
 const chunkKey = (c) => `${num(c.cx)},${num(c.cz)}`;
 
 /** World/dimension/position the chunk tests use: an online player if there is one, else the first world. */

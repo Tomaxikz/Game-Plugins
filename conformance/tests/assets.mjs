@@ -3,6 +3,7 @@
 import { Check, fail, Skip, isObj, isStr, isIntV, isHex, isBin } from '../lib/check.mjs';
 import { num } from '../lib/msgpack.mjs';
 import { manifestHash, assetHash } from '../lib/canonical.mjs';
+import { assembleAssets } from '../lib/assetchunks.mjs';
 import { okData, errCode } from './helpers.mjs';
 
 const RENDERS = ['static', 'model', 'model_ref', 'special', 'geo', 'unavailable']; // geo: D27, model_ref: D30
@@ -47,6 +48,34 @@ function checkTexture(c, p, t) {
     c.ok(w === num(t.width) && h === num(t.height), `${p} IHDR ${w}x${h} != declared ${t.width}x${t.height}`);
   }
   if (t.emissive !== undefined && t.emissive !== true) checkTexture(c, `${p}.emissive`, t.emissive);
+}
+
+
+/**
+ * assets.get for `keys`, following `more`/`cursor` to the end and reassembling sliced assets (chunk.index order,
+ * base textures, layers[n], emissive overlays; items-and-assets.md section 6 and the chunked-asset rules).
+ * Returns { assets (one per key, first-appearance order), problems, sliced, slices, pages }.
+ */
+async function fetchAssets(ctx, keys) {
+  const entries = [];
+  let cursor;
+  let pages = 0;
+  for (;;) {
+    const args = cursor === undefined ? { keys } : { keys, cursor };
+    const d = okData(await ctx.call('assets.get', args, { timeout: 15000 }), `assets.get page ${pages}`);
+    pages++;
+    if (!Array.isArray(d.assets)) fail('assets must be an array');
+    entries.push(...d.assets);
+    if (d.more === true) {
+      if (!isStr(d.cursor) || d.cursor === '') fail(`page ${pages} has more: true but no cursor string`);
+      if (d.assets.length === 0) fail(`page ${pages} has more: true but carries no asset (no progress)`);
+      cursor = d.cursor;
+      if (pages > 300) fail('assets.get paging did not terminate after 300 pages');
+    } else {
+      const r = assembleAssets(entries);
+      return { ...r, pages };
+    }
+  }
 }
 
 export const tests = [
@@ -132,11 +161,13 @@ export const tests = [
       const man = okData(await ctx.call('assets.manifest', {}), 'assets.manifest');
       const keys = (man.entries ?? []).slice(0, 4).map((e) => e.key);
       if (keys.length === 0) throw new Skip('manifest is empty (nothing to fetch)');
-      const d = okData(await ctx.call('assets.get', { keys }), 'assets.get');
+      const d = await fetchAssets(ctx, keys);
       const c = new Check('assets.get');
-      c.ok(Array.isArray(d.assets) && d.assets.length === keys.length, `expected ${keys.length} assets, got ${d.assets?.length}`);
+      for (const m of d.problems) c.errs.push(m);
+      c.ok(d.assets.length === keys.length, `expected ${keys.length} assets, got ${d.assets.length}`);
       let verified = 0;
-      for (const [i, a] of (d.assets ?? []).entries()) {
+      for (const [i, a] of d.assets.entries()) {
+        if (isObj(a) && a.broken) continue; // reported in problems
         const p = `assets[${i}]`;
         c.ok(isObj(a) && a.key === keys[i], `${p} must be ${keys[i]} (request order)`);
         c.ok(isObj(a) && isHex(a.hash, 16), `${p}.hash must be 16 hex chars`);
@@ -182,7 +213,7 @@ export const tests = [
         }
       }
       c.done();
-      return `${d.assets.length} assets, ${verified} hashes recomputed`;
+      return `${d.assets.length} assets, ${verified} hashes recomputed${d.sliced ? `, ${d.sliced} reassembled from ${d.slices} slices` : ''}`;
     },
   },
   {
@@ -193,8 +224,11 @@ export const tests = [
     async run(ctx) {
       const man = okData(await ctx.call('assets.manifest', {}), 'assets.manifest');
       const first = man.entries?.[0]?.key;
-      const keys = ['item:pm_conformance:no_such_item', ...(first ? [first] : []), 'item:pm_conformance:also_missing'];
-      const d = okData(await ctx.call('assets.get', { keys }), 'assets.get');
+      const last = man.entries?.[man.entries.length - 1]?.key;
+      const known = [...new Set([first, last].filter(Boolean))];
+      const keys = ['item:pm_conformance:no_such_item', ...(known[0] ? [known[0]] : []), 'item:pm_conformance:also_missing', ...(known[1] ? [known[1]] : []), 'item:pm_conformance:third_missing'];
+      const d = await fetchAssets(ctx, keys);
+      if (d.problems.length) fail(d.problems.slice(0, 5).join('; '));
       const got = d.assets.map((a) => a.key);
       if (JSON.stringify(got) !== JSON.stringify(keys)) fail(`order ${JSON.stringify(got)} != request ${JSON.stringify(keys)}`);
       for (const a of d.assets.filter((x) => x.key.startsWith('item:pm_conformance:'))) {
@@ -229,6 +263,24 @@ export const tests = [
       const rest = okData(await ctx.call('assets.get', { keys, cursor: d.cursor }), 'assets.get cursor');
       if (!Array.isArray(rest.assets) || rest.assets.length === 0) fail('cursor returned no assets');
       return `continued with ${rest.assets.length} assets`;
+    },
+  },
+  {
+    id: 'assets.get.chunks',
+    group: 'assets',
+    title: 'assets.get: sliced assets (chunk {index, total, layer?}) follow more/cursor; slices reassemble in index order (base texture, layers[n], emissive overlays) with contiguous indices and png offsets, and the whole-asset hash verifies',
+    needs: ['op:assets.get', 'op:assets.manifest'],
+    timeout: 60000,
+    async run(ctx) {
+      const man = okData(await ctx.call('assets.manifest', {}), 'assets.manifest');
+      const keys = (man.entries ?? []).map((e) => e.key).slice(0, 64);
+      if (keys.length === 0) throw new Skip('manifest is empty');
+      const d = await fetchAssets(ctx, keys);
+      if (d.sliced === 0 && d.problems.length === 0) throw new Skip('no asset was answered in slices (none larger than a frame)');
+      if (d.problems.length) fail(d.problems.slice(0, 6).join('; ') + (d.problems.length > 6 ? ` (+${d.problems.length - 6} more)` : ''));
+      const got = d.assets.map((a) => a.key);
+      if (JSON.stringify(got) !== JSON.stringify(keys)) fail(`assets are not in request order: ${JSON.stringify(got.slice(0, 4))}`);
+      return `${d.sliced} asset(s) reassembled from ${d.slices} slices over ${d.pages} page(s), hashes verified`;
     },
   },
 ];

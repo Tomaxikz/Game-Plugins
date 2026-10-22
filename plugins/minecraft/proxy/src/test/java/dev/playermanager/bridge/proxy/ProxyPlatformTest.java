@@ -127,6 +127,17 @@ class ProxyPlatformTest {
         assertEquals(1L, lobby.get("players"));
     }
 
+    @Test void helloBackendsCarryTheCurrentPlayerCounts() throws Exception {
+        List<?> first = at(data(client.hello()), "game_info", "backends");
+        assertEquals(1L, ((Map<?, ?>) first.get(0)).get("players"));
+        host.backendPlayers.put("lobby", 7);
+        host.backendPlayers.put("survival", 3);
+        List<?> later = at(data(client.hello()), "game_info", "backends");
+        assertEquals(7L, ((Map<?, ?>) later.get(0)).get("players"));
+        assertEquals(3L, ((Map<?, ?>) later.get(1)).get("players"));
+        assertEquals(7L, ((Map<?, ?>) ((List<?>) at(data(client.call("server.info", m())), "game", "backends")).get(0)).get("players"));
+    }
+
     @Test void playerGetOmitsWorldKeysAndReturnsProxyGameSection() throws Exception {
         Map<String, Object> p = data(client.call("player.get", m("id", ALICE, "fields", Arrays.asList("ping", "game.server"))));
         assertEquals("Alice", p.get("name"));

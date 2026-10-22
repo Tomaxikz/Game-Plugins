@@ -57,3 +57,32 @@ export async function waitFor(fn, timeout = 3000, step = 25) {
 }
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const BUSY_WINDOW_MS = 15000;
+const BUSY_STEP_MS = 1000;
+
+/**
+ * Request on the main connection that retries `busy` (an index or cache still being built: operations.md 6e, 10a)
+ * about once a second for up to 15 s. Returns the first answer that is not busy. A bridge still busy after the
+ * window fails the test (and later calls of the same op in this run fail at once with the same message).
+ */
+export async function callWait(ctx, op, args, opts) {
+  ctx._busyGaveUp ??= new Map();
+  if (ctx._busyGaveUp.has(op)) throw new CheckFailed(ctx._busyGaveUp.get(op));
+  const end = Date.now() + BUSY_WINDOW_MS;
+  let tries = 0;
+  for (;;) {
+    const resp = await ctx.call(op, args, opts);
+    tries++;
+    if (!(resp && resp.ok === false && resp.error?.code === 'busy')) {
+      ctx._busyRetries = (ctx._busyRetries ?? 0) + (tries - 1);
+      return resp;
+    }
+    if (Date.now() + BUSY_STEP_MS > end) {
+      const msg = `${op} still answers busy after ${Math.round(BUSY_WINDOW_MS / 1000)} s (${tries} tries): the answer should be ready after server start`;
+      ctx._busyGaveUp.set(op, msg);
+      throw new CheckFailed(msg);
+    }
+    await sleep(BUSY_STEP_MS);
+  }
+}

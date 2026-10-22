@@ -8,8 +8,10 @@ import dev.playermanager.bridge.spi.ChunkWorld;
 import dev.playermanager.bridge.spi.Deadline;
 import dev.playermanager.bridge.spi.LoadedChunk;
 import dev.playermanager.bridge.world.ChunkSurface;
+import dev.playermanager.bridge.world.ChunkVolume;
 import dev.playermanager.bridge.world.ColumnSource;
 import dev.playermanager.bridge.world.SurfaceComputer;
+import dev.playermanager.bridge.world.VolumeComputer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -27,7 +29,8 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  * {@code map.chunks} / {@code chunks.subscribe} for the mod loaders (T7). Snapshots only chunks that are already fully loaded
  * ({@code ServerChunkCache#getChunkNow}, which never loads or generates), on the server thread inside {@code server.execute},
  * at most {@link #BUDGET_NANOS} per batch with batches one tick apart. A snapshot copies the palettised containers of the chunk
- * (a few microseconds per section); the surface scan runs off-thread in core on the copies.
+ * (a few microseconds per section); the surface scan and the {@code map.volume} states (id + sorted properties, resolved per distinct
+ * state and cached) are computed off-thread in core on the copies.
  */
 final class McChunks implements ChunkSource {
     private static final long BUDGET_NANOS = 1_500_000L;
@@ -41,6 +44,9 @@ final class McChunks implements ChunkSource {
     private volatile ChunkHub hub;
 
     McChunks(Ctx ctx) { this.ctx = ctx; }
+
+    /** The snapshots copy every block state, so {@code map.volume} is answered from them. */
+    @Override public boolean supportsVolume() { return true; }
 
     @Override public void attach(ChunkHub hub) {
         this.hub = hub;
@@ -145,7 +151,7 @@ final class McChunks implements ChunkSource {
             for (int i = 0; i < secs.length; i++) {
                 LevelChunkSection s = secs[i];
                 if (s == null) continue;
-                boolean empty = !s.maybeHas(st -> !SurfaceComputer.isAir(Mc.blockId(st.getBlock())));
+                boolean empty = !s.maybeHas(st -> !VolumeComputer.isAir(Mc.blockId(st.getBlock())));      // only air, cave air, void air
                 copy[i] = new McSection(empty ? null : s.getStates().copy(), s.getBiomes().copy());
             }
             ColumnSource cols = new SectionedColumns(min, maxEx, copy);
@@ -160,6 +166,7 @@ final class McChunks implements ChunkSource {
     /**
      * Debug aid ({@code -Dplayermanager.chunks.verify=true} or env {@code PM_CHUNKS_VERIFY=true}): compares the snapshot surface with a full
      * top-down scan of the live chunk (ground truth, on the server thread), so copy / index / hint bugs show up as MISMATCH lines.
+     * The {@code map.volume} band (levels, palette, indices) is compared the same way.
      */
     private void verify(int cx, int cz, ColumnSource cols, final LevelChunk live, final int min, final int maxEx) {
         ColumnSource truth = new ColumnSource() {
@@ -167,17 +174,21 @@ final class McChunks implements ChunkSource {
             public int maxYExclusive() { return maxEx; }
             public int scanStartY(int x, int z) { return maxEx - 1; }
             public String blockId(int x, int y, int z) { return Mc.blockId(live.getBlockState(new net.minecraft.core.BlockPos(x, y, z)).getBlock()); }
+            public String blockState(int x, int y, int z) { return Mc.stateString(live.getBlockState(new net.minecraft.core.BlockPos(x, y, z))); }
             public String biomeId(int x, int y, int z) {
                 return Mc.biomeId(live.getSection(live.getSectionIndex(y)).getNoiseBiome((x & 15) >> 2, (y & 15) >> 2, (z & 15) >> 2));
             }
         };
         ChunkSurface a = SurfaceComputer.compute(cx, cz, cols);
         ChunkSurface b = SurfaceComputer.compute(cx, cz, truth);
-        if (!a.hash.equals(b.hash)) ctx.log.warn("chunk surface verify MISMATCH at " + cx + "," + cz);
-        else ctx.log.info("chunk surface verify ok " + cx + "," + cz + (a.isVoid ? " (void)" : ""));
+        ChunkVolume va = VolumeComputer.compute(cx, cz, cols, a, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        ChunkVolume vb = VolumeComputer.compute(cx, cz, truth, b, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        boolean volume = va.y0 == vb.y0 && va.height == vb.height && va.palette.equals(vb.palette) && java.util.Arrays.equals(va.blocks, vb.blocks);
+        if (!a.hash.equals(b.hash) || !volume) ctx.log.warn("chunk surface verify MISMATCH at " + cx + "," + cz + (volume ? "" : " (volume)"));
+        else ctx.log.info("chunk surface verify ok " + cx + "," + cz + (a.isVoid ? " (void)" : " volume " + va.height + " levels, " + va.palette.size() + " states"));
     }
 
-    /** One section copy: block states only when the section holds more than air; biomes always. */
+    /** One section copy: block states only when the section holds more than air, cave air and void air; biomes always. */
     private static final class McSection implements SectionedColumns.Section {
         private final PalettedContainer<BlockState> blocks;       // null = only air
         private final PalettedContainer<Holder<Biome>> biomes;
@@ -187,6 +198,8 @@ final class McChunks implements ChunkSource {
         public boolean empty() { return blocks == null; }
 
         public String block(int x, int y, int z) { return blocks == null ? SectionedColumns.AIR : Mc.blockId(blocks.get(x, y, z).getBlock()); }
+
+        public String state(int x, int y, int z) { return blocks == null ? SectionedColumns.AIR : Mc.stateString(blocks.get(x, y, z)); }
 
         public String biome(int qx, int qy, int qz) { return Mc.biomeId(biomes.get(qx, qy, qz)); }
     }

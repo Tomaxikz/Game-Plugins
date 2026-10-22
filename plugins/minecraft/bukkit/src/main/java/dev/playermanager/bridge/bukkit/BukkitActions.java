@@ -12,6 +12,7 @@ import dev.playermanager.bridge.spi.MoveLogic;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -223,7 +224,7 @@ final class BukkitActions {
         reg(McActions.WEATHER, r -> global(() -> weather(r)));
         reg(McActions.DIFFICULTY, r -> global(() -> difficulty(r)));
         reg(McActions.GAMERULE, r -> global(() -> gamerule(r)));
-        if (!ctx.env.folia) reg(McActions.SAVE, r -> global(() -> console("save-all flush")));   // Folia has no save-all
+        reg(McActions.SAVE, r -> ctx.env.folia ? foliaSave() : global(() -> console("save-all flush")));      // Folia has no save-all
         if (!ctx.env.folia) reg(McActions.RELOAD, r -> global(() -> console("minecraft:reload")));
         reg(McActions.WIPE_DATA, this::wipe);
         if (ctx.perms.hasLuckPerms()) {
@@ -601,6 +602,57 @@ final class BukkitActions {
     }
 
     // ---- world actions
+
+    /**
+     * Folia has no {@code save-all}: every world is saved with {@code World#save()} on the region that owns a loaded chunk of it (a
+     * player's chunk, else the spawn chunk), on the global region when the world has no loaded chunk to anchor on. Then each online
+     * player's data is saved on its own entity thread. Worlds that failed are named in the refusal.
+     */
+    private CompletableFuture<ActionResult> foliaSave() {
+        return ctx.scheduler.global(() -> {
+            List<Object[]> plan = new ArrayList<Object[]>();       // {World, cx or null, cz or null}
+            for (World w : Bukkit.getWorlds()) {
+                List<Player> ps = w.getPlayers();
+                Location at = !ps.isEmpty() ? ps.get(0).getLocation() : w.getSpawnLocation();
+                int cx = at.getBlockX() >> 4, cz = at.getBlockZ() >> 4;
+                boolean anchored = !ps.isEmpty() || w.isChunkLoaded(cx, cz);
+                plan.add(new Object[] {w, anchored ? cx : null, anchored ? cz : null});
+            }
+            List<Player> players = new ArrayList<Player>(Bukkit.getOnlinePlayers());
+            return new Object[] {plan, players};
+        }).thenCompose(planAndPlayers -> {
+            @SuppressWarnings("unchecked")
+            List<Object[]> plan = (List<Object[]>) planAndPlayers[0];
+            @SuppressWarnings("unchecked")
+            List<Player> players = (List<Player>) planAndPlayers[1];
+            List<CompletableFuture<String>> done = new ArrayList<CompletableFuture<String>>();
+            for (Object[] e : plan) {
+                final World w = (World) e[0];
+                Callable<Object> save = () -> { w.save(); return null; };
+                CompletableFuture<Object> f = e[1] == null ? ctx.scheduler.global(save) : ctx.scheduler.forRegion(w, (Integer) e[1], (Integer) e[2], save);
+                done.add(f.handle((o, err) -> err == null ? null : w.getName() + ": " + describe(err)));
+            }
+            for (Player p : players) {
+                if (!Reflect.has(p, "saveData", 0)) break;
+                CompletableFuture<Object> f = ctx.scheduler.forPlayer(p, () -> { Reflect.call(p, "saveData"); return null; });
+                done.add(f.handle((o, err) -> err == null ? null : p.getName() + ": " + describe(err)));
+            }
+            return CompletableFuture.allOf(done.toArray(new CompletableFuture[0])).thenApply(v -> {
+                List<String> failed = new ArrayList<String>();
+                for (CompletableFuture<String> d : done) if (d.join() != null) failed.add(d.join());
+                if (!failed.isEmpty()) return ActionResult.refused("Some saves failed: " + String.join("; ", failed));
+                Map<String, Object> res = new LinkedHashMap<String, Object>();
+                res.put("worlds", plan.size());
+                res.put("players", players.size());
+                return ActionResult.ok(res);
+            });
+        });
+    }
+
+    private static String describe(Throwable t) {
+        Throwable c = t instanceof java.util.concurrent.CompletionException && t.getCause() != null ? t.getCause() : t;
+        return c.getClass().getSimpleName() + (c.getMessage() == null ? "" : ": " + c.getMessage());
+    }
 
     private ActionResult time(ActionRequest r) {
         long t = lng(r, "amount", 0);

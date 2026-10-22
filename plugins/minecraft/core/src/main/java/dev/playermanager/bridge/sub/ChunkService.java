@@ -12,7 +12,9 @@ import dev.playermanager.bridge.spi.LoadedChunk;
 import dev.playermanager.bridge.spi.PositionSample;
 import dev.playermanager.bridge.spi.PositionSource;
 import dev.playermanager.bridge.world.ChunkSurface;
+import dev.playermanager.bridge.world.ChunkVolume;
 import dev.playermanager.bridge.world.SurfaceComputer;
+import dev.playermanager.bridge.world.VolumeComputer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,6 +43,7 @@ public final class ChunkService implements ChunkHub {
     public static final long FLUSH_MS = 250;
     public static final int MAX_SNAPSHOTS_PER_TICK = 1024;
     public static final int MAX_REQUEST_CHUNKS = 256;
+    public static final int MAX_VOLUME_CHUNKS = 64;
     /**
      * Sweep: changes made without block events (commands, WorldEdit, other plugins, pistons, falling blocks) are caught by
      * re-checking loaded chunks near online players every SWEEP_MS. Unchanged surfaces are filtered by hash, so a sweep
@@ -49,7 +52,7 @@ public final class ChunkService implements ChunkHub {
     static final long SWEEP_MS = 5_000;
     static final int SWEEP_RADIUS = 2;
     static final int SWEEP_MAX = 256;
-    /** Response budget of one {@code map.chunks} page (frame limit is 4 MiB). */
+    /** Response budget of one {@code map.chunks} / {@code map.volume} page (frame limit is 4 MiB). */
     static final int PAGE_BUDGET = 3 * 1024 * 1024 + 512 * 1024;
     private static final int MAX_REMEMBERED = 100_000;
 
@@ -310,7 +313,19 @@ public final class ChunkService implements ChunkHub {
         for (ChunkSubscription sub : subs) sub.accept(w, s, nowMs);
     }
 
-    // ------------------------------------------------------------------ map.chunks
+    // ------------------------------------------------------------------ map.chunks / map.volume
+
+    /** One answered chunk of a page: its wire record and the (estimated) encoded size used to fill the page. */
+    private static final class Item {
+        final Map<String, Object> record;
+        final int size;
+        Item(Map<String, Object> record, int size) { this.record = record; this.size = size; }
+    }
+
+    /** Turns a snapshot into a wire record. Runs on the request thread, off the game thread. */
+    private interface Encoder {
+        Item encode(ChunkWorld world, LoadedChunk chunk);
+    }
 
     /**
      * Surfaces of loaded chunks. {@code cursor} is the index into {@code coords} to continue from (null = 0).
@@ -318,6 +333,34 @@ public final class ChunkService implements ChunkHub {
      */
     public Map<String, Object> request(String world, String dimension, List<int[]> coords, int cursor, Deadline d) {
         if (coords.size() > MAX_REQUEST_CHUNKS) throw BridgeException.invalid("at most " + MAX_REQUEST_CHUNKS + " chunks per request");
+        return page(world, dimension, coords, cursor, d, new Encoder() {
+            public Item encode(ChunkWorld cw, LoadedChunk lc) {
+                ChunkSurface s = SurfaceComputer.compute(lc.cx, lc.cz, lc.columns);
+                baseline.put(new ChunkKey(cw, s.cx, s.cz), s.hashLong());   // what the panel now shows: later block changes compare against it
+                Map<String, Object> m = s.toMap(cw.world, cw.dimension);
+                return new Item(m, MsgPack.encode(m).length);
+            }
+        });
+    }
+
+    /**
+     * Block volumes of loaded chunks ({@code map.volume}, operations.md 6c): the same snapshots as {@link #request}, with block
+     * states. {@code yMin}/{@code yMax} narrow the band ({@link Integer#MIN_VALUE}/{@link Integer#MAX_VALUE} = no limit).
+     * Pages hold whole chunks in request order; {@code cursor} is the index into {@code coords} to continue from.
+     */
+    public Map<String, Object> volume(String world, String dimension, List<int[]> coords, int cursor, final int yMin, final int yMax, Deadline d) {
+        if (coords.size() > MAX_VOLUME_CHUNKS) throw BridgeException.invalid("at most " + MAX_VOLUME_CHUNKS + " chunks per request");
+        if (yMin > yMax) throw BridgeException.invalid("'y_min' must not exceed 'y_max'");
+        return page(world, dimension, coords, cursor, d, new Encoder() {
+            public Item encode(ChunkWorld cw, LoadedChunk lc) {
+                ChunkSurface s = SurfaceComputer.compute(lc.cx, lc.cz, lc.columns);
+                ChunkVolume v = VolumeComputer.compute(lc.cx, lc.cz, lc.columns, s, yMin, yMax);
+                return new Item(v.toMap(), v.wireSize());
+            }
+        });
+    }
+
+    private Map<String, Object> page(String world, String dimension, List<int[]> coords, int cursor, Deadline d, Encoder encoder) {
         ChunkWorld cw = source.resolve(world, dimension);
         List<int[]> slice = new ArrayList<int[]>(coords.subList(Math.min(cursor, coords.size()), coords.size()));
         List<LoadedChunk> loaded = slice.isEmpty() ? new ArrayList<LoadedChunk>() : Await.get(source.snapshot(cw, slice, d), d);
@@ -335,13 +378,10 @@ public final class ChunkService implements ChunkHub {
                 continue;
             }
             d.check();
-            ChunkSurface s = SurfaceComputer.compute(c[0], c[1], lc.columns);
-            baseline.put(new ChunkKey(cw, s.cx, s.cz), s.hashLong());   // what the panel now shows: later block changes compare against it
-            Map<String, Object> m = s.toMap(cw.world, cw.dimension);
-            int size = MsgPack.encode(m).length;
-            if (!chunks.isEmpty() && used + size > PAGE_BUDGET) break;
-            used += size;
-            chunks.add(m);
+            Item item = encoder.encode(cw, lc);
+            if (!chunks.isEmpty() && used + item.size > PAGE_BUDGET) break;
+            used += item.size;
+            chunks.add(item.record);
             consumed++;
         }
         Map<String, Object> out = new LinkedHashMap<String, Object>();

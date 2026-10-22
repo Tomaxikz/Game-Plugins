@@ -32,7 +32,11 @@ public final class Capabilities {
         if (p.actions() != null) for (ActionSpec s : p.actions().specs()) if (cfg.actionEnabled(s.id)) acts.add(s);
         if (!acts.isEmpty()) all.add("action.run");
         if (p.assets() != null) { all.add("assets.manifest"); all.add("assets.get"); }
+        if (p.pack() != null) { all.add("pack.manifest"); all.add("pack.get"); }
         if (p.chunks() != null) { all.add("map.chunks"); all.add("chunks.subscribe"); all.add("chunks.unsubscribe"); }
+        if (p.chunks() != null && p.chunks().supportsVolume()) all.add("map.volume");
+        if (p.biomes() != null) all.add("biomes.list");
+        if (p.blocks() != null) all.add("blocks.list");
         List<String> enabled = new ArrayList<String>();
         for (String op : all) if (cfg.opEnabled(op)) enabled.add(op);
         this.ops = enabled;
@@ -47,8 +51,12 @@ public final class Capabilities {
             f.add(x);
         }
         if (enabled.contains("assets.get")) f.add("assets");
+        if (enabled.contains("pack.manifest") && enabled.contains("pack.get")) f.add("pack");
         if (enabled.contains("map.chunks")) f.add("map.chunks");
         if (enabled.contains("chunks.subscribe")) f.add("chunks.stream");
+        if (enabled.contains("map.volume")) f.add("map.volume");
+        if (enabled.contains("biomes.list")) f.add("biomes");
+        if (enabled.contains("blocks.list")) f.add("blocks");
         if (info.proxy) f.add("proxy");
         this.features = new ArrayList<String>(f);
     }

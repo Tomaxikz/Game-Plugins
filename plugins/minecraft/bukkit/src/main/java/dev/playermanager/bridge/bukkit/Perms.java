@@ -48,12 +48,20 @@ final class Perms {
     /** Any thread: the LuckPerms path; null when LuckPerms is absent or does not know the user. */
     Result lookupLuckPerms(UUID id) { return luckPerms(id); }
 
+    /** Server (or owning) thread: the Vault path alone, for players LuckPerms did not answer for. Null when Vault is absent. */
+    Result lookupVault(Player p) { return vault(p); }
+
+    /** True when a user LuckPerms does not know can still be answered through Vault. */
+    boolean vaultFallback() { return !vaultFailed && hasVault(); }
+
     private Result luckPerms(UUID id) {
         if (lpFailed || !hasLuckPerms()) return null;
         try {
             Object lp = Reflect.callStatic("net.luckperms.api.LuckPermsProvider", "get");
             Object um = Reflect.call(lp, "getUserManager");
-            Object user = Reflect.call(um, "getUser", id);
+            // UserManager has getUser(UUID) and getUser(String): pick by type, the first overload by name is not necessarily the right one
+            Method getUser = um == null ? null : Reflect.method(um.getClass(), "getUser", UUID.class);
+            Object user = getUser == null ? null : getUser.invoke(um, id);
             if (user == null) return null;
             Set<String> names = new LinkedHashSet<String>();
             Object primary = Reflect.call(user, "getPrimaryGroup");

@@ -59,7 +59,11 @@ public final class Perms {
             Class<?> prov = Class.forName("net.luckperms.api.LuckPermsProvider", true, Perms.class.getClassLoader());
             Object lp = method(prov, "get", 0).invoke(null);
             Object um = call(lp, "getUserManager");
-            Object user = call(um, "getUser", id);
+            // UserManager has getUser(UUID) and getUser(String): pick by type, the first overload by name is not necessarily the right one
+            if (um == null) return null;
+            Method getUser = um.getClass().getMethod("getUser", UUID.class);
+            getUser.setAccessible(true);
+            Object user = getUser.invoke(um, id);
             if (user == null) return null;
             Set<String> names = new LinkedHashSet<String>();
             Object primary = call(user, "getPrimaryGroup");

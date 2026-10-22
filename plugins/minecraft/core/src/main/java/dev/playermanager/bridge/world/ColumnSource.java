@@ -13,14 +13,22 @@ public interface ColumnSource {
     int maxYExclusive();
 
     /**
-     * Highest Y worth scanning for the column (inclusive), typically a heightmap hint. It may be too high (the
-     * computer scans down past air) but must never be lower than the real surface. Return {@code maxYExclusive() - 1}
-     * when unknown.
+     * Highest Y worth scanning for the column (inclusive), typically the top of the highest section that holds a block.
+     * It may be too high (the computers scan down past air) but must never be lower than the highest block that is not
+     * {@code minecraft:air}, {@code cave_air} or {@code void_air} (a {@code map.volume} band reaches up to such a block even
+     * when it is {@code light}, {@code barrier} or {@code structure_void}). Return {@code maxYExclusive() - 1} when unknown.
      */
     int scanStartY(int x, int z);
 
     /** Namespaced block id without state properties ({@code minecraft:oak_stairs}); never null. */
     String blockId(int x, int y, int z);
+
+    /**
+     * Full block state: the id, or {@code id[key=value,...]} with every property, keys sorted bytewise (the {@code map.volume}
+     * palette string). A block without properties yields the same String as {@link #blockId}. Equal states should return the same
+     * String instance so that callers can skip the lookup for a run of equal states. Default: the id (no properties).
+     */
+    default String blockState(int x, int y, int z) { return blockId(x, y, z); }
 
     /** Namespaced biome id at the block ({@code minecraft:plains}); never null. */
     String biomeId(int x, int y, int z);

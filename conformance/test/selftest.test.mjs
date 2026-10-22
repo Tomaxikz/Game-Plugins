@@ -17,6 +17,10 @@ import { canonicalBytes, hash16, TEST_VECTOR, sha256Hex, renderSubsetOf, assetHa
 import { encodeFrame, FrameReader, frameHeader, FrameError, MAX_FRAME } from '../lib/framing.mjs';
 import { buildSurface, chunkSurfaceErrors, surfaceHash, voidHash, packU16LE, packI16LE, unpackU16LE, unpackI16LE, NO_FLOOR } from '../lib/chunks.mjs';
 import { itemErrors, containersErrors, blocksErrors, findKeyPaths, gameSectionErrors } from '../lib/schema.mjs';
+import { stateErrors, normaliseState, volumeChunkErrors, surfaceColumns, u16Array, highestNonAir, cellState } from '../lib/volume.mjs';
+import { blocksHash, blocksListErrors, biomeListErrors, propertiesErrors } from '../lib/registry.mjs';
+import { fileHash, listingHash, packPathError, manifestFileErrors } from '../lib/pack.mjs';
+import { assembleAssets } from '../lib/assetchunks.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONF = join(here, '..');
@@ -332,6 +336,282 @@ async function cliReport(root, args, tag) {
   return { ...r, report, byId: new Map((report?.results ?? []).map((x) => [x.id, x])) };
 }
 
+describe('map.volume validator (operations.md 6c)', () => {
+  const cells = (levels) => packU16LE(levels.flatMap((fn) => Array.from({ length: 256 }, (_, i) => fn(i))));
+  const good = () => ({
+    cx: 3,
+    cz: -2,
+    y0: 60,
+    height: 2,
+    palette: ['minecraft:grass_block[snowy=false]', 'minecraft:dirt'],
+    blocks: cells([() => 1, (i) => (i === 5 ? 0xffff : 0)]),
+    biome_ids: ['minecraft:plains'],
+    biome: packU16LE(new Array(256).fill(0)),
+  });
+  const errs = (mut) => {
+    const c = good();
+    mut(c);
+    return volumeChunkErrors(c);
+  };
+
+  test('a good volume passes; helpers read cells and the highest non-air level', () => {
+    const c = good();
+    assert.deepEqual(volumeChunkErrors(c), []);
+    const b = u16Array(c.blocks);
+    assert.equal(cellState(c, b, 0, 61, 0), 'minecraft:grass_block[snowy=false]');
+    assert.equal(cellState(c, b, 5, 61, 0), null);
+    assert.equal(cellState(c, b, 0, 59, 0), null);
+    assert.equal(highestNonAir(c, b), 61);
+  });
+
+  test('a chunk with height 0 has an empty palette and an empty blocks bin', () => {
+    const c = { ...good(), height: 0, palette: [], blocks: new Uint8Array(0) };
+    assert.deepEqual(volumeChunkErrors(c), []);
+    assert.ok(errs((x) => ((x.height = 0), (x.blocks = new Uint8Array(0)))).some((m) => /empty palette/.test(m)));
+  });
+
+  test('air in the palette, unsorted or duplicate properties, duplicate entries and empty brackets are reported', () => {
+    assert.ok(errs((c) => c.palette.push('minecraft:cave_air')).some((m) => /palette contains air/.test(m)));
+    assert.ok(errs((c) => c.palette.push('minecraft:air')).some((m) => /palette contains air/.test(m)));
+    assert.ok(errs((c) => (c.palette[0] = 'minecraft:oak_stairs[waterlogged=false,facing=east]')).some((m) => /not sorted/.test(m)));
+    assert.ok(errs((c) => (c.palette[0] = 'minecraft:oak_stairs[facing=east,facing=west]')).some((m) => /twice/.test(m)));
+    assert.ok(errs((c) => (c.palette[1] = c.palette[0])).some((m) => /appears twice/.test(m)));
+    assert.ok(errs((c) => (c.palette[0] = 'minecraft:stone[]')).some((m) => /empty property list/.test(m)));
+    assert.ok(errs((c) => (c.palette[0] = 'stone')).some((m) => /namespaced/.test(m)));
+    assert.deepEqual(stateErrors('minecraft:light[level=10,waterlogged=false]'), []);
+    assert.deepEqual(stateErrors('minecraft:light'), []);
+    assert.equal(normaliseState('minecraft:oak_stairs', { waterlogged: 'false', facing: 'east' }), 'minecraft:oak_stairs[facing=east,waterlogged=false]');
+    assert.equal(normaliseState('minecraft:stone', {}), 'minecraft:stone');
+  });
+
+  test('sizes and indices: blocks length, biome length, index ranges, height cap, extra keys', () => {
+    assert.ok(errs((c) => (c.blocks = c.blocks.subarray(0, 1022))).some((m) => /1024 bytes/.test(m)));
+    assert.ok(errs((c) => (c.biome = c.biome.subarray(0, 510))).some((m) => /512 bytes/.test(m)));
+    assert.ok(errs((c) => (c.blocks = cells([() => 7, () => 0]))).some((m) => /neither a palette index/.test(m)));
+    assert.ok(errs((c) => (c.biome = packU16LE(new Array(256).fill(1)))).some((m) => /biome index/.test(m)));
+    assert.ok(errs((c) => (c.height = 161)).some((m) => /outside 0\.\.160/.test(m)));
+    assert.ok(errs((c) => (c.extra = 1)).some((m) => /unexpected key extra/.test(m)));
+    assert.ok(errs((c) => (c.y0 = 1.5)).some((m) => /y0 must be an int/.test(m)));
+  });
+
+  test('surfaceColumns reads a map.chunks surface: surface, water, floor, biome; void chunks have no surface', () => {
+    const col = (o = {}) => ({ top: 'minecraft:stone', y: 64, depth: 0, floor: null, biome: 'minecraft:plains', ...o });
+    const s = buildSurface({ cx: 0, cz: 0, world: 'w', dimension: 'minecraft:overworld', columns: Array.from({ length: 256 }, (_, i) => (i === 3 ? col({ top: 'minecraft:water', y: 62, depth: 2, floor: 'minecraft:sand', biome: 'minecraft:river' }) : i === 4 ? col({ top: 'minecraft:air', y: -64 }) : col())) });
+    const cols = surfaceColumns(s);
+    assert.deepEqual([cols[3].surface, cols[3].y, cols[3].depth, cols[3].floorId, cols[3].biome], [true, 62, 2, 'minecraft:sand', 'minecraft:river']);
+    assert.equal(cols[4].surface, false);
+    assert.equal(cols[4].y, -64);
+    const v = buildSurface({ cx: 0, cz: 0, world: 'w', dimension: 'minecraft:overworld', columns: Array.from({ length: 256 }, () => col({ top: 'minecraft:air', y: -64 })) });
+    assert.ok(surfaceColumns(v).every((c) => !c.surface));
+  });
+});
+
+describe('biomes.list and blocks.list validators (operations.md 6d, 6e)', () => {
+  // The two test vectors of operations.md 6e (literal lists).
+  const THREE = [
+    { id: 'minecraft:air', map_color: null, flags: 177, light: 0 },
+    { id: 'minecraft:furnace', map_color: 7368816, flags: 268, light: 0, states: [
+      { properties: 'facing=east,lit=true', flags: 332 },
+      { properties: 'facing=north,lit=true', flags: 332 },
+      { properties: 'facing=south,lit=true', flags: 332 },
+      { properties: 'facing=west,lit=true', flags: 332 },
+    ] },
+    { id: 'minecraft:stone', map_color: 7368816, flags: 12, light: 0 },
+  ];
+  const AIR = [{ id: 'minecraft:air', map_color: null, flags: 177, light: 0 }];
+
+  test('blocks hash vectors: the three-entry example is efeed82267412635, the single air entry is 4fa84a813b94a02a (documented bytes)', () => {
+    assert.equal(blocksHash(THREE), 'efeed82267412635');
+    assert.equal(toHex(canonicalBytes(AIR)), '9183a5666c616773ccb1a26964ad6d696e6563726166743a616972a56c6967687400');
+    assert.equal(toHex(canonicalBytes(AIR)), '91 83 a5 66 6c 61 67 73 cc b1 a2 69 64 ad 6d 69 6e 65 63 72 61 66 74 3a 61 69 72 a5 6c 69 67 68 74 00'.replace(/ /g, ''));
+    assert.equal(blocksHash(AIR), '4fa84a813b94a02a');
+    assert.notEqual(blocksHash([{ ...AIR[0], map_color: 0 }]), '4fa84a813b94a02a');
+    assert.equal(blocksHash(THREE.slice().reverse()), blocksHash(THREE.slice().reverse()));
+    assert.notEqual(blocksHash(THREE.slice().reverse()), 'efeed82267412635');
+  });
+
+  test('the documented examples pass the blocks validator; unknown flag bits are counted, not failed', () => {
+    assert.deepEqual(blocksListErrors(THREE), { errors: [], unknownBits: 0 });
+    const r = blocksListErrors([{ id: 'a:b', map_color: 1, flags: 1 << 12, light: 0 }]);
+    assert.deepEqual(r, { errors: [], unknownBits: 1 });
+  });
+
+  test('blocks rules: sorted unique ids, field types, light vs emits_light, states sorted and differing', () => {
+    const errs = (list) => blocksListErrors(list).errors;
+    const blk = (o = {}) => ({ id: 'a:b', map_color: 5, flags: 12, light: 0, ...o });
+    assert.ok(errs([blk({ id: 'a:z' }), blk({ id: 'a:b' })]).some((m) => /not sorted/.test(m)));
+    assert.ok(errs([blk(), blk()]).some((m) => /appears twice/.test(m)));
+    assert.ok(errs([blk({ map_color: undefined })]).some((m) => /map_color must be present/.test(m)));
+    assert.ok(errs([blk({ map_color: 0x1000000 })]).some((m) => /24-bit/.test(m)));
+    assert.ok(errs([blk({ flags: -1 })]).some((m) => /flags/.test(m)));
+    assert.ok(errs([blk({ light: 16 })]).some((m) => /light/.test(m)));
+    assert.ok(errs([blk({ flags: 12 | 64, light: 0 })]).some((m) => /emits_light/.test(m)));
+    assert.ok(errs([blk({ flags: 12, light: 5 })]).some((m) => /emits_light/.test(m)));
+    assert.deepEqual(errs([blk({ flags: 76, light: 15 })]), []);
+    const st = (props, o = {}) => ({ properties: props, flags: 13, ...o });
+    assert.ok(errs([blk({ states: [st('b=1'), st('a=1')] })]).some((m) => /not sorted/.test(m)));
+    assert.ok(errs([blk({ states: [st('a=1'), st('a=1')] })]).some((m) => /or duplicate/.test(m)));
+    assert.ok(errs([blk({ states: [st('a=1', { flags: 12 })] })]).some((m) => /does not differ/.test(m)));
+    assert.deepEqual(errs([blk({ states: [st('a=1', { flags: 12, map_color: 9 })] })]), []);
+    assert.deepEqual(errs([blk({ states: [st('a=1', { flags: 12, map_color: null })] })]), []);
+    assert.ok(errs([blk({ states: [st('a=1', { map_color: 5 })] })]).some((m) => /equals the block map_color/.test(m)));
+    assert.ok(errs([blk({ states: [] })]).some((m) => /non-empty array/.test(m)));
+    assert.ok(errs([blk({ states: [st('b=1,a=2')] })]).some((m) => /keys not sorted/.test(m)));
+    assert.ok(errs([blk({ states: [{ properties: 'a=1' }] })]).some((m) => /flags must be/.test(m)));
+    assert.deepEqual(propertiesErrors(''), []);
+    assert.deepEqual(propertiesErrors('axis=x,waterlogged=false'), []);
+  });
+
+  test('biomes rules: sorted unique ids, 24-bit water_color, override int|null, modifier enum', () => {
+    const bm = (o = {}) => ({ id: 'minecraft:plains', temperature: 0.8, downfall: 0.4, grass_color: null, foliage_color: null, dry_foliage_color: null, water_color: 4159204, grass_color_modifier: 'none', ...o });
+    assert.deepEqual(biomeListErrors([bm()]), []);
+    assert.deepEqual(biomeListErrors([bm({ id: 'a:b' }), bm({ id: 'minecraft:swamp', grass_color: 5, grass_color_modifier: 'swamp' })]), []);
+    assert.ok(biomeListErrors([bm({ id: 'minecraft:z' }), bm({ id: 'minecraft:a' })]).some((m) => /not sorted/.test(m)));
+    assert.ok(biomeListErrors([bm(), bm()]).some((m) => /twice/.test(m)));
+    assert.ok(biomeListErrors([bm({ water_color: 0xff3f76e4 })]).some((m) => /24-bit/.test(m)));
+    assert.ok(biomeListErrors([bm({ water_color: null })]).some((m) => /water_color/.test(m)));
+    assert.ok(biomeListErrors([bm({ grass_color: -1 })]).some((m) => /grass_color/.test(m)));
+    assert.ok(biomeListErrors([bm({ foliage_color: undefined })]).some((m) => /must be present/.test(m)));
+    assert.ok(biomeListErrors([bm({ grass_color_modifier: 'tropical' })]).some((m) => /grass_color_modifier/.test(m)));
+    assert.ok(biomeListErrors([bm({ temperature: 'hot' })]).some((m) => /temperature/.test(m)));
+    assert.ok(biomeListErrors([bm({ extra: 1 })]).some((m) => /unexpected key/.test(m)));
+    assert.ok(biomeListErrors('x').length === 1);
+  });
+});
+
+describe('pack.* validators (operations.md 10a, 10b; items-and-assets.md 11)', () => {
+  test('hash vectors: bytes 01 02 03 -> 039058c6f2c0cb49; the two-file listing -> d664ed1c29d33d64; the empty listing -> 9e076ceaf246b600', () => {
+    assert.equal(fileHash(Uint8Array.from([1, 2, 3])), '039058c6f2c0cb49');
+    const files = [
+      { path: 'assets/examplemod/models/block/ruby_block.json', hash: '0123456789abcdef', size: 412 },
+      { path: 'assets/examplemod/textures/item/ruby.png', hash: '039058c6f2c0cb49', size: 3 },
+    ];
+    assert.equal(listingHash(files), 'd664ed1c29d33d64');
+    assert.equal(listingHash([]), '9e076ceaf246b600');
+    assert.notEqual(listingHash(files.slice().reverse()), 'd664ed1c29d33d64');
+    assert.deepEqual(manifestFileErrors(files), []);
+  });
+
+  test('path rule: assets/<ns>/<kind>/<path> with the right extension; everything else is rejected', () => {
+    for (const ok of [
+      'assets/examplemod/blockstates/ruby_block.json',
+      'assets/minecraft/models/block/cube_all.json',
+      'assets/a.b-c_d/textures/item/x/y.png',
+      'assets/ns/textures/block/water_still.png.mcmeta',
+      `assets/ns/textures/${'a'.repeat(480)}.png`,
+    ]) assert.equal(packPathError(ok), null, ok);
+    for (const bad of [
+      'assets/ns/sounds/a.ogg',
+      'assets/ns/lang/en_us.json',
+      'assets/ns/items/a.json',
+      'assets/ns/atlases/blocks.json',
+      'assets/ns/textures/block/A.png',
+      'assets/NS/textures/block/a.png',
+      'assets/ns/models/../a.json',
+      'assets/ns/models/./a.json',
+      'assets/../models/a.json',
+      'assets/ns/models/block/a.png',
+      'assets/ns/textures/block/a.json',
+      'assets/ns/models/block/a.json.bak',
+      'assets/ns/textures/block//a.png',
+      '/assets/ns/models/a.json',
+      'data/ns/models/a.json',
+      'assets/ns/models',
+      'assets\\ns\\models\\a.json',
+      `assets/ns/textures/${'a'.repeat(520)}.png`,
+      5,
+    ]) assert.notEqual(packPathError(bad), null, String(bad));
+  });
+
+  test('manifest rules: sorted unique paths, hash and size types, no extra keys', () => {
+    const f = (path, o = {}) => ({ path, hash: '0123456789abcdef', size: 1, ...o });
+    assert.deepEqual(manifestFileErrors([f('assets/a/models/a.json'), f('assets/a/models/b.json')]), []);
+    assert.ok(manifestFileErrors([f('assets/a/models/b.json'), f('assets/a/models/a.json')]).some((m) => /not sorted/.test(m)));
+    assert.ok(manifestFileErrors([f('assets/a/models/a.json'), f('assets/a/models/a.json')]).some((m) => /twice/.test(m)));
+    assert.ok(manifestFileErrors([f('assets/a/sounds/a.ogg')]).some((m) => /path rule/.test(m)));
+    assert.ok(manifestFileErrors([f('assets/a/models/a.json', { hash: 'XYZ' })]).some((m) => /hash/.test(m)));
+    assert.ok(manifestFileErrors([f('assets/a/models/a.json', { size: 1.5 })]).some((m) => /size/.test(m)));
+    assert.ok(manifestFileErrors([f('assets/a/models/a.json', { extra: 1 })]).some((m) => /unexpected key/.test(m)));
+  });
+});
+
+describe('chunked assets.get answers: reassembly and bookkeeping', () => {
+  const bytes = (n, seed) => Uint8Array.from({ length: n }, (_, i) => (i * 7 + seed) & 0xff);
+  const whole = {
+    key: 'item:x:big',
+    render: 'static',
+    textures: {
+      icon: { png: bytes(7, 1), width: 16, height: 16 },
+      layers: [
+        { png: bytes(5, 2), width: 16, height: 16 },
+        { png: bytes(4, 3), width: 16, height: 16, tint_index: 1, emissive: { png: bytes(6, 4), width: 16, height: 16 } },
+      ],
+    },
+  };
+  const hash = assetHash(whole);
+  // Slices of at most 3 bytes in wire order: icon, layers[0], layers[1] base, layers[1] overlay.
+  function slices() {
+    const meta = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'png' && k !== 'emissive'));
+    const parts = [
+      { layer: null, key: 'icon', obj: whole.textures.icon },
+      { layer: 0, key: 'layers', obj: whole.textures.layers[0] },
+      { layer: 1, key: 'layers', obj: whole.textures.layers[1] },
+      { layer: 1, key: 'layers', obj: whole.textures.layers[1].emissive, overlay: true },
+    ];
+    const out = [];
+    for (const p of parts) {
+      for (let off = 0; off < p.obj.png.length; off += 3) {
+        const t = { ...meta(p.obj), png: p.obj.png.slice(off, off + 3), png_offset: off, png_total: p.obj.png.length };
+        const tex = p.overlay ? { emissive: t } : t;
+        const e = { key: whole.key, hash, render: 'static', chunk: { index: 0, total: 0 }, textures: p.layer === null ? { [p.key]: tex } : { layers: [tex] } };
+        if (p.layer !== null) e.chunk.layer = p.layer;
+        out.push(e);
+      }
+    }
+    out.forEach((e, i) => ((e.chunk.index = i), (e.chunk.total = out.length)));
+    return out;
+  }
+  const problems = (mut) => {
+    const l = slices();
+    mut(l);
+    return assembleAssets(l).problems;
+  };
+
+  test('slices of a plain texture, two layers and an emissive overlay join to the asset whose D29 hash is on every slice', () => {
+    const l = slices();
+    assert.equal(l.length, 3 + 2 + 2 + 2);
+    const r = assembleAssets(l);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.sliced, 1);
+    assert.equal(r.slices, 9);
+    assert.equal(r.assets.length, 1);
+    assert.equal(assetHash(r.assets[0]), hash);
+    assert.deepEqual([...r.assets[0].textures.layers[1].emissive.png], [...whole.textures.layers[1].emissive.png]);
+  });
+
+  test('slices may arrive in any order (index order wins); whole assets and unavailable entries pass through in order', () => {
+    const l = slices().reverse();
+    const mixed = [{ key: 'item:x:a', hash: '0'.repeat(16), render: 'unavailable', unavailable_reason: 'not_found' }, ...l, { key: 'item:x:z', hash: '0'.repeat(16), render: 'unavailable', unavailable_reason: 'not_found' }];
+    const r = assembleAssets(mixed);
+    assert.deepEqual(r.problems, []);
+    assert.deepEqual(r.assets.map((a) => a.key), ['item:x:a', 'item:x:big', 'item:x:z']);
+  });
+
+  test('bookkeeping violations are reported: index gap, png_offset gap, wrong layer, bad or differing hash, bad total', () => {
+    assert.ok(problems((l) => l.splice(4, 1)).some((m) => /indices must be 0\.\./.test(m)));
+    assert.ok(problems((l) => (l[4].chunk.index = 7)).some((m) => /indices must be/.test(m)));
+    assert.ok(problems((l) => (l[4].textures.layers[0].png_offset += 1)).some((m) => /png_offset/.test(m)));
+    assert.ok(problems((l) => l.forEach((e) => e.chunk.layer === 1 && (e.chunk.layer = 0))).length > 0);
+    assert.ok(problems((l) => l.forEach((e) => (e.hash = '0123456789abcdef'))).some((m) => /recomputed/.test(m)));
+    assert.ok(problems((l) => (l[l.length - 1].hash = '0'.repeat(16))).some((m) => /hash differs between slices/.test(m)));
+    assert.ok(problems((l) => l.forEach((e) => (e.chunk.total += 1))).some((m) => /indices must be/.test(m)));
+    assert.ok(problems((l) => (l[1].textures.icon.png_total += 1)).some((m) => /add up|png_total/.test(m)));
+    assert.ok(problems((l) => delete l[5].chunk.layer).some((m) => /needs chunk\.layer/.test(m)));
+    assert.ok(problems((l) => (l[0].chunk.layer = 0)).some((m) => /chunk\.layer on a slice without layers/.test(m)));
+    assert.ok(problems((l) => l.splice(0, 1, ...[])).length > 0);
+  });
+});
+
 describe('mock bridge end to end', () => {
   test('unix mode: the whole suite passes against the mock', async () => {
     const root = tempRoot();
@@ -441,6 +721,53 @@ describe('chunk surfaces against the mock', () => {
   });
 });
 
+describe('3D map ops against the mock (map.volume, biomes.list, blocks.list, pack.*)', () => {
+  const IDS = [
+    'map3d.capability-consistency', 'map.volume.schema', 'map.volume.band', 'map.volume.y-range', 'map.volume.missing', 'map.volume.paging', 'map.volume.args',
+    'biomes.list.schema', 'blocks.list.schema', 'blocks.list.hash', 'blocks.list.since-hash', 'blocks.list.paging', 'blocks.list.args', 'blocks.list.matches-map',
+    'pack.manifest.schema', 'pack.manifest.hash', 'pack.manifest.args', 'pack.get.schema', 'pack.get.accounting', 'pack.get.args',
+  ];
+  for (const [name, extra] of [
+    ['unix', []],
+    ['tcp', ['--tcp']],
+    ['unix with --chunk-churn (volume and surface stay consistent while a chunk changes)', ['--chunk-churn']],
+    ['unix, indices still being built for 3 s (busy is retried)', ['--busy-ms', '3000']],
+  ]) {
+    test(`${name}: all 3D map tests pass`, async () => {
+      const root = tempRoot();
+      const mock = await startMock(root, extra);
+      try {
+        const r = await cliReport(root, ['--root', root, '--only', IDS.join(',')], 'map3d');
+        for (const id of IDS) assert.equal(r.byId.get(id)?.status, 'pass', `${id}: ${r.byId.get(id)?.reason}`);
+        assert.equal(r.code, 0, r.out);
+      } finally {
+        await mock.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('without the optional ops (--no-optional-ops) every op test is skipped, the capability check passes and unadvertised ops answer unsupported', async () => {
+    const root = tempRoot();
+    const mock = await startMock(root, ['--no-optional-ops']);
+    try {
+      const ids = [...IDS, 'ops.unadvertised-unsupported', 'ops.advertised-not-unsupported', 'hello.schema'];
+      const r = await cliReport(root, ['--root', root, '--only', ids.join(',')], 'noopt');
+      for (const id of IDS) {
+        const want = id === 'map3d.capability-consistency' ? 'pass' : 'skip';
+        assert.equal(r.byId.get(id)?.status, want, `${id}: ${r.byId.get(id)?.reason}`);
+      }
+      assert.equal(r.byId.get('ops.unadvertised-unsupported').status, 'pass', r.byId.get('ops.unadvertised-unsupported').reason);
+      assert.match(r.byId.get('ops.unadvertised-unsupported').reason, /unadvertised ops/);
+      assert.equal(r.byId.get('hello.schema').status, 'pass', r.byId.get('hello.schema').reason);
+      assert.equal(r.code, 0, r.out);
+    } finally {
+      await mock.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('move_item / move_item_live tests against the mock (D24)', () => {
   const MOVE_IDS = [
     'move.advertised', 'move.empty-destination', 'move.empty-destination.item', 'move.swap', 'move.swap.item', 'move.stack-full', 'move.stack-full.item',
@@ -520,11 +847,51 @@ const BREAK_CASES = [
   { brk: 'chunk-initial-dump', mode: 'unix', fail: ['chunks.subscribe.ack'] },
   { brk: 'chunk-no-coalesce', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
   { brk: 'chunk-oversize-frame', mode: 'unix', actions: true, fail: ['chunks.subscribe.frames'] },
+  { brk: 'asset-slice-gap', mode: 'unix', fail: ['assets.get.chunks'] },
+  { brk: 'asset-slice-wrong-layer', mode: 'unix', fail: ['assets.get.chunks'] },
+  { brk: 'asset-slice-bad-hash', mode: 'unix', fail: ['assets.get.chunks'] },
+  { brk: 'asset-slice-hash-differs', mode: 'unix', fail: ['assets.get.chunks'] },
   { brk: 'move-no-swap', mode: 'unix', actions: true, fail: ['move.swap', 'move.swap.item', 'move.stack-full', 'move.stack-full.item', 'move.stack-remainder', 'move.full-destination-swaps', 'move.item.destination-checks'] },
   { brk: 'move-overstack', mode: 'unix', actions: true, fail: ['move.stack-remainder', 'move.stack-remainder.item', 'move.full-destination-swaps', 'move.full-destination-swaps.item'] },
   { brk: 'move-armor-unchecked', mode: 'unix', actions: true, fail: ['move.armor-mismatch'] },
   { brk: 'move-stale-ok', mode: 'unix', actions: true, fail: ['move.empty-destination', 'move.stale-destination', 'move.stale-destination.item', 'move.no-destination-expectation', 'move.no-destination-expectation.item', 'move.item.destination-checks'] },
   { brk: 'max-connections-4', mode: 'unix', fail: ['conn.eight-concurrent'] },
+  { brk: 'feature-biomes-missing', mode: 'unix', fail: ['map3d.capability-consistency'] },
+  { brk: 'feature-pack-half', mode: 'unix', fail: ['map3d.capability-consistency'] },
+  { brk: 'volume-air-in-palette', mode: 'unix', fail: ['map.volume.schema'] },
+  { brk: 'volume-wrong-band', mode: 'unix', fail: ['map.volume.band'] },
+  { brk: 'volume-unsorted-state', mode: 'unix', fail: ['map.volume.schema'] },
+  { brk: 'volume-bad-length', mode: 'unix', fail: ['map.volume.schema'] },
+  { brk: 'volume-biome-mismatch', mode: 'unix', fail: ['map.volume.band'] },
+  { brk: 'volume-dup-answer', mode: 'unix', fail: ['map.volume.missing'] },
+  { brk: 'volume-lose-on-page', mode: 'unix', fail: ['map.volume.paging'] },
+  { brk: 'volume-ignore-y', mode: 'unix', fail: ['map.volume.y-range'] },
+  { brk: 'volume-too-many-ok', mode: 'unix', fail: ['map.volume.args'] },
+  { brk: 'volume-missing-wrong', mode: 'unix', fail: ['map.volume.missing'] },
+  { brk: 'volume-surface-air', mode: 'unix', fail: ['map.volume.band'] },
+  { brk: 'volume-bad-y-order', mode: 'unix', fail: ['map.volume.args'] },
+  { brk: 'biomes-unsorted', mode: 'unix', fail: ['biomes.list.schema'] },
+  { brk: 'biomes-bad-color', mode: 'unix', fail: ['biomes.list.schema'] },
+  { brk: 'biomes-bad-modifier', mode: 'unix', fail: ['biomes.list.schema'] },
+  { brk: 'biomes-no-plains', mode: 'unix', fail: ['biomes.list.schema'] },
+  { brk: 'biomes-missing-chunk-biome', mode: 'unix', fail: ['biomes.list.schema'] },
+  { brk: 'blocks-wrong-hash', mode: 'unix', fail: ['blocks.list.hash'] },
+  { brk: 'blocks-unsorted', mode: 'unix', fail: ['blocks.list.schema'] },
+  { brk: 'blocks-state-same', mode: 'unix', fail: ['blocks.list.schema'] },
+  { brk: 'blocks-since-ignored', mode: 'unix', fail: ['blocks.list.since-hash'] },
+  { brk: 'blocks-bad-cursor-ok', mode: 'unix', fail: ['blocks.list.args'] },
+  { brk: 'blocks-page-hash', mode: 'unix', fail: ['blocks.list.hash'] },
+  { brk: 'blocks-bad-light', mode: 'unix', fail: ['blocks.list.schema'] },
+  { brk: 'pack-bad-hash', mode: 'unix', fail: ['pack.get.schema', 'pack.get.accounting'] },
+  { brk: 'pack-listing-hash', mode: 'unix', fail: ['pack.manifest.hash'] },
+  { brk: 'pack-unsorted', mode: 'unix', fail: ['pack.manifest.schema'] },
+  { brk: 'pack-path-rule', mode: 'unix', fail: ['pack.manifest.schema'] },
+  { brk: 'pack-accounting', mode: 'unix', fail: ['pack.get.accounting'] },
+  { brk: 'pack-deferred-lost', mode: 'unix', fail: ['pack.get.accounting'] },
+  { brk: 'pack-dup-twice', mode: 'unix', fail: ['pack.get.accounting'] },
+  { brk: 'pack-get-limit', mode: 'unix', fail: ['pack.get.args'] },
+  { brk: 'pack-bad-path-served', mode: 'unix', fail: ['pack.get.args'] },
+  { brk: 'pack-too-large-served', mode: 'unix', fail: ['pack.get.accounting'] },
 ];
 if (SLOW_OK) BREAK_CASES.push({ brk: 'no-ping', mode: 'unix', slow: true, fail: ['ping.keepalive-60s'] });
 
@@ -532,7 +899,7 @@ describe('mock breaks are detected', () => {
   for (const c of BREAK_CASES) {
     test(`--break ${c.brk} (${c.mode}) fails ${c.fail.join(', ')}`, async () => {
       const root = tempRoot();
-      const extra = [...(c.mode === 'tcp' ? ['--tcp'] : []), '--break', c.brk, ...(c.slow ? ['--fast-timers'] : [])];
+      const extra = [...(c.mode === 'tcp' ? ['--tcp'] : []), '--busy-ms', '0', '--break', c.brk, ...(c.slow ? ['--fast-timers'] : [])];
       const mock = await startMock(root, extra);
       try {
         const args = ['--root', root, '--only', [...c.fail, ...(c.slow ? [] : [])].join(',')];

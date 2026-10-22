@@ -19,8 +19,13 @@ export const KNOWN_OPS = [
   'assets.manifest',
   'assets.get',
   'map.chunks',
+  'map.volume',
+  'biomes.list',
+  'blocks.list',
   'chunks.subscribe',
   'chunks.unsubscribe',
+  'pack.manifest',
+  'pack.get',
 ];
 
 /** Names that are never implemented (games/minecraft.md D3, operations.md) and must answer unsupported. */
@@ -51,7 +56,7 @@ export const PLATFORMS = {
   fivem: ['fivem', 'redm'],
 };
 
-export const KNOWN_FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets', 'proxy', 'map.chunks', 'chunks.stream'];
+export const KNOWN_FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets', 'proxy', 'map.chunks', 'chunks.stream', 'map.volume', 'biomes', 'blocks', 'pack'];
 
 export const PLAYER_STATES = ['alive', 'dead', 'spectator'];
 

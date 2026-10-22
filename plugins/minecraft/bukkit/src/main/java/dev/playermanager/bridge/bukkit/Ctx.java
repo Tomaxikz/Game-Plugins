@@ -41,6 +41,7 @@ final class Ctx {
     volatile List<org.bukkit.World> worldList = new ArrayList<org.bukkit.World>();
     final ConcurrentHashMap<UUID, Long> joinedAt = new ConcurrentHashMap<UUID, Long>();
     final ConcurrentHashMap<UUID, String> brands = new ConcurrentHashMap<UUID, String>();
+    final dev.playermanager.bridge.util.IpBans.LastSeen lastIps = new dev.playermanager.bridge.util.IpBans.LastSeen();
 
     Ctx(Plugin plugin, Env env, BridgeLog log, Path root) {
         this.plugin = plugin;
@@ -118,6 +119,17 @@ final class Ctx {
             WorldMap.Info i = worlds.of(ws.get(0));
             mainWorldFolder = i.world.equals(".") ? root.toFile() : root.resolve(i.world).toFile();
         }
+    }
+
+    /** Remembers the address a player connected from (the {@code banned_ips} group of players who are offline later). */
+    void rememberAddress(org.bukkit.entity.Player p) {
+        String ip = addressOf(p);
+        if (ip != null) lastIps.record(p.getUniqueId().toString(), ip);
+    }
+
+    static String addressOf(org.bukkit.entity.Player p) {
+        java.net.InetSocketAddress a = p.getAddress();
+        return a == null || a.getAddress() == null ? null : dev.playermanager.bridge.util.IpBans.text(a.getAddress());
     }
 
     /** A player left: forget everything cached for them. */

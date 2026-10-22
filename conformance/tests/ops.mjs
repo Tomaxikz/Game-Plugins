@@ -34,6 +34,14 @@ function probeFor(op, ctx) {
       return { args: { sub: 999999 } };
     case 'map.chunks':
       return { args: { world: 'pm_conformance_no_such_world', chunks: [[0, 0]] } };
+    case 'map.volume':
+      return { args: { world: 'pm_conformance_no_such_world', chunks: [[0, 0]] } };
+    case 'biomes.list':
+    case 'blocks.list':
+    case 'pack.manifest':
+      return { args: {} };
+    case 'pack.get':
+      return { args: { paths: ['assets/pm_conformance/textures/none.png'] } };
     case 'assets.manifest':
       return { args: { limit: 1 } };
     case 'assets.get':

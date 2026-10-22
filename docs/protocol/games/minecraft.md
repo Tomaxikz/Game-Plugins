@@ -259,6 +259,84 @@ Implementation notes:
 - Fabric/NeoForge/Forge: chunk load events plus a mixin/hook on `LevelChunk#setBlockState` (server side) to mark dirty; read on `server.execute`, compute off-thread.
 - Only loaded chunks. Never force-load or generate.
 
+## 6b. 3D map data (`map.volume`, `biomes.list`, `pack.*`, all optional)
+
+Optional ops for the panel's 3D map (`operations.md` §6c, §6d, §10a-10b; pack semantics in `items-and-assets.md` §11). Offered on Paper/Spigot/Folia and Fabric/NeoForge/Forge; proxies never advertise them. A bridge that cannot meet a rule below on some version leaves that op out of `capabilities.ops` for that version instead of sending approximate data.
+
+#### `map.volume`
+
+| Rule | Value |
+|---|---|
+| Surface (`lowest`) | The §6a surface block of each column (six-id air list, water counts as a block) |
+| Air in `blocks` | Exactly `minecraft:air`, `minecraft:cave_air`, `minecraft:void_air` (index 65535). `light`, `barrier`, `structure_void` are palette entries |
+| Palette strings | Full block state, every property, keys sorted bytewise: the same normalisation as the `player.nearby` slice palette (§6). Values as the game names them (`true`/`false`, `east`, `bottom`) |
+| Biome | As `map.chunks` `biome` (biome at the surface block) |
+| Band | `operations.md` §6c rules: `y0 = max(lowest - 4, min Y, highest - 159)`, top = highest non-air block, clamped by `y_min` / `y_max` |
+
+Implementation notes:
+- Bukkit family (1.13+): the `Chunk#getChunkSnapshot(true, true, false)` snapshot `map.chunks` already takes holds block data; read `ChunkSnapshot#getBlockData(x, y, z).getAsString()` and normalise it (sort properties). Main thread time-sliced, Folia on the chunk's region thread (`RegionScheduler`), exactly as `map.chunks`. Cache state strings per `BlockData`.
+- Fabric/NeoForge/Forge: the `map.chunks` snapshot copies each section's `PalettedContainer<BlockState>`; resolve states off-thread from the copies (`BlockState` → id + `getValues()` sorted by property name, or `BlockStateParser.serialize` then sort). Only `ServerChunkCache#getChunkNow` (FULL chunks).
+- Datapack/mod blocks are sent with their own namespaced ids and properties; nothing is mapped to vanilla.
+
+#### `biomes.list`
+
+Read the **live** biome registry (vanilla, datapack and mod biomes), once after the server has loaded its registries (T9), and cache it. Values per biome: base temperature and downfall from the climate settings; water colour, grass/foliage/dry-foliage colour overrides and grass colour modifier from the special effects (`operations.md` §6d).
+
+| Platform | Source |
+|---|---|
+| Paper 1.20.5+ (Mojang-mapped at runtime), Folia | NMS by reflection, guarded: `CraftServer#getServer()` → `registryAccess()` → the `Registries.BIOME` registry (`lookupOrThrow` 1.21.2+, `registryOrThrow` before); per entry its key and `Biome#getBaseTemperature()`, the `climateSettings` record's `downfall()`, `getSpecialEffects()` → `getWaterColor()`, `getGrassColorOverride()`, `getFoliageColorOverride()`, `getDryFoliageColorOverride()` (1.21.5+), `getGrassColorModifier()` (serialized name). The Bukkit/Paper `Biome` API has no climate or colour values. |
+| Spigot, Paper < 1.20.5 (obfuscated member names) | Encode each biome with the biome's network/direct `Codec` (DataFixerUpper names are not obfuscated) through registry-aware JSON ops and read the datapack JSON keys (`temperature`, `downfall`, `effects.water_color`, `effects.grass_color`, `effects.foliage_color`, `effects.dry_foliage_color`, `effects.grass_color_modifier`). If the codec or registry cannot be found reliably on a version, do not advertise `biomes.list` there and say so in the bridge's NOTES. |
+| Fabric, NeoForge, Forge | `server.registryAccess().lookupOrThrow(Registries.BIOME)`; the same getters (climate settings via an access widener / access transformer) or the codec route above. |
+
+Version notes: where a game version moved one of these values (e.g. into environment attributes in recent versions), read it from its new place; never fall back to a default for a biome that defines the value. Colours stored as `"#RRGGBB"` strings or ARGB ints are sent as 24-bit ints. `dry_foliage_color` is `null` before 1.21.5. `grass_color_modifier` is `none` when the biome does not set one.
+
+#### `pack.manifest` / `pack.get`
+
+| Platform | Effective pack sources (`items-and-assets.md` §11.1) |
+|---|---|
+| Paper, Spigot, Folia | The `assets.*` pack stack: plugin pack folders and generated packs (Nexo, Oraxen, ItemsAdder, ...), the local `resource-pack` of `server.properties`, `platform.asset_paths`, and on top the local zip matching the SHA-1 of the pack the server sends. No mod layer. |
+| Fabric, NeoForge, Forge | Mod resources first (lowest): read from the loaded mod files in place (the jar the loader opened, nested jar-in-jar files through the loader's own file system, dev folders), skipping the `minecraft` entry and mods without `assets/`. Then the same server-side stack as above (Polymer and other generated packs, local `resource-pack`, `platform.asset_paths`). |
+
+Mod-loader servers have no client-only mods, so their resources are absent (the panel falls back for those blocks). File reads and hashing never run on the game thread (T8).
+
+## 6c. Block registry (`blocks.list`, optional)
+
+Optional op for the panel's 2D map colours and block classes (`operations.md` §6e). Offered on Paper and Folia 1.20.5+ and on Fabric/NeoForge/Forge; Spigot, older Paper and proxies do not advertise it. A bridge that cannot read every value below exactly on some version leaves the op out of `capabilities.ops` there instead of sending approximate data.
+
+| Rule | Value |
+|---|---|
+| Blocks | Every entry of the block registry (`BuiltInRegistries.BLOCK`), vanilla and mod blocks, `minecraft:air`, `cave_air`, `void_air` included. Id = the registry key |
+| Default state | `block.defaultBlockState()` |
+| States | `block.getStateDefinition().getPossibleStates()` minus the default; listed only when `map_color` or `flags` differ from the default's |
+| `properties` | Every property of the state as `name=value` (`Property#getName()`, `Property#getName(value)`), sorted by name bytewise, joined with `,`: the bracket part of the `map.volume` palette string, same normalisation |
+| Getter and position | Level-dependent getters are called with `EmptyBlockGetter.INSTANCE` and `BlockPos.ZERO`, never a live level |
+| `map_color` | `state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)`: `MapColor.NONE` (id 0) → `null`, otherwise `mapColor.col & 0xFFFFFF` (the base colour; no `Brightness` shading) |
+| `light` | `state.getLightEmission()`; NeoForge/Forge: `state.getLightEmission(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)` so mod overrides count |
+
+Flags (Mojang names; the 26.x mod loaders and Paper 1.20.5+ use them at runtime):
+
+| Value | Name | Source |
+|---|---|---|
+| 1 | `air` | `state.isAir()` |
+| 2 | `liquid` | `state.liquid()` (the `liquid` block property: water, lava, bubble column, mod fluid blocks). Waterlogged blocks and water plants do not have it |
+| 4 | `can_occlude` | `state.canOcclude()` |
+| 8 | `full_cube` | `state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)` |
+| 16 | `no_collision` | `state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty()` |
+| 32 | `replaceable` | `state.canBeReplaced()` (the no-argument form: the `replaceable` block property) |
+| 64 | `emits_light` | `light > 0` for that state |
+| 128 | `render_invisible` | `state.getRenderShape() == RenderShape.INVISIBLE` |
+| 256 | `block_entity` | `state.hasBlockEntity()`, or `getRenderShape()` is `ENTITYBLOCK_ANIMATED` on versions that still have that constant (look it up by name; it is gone in recent versions) |
+| 512 | `waterloggable` | `state.hasProperty(BlockStateProperties.WATERLOGGED)` |
+
+Mod getters that throw: catch per state. A non-default state that throws is not listed (the panel uses the block default for it). If the default state throws, `map_color` comes from `block.defaultMapColor()` (`null` for `MapColor.NONE`), each flag whose getter threw is 0, `light` is 0 when its getter threw, and the bridge logs one line per block id. Never skip the block.
+
+Implementation notes:
+- When: build once after the server has started (Bukkit: `ServerLoadEvent`, or a task scheduled at enable, which runs on the first tick; Fabric `ServerLifecycleEvents.SERVER_STARTED`; NeoForge/Forge `ServerStartedEvent`), on a bridge worker thread (T10). Vanilla state values are fields precomputed at startup, so reading them off the game thread is safe; with the empty getter no world state is touched. Until the answer is ready, `blocks.list` answers `busy`.
+- Cache the encoded pages and the `hash` for the bridge's lifetime. A vanilla registry is about 1,100 blocks and fits in one frame; large modpacks (tens of thousands of blocks) need several pages.
+- Paper 1.20.5+ and Folia: NMS by reflection, guarded: `net.minecraft.core.registries.BuiltInRegistries.BLOCK`, `net.minecraft.world.level.EmptyBlockGetter.INSTANCE`, `net.minecraft.core.BlockPos.ZERO` and the getters above by their Mojang names. Bukkit servers have only vanilla blocks, but the registry still gives the exact values for the running version.
+- Spigot and Paper < 1.20.5: member names are obfuscated, and the Bukkit API has no exact equivalent for several values (`Material#isOccluding()` is not `canOcclude()`; there is no collision-shape or render-shape API, and `BlockData#getMapColor()` / `getLightEmission()` exist only in newer API versions). Do not advertise `blocks.list` there and say so in the bridge's NOTES; these servers have only vanilla blocks, which the panel's built-in table covers.
+- Fabric, NeoForge, Forge (26.x): direct calls; put the version-dependent ones (`liquid()`, `canBeReplaced()`, `getLightEmission` overloads, the `RenderShape` constant lookup, property strings) in the per-generation version shim.
+
 ## 7. Actions
 
 `actions` lists what the bridge supports (the panel offers an action only when present). Ids and `args` are the exact ones in `src/actions.rs`. Where the panel currently implements an action through console commands or saved-data editing, a bridge executes it **natively** and returns the same result envelope (`operations.md` → `action.run`).
@@ -362,6 +440,10 @@ Additional native actions (not in `src/actions.rs` yet; the panel offers them wh
 | `positions.subscribe` | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | Folia: per-region schedulers; batched snapshot |
 | `events.subscribe` (incl. `chat`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `assets.*` (server pack / mod jars) | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | Resource pack via `getServerResourcePack`; Nexo/Oraxen/ItemsAdder packs on disk |
+| `map.volume` (optional) | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | §6b; same snapshots as `map.chunks` |
+| `biomes.list` (optional) | ✓ | partial | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | §6b; Spigot / Paper < 1.20.5 only through the codec route, else not advertised |
+| `pack.manifest`, `pack.get` (optional) | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | §6b; mod resources only on mod loaders |
+| `blocks.list` (optional) | partial | ✗ | partial | ✗ | ✗ | ✓ | ✓ | ✓ | §6c; Paper / Folia 1.20.5+ only (Mojang names at runtime), never Spigot |
 | action: kick | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | action: ban / unban / ban_ip | ✓ | ✓ | ✓ | partial | partial | ✓ | ✓ | ✓ | Proxies need LiteBans/AdvancedBan |
 | action: whitelist, op, gamemode, kill, heal | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | |

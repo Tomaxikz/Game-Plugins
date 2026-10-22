@@ -1,19 +1,25 @@
 package dev.playermanager.bridge.bukkit;
 
+import dev.playermanager.bridge.world.BlockSlice;
 import dev.playermanager.bridge.world.ColumnSource;
 import java.lang.reflect.Method;
 import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.ChunkSnapshot;
 import org.bukkit.Material;
 import org.bukkit.block.Biome;
+import org.bukkit.block.data.BlockData;
 
 /**
  * {@link ColumnSource} over a Bukkit {@link ChunkSnapshot} (immutable, readable from any thread). Block ids come from the
- * material key (no block states, minecraft.md 6a / D23 e); the scan starts below the highest non-empty section because the
- * snapshot heightmap is MOTION_BLOCKING on Paper (it ignores plants and other non-solid blocks) and so is no safe hint.
+ * material key (no block states, minecraft.md 6a / D23 e); {@code map.volume} reads the full state through
+ * {@link ChunkSnapshot#getBlockData}, normalised once per distinct {@link BlockData}. The scan starts below the highest
+ * non-empty section ({@code isSectionEmpty} means "only air, cave air and void air") because the snapshot heightmap is
+ * MOTION_BLOCKING on Paper (it ignores plants and other non-solid blocks) and so is no safe hint.
  */
 final class SnapshotColumns implements ColumnSource {
     private static final ConcurrentHashMap<Material, String> BLOCK_IDS = new ConcurrentHashMap<Material, String>();
+    /** Normalised state string per block data: one {@code getAsString} + sort per distinct state for the life of the server. */
+    private static final ConcurrentHashMap<BlockData, String> STATES = new ConcurrentHashMap<BlockData, String>();
     private static final ConcurrentHashMap<Object, String> BIOME_IDS = new ConcurrentHashMap<Object, String>();
     /** {@code ChunkSnapshot#getBiome(int, int, int)} exists from 1.16-ish; absent on 1.13 (only the column biome). */
     private static final Method BIOME_3D = Reflect.method(ChunkSnapshot.class, "getBiome", int.class, int.class, int.class);
@@ -49,6 +55,20 @@ final class SnapshotColumns implements ColumnSource {
             BLOCK_IDS.put(m, id);
         }
         return id;
+    }
+
+    @Override public String blockState(int x, int y, int z) {
+        Material m = snap.getBlockType(x, y, z);                 // no allocation: air (most cells of a band) never builds a BlockData
+        if (m == Material.AIR) return "minecraft:air";
+        if (m == Material.CAVE_AIR) return "minecraft:cave_air";
+        if (m == Material.VOID_AIR) return "minecraft:void_air";
+        BlockData data = snap.getBlockData(x, y, z);
+        String s = STATES.get(data);
+        if (s == null) {
+            s = BlockSlice.normalizeState(data.getAsString());
+            STATES.put(data, s);
+        }
+        return s;
     }
 
     @Override public String biomeId(int x, int y, int z) {

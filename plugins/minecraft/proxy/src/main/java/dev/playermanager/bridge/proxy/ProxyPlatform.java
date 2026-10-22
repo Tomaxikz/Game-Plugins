@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -63,17 +64,16 @@ public final class ProxyPlatform implements Platform {
     private final Map<UUID, String> names = new ConcurrentHashMap<UUID, String>();
     private final List<String> integrations;
     private volatile BridgeCore core;
+    /** The backends as of the last successful read, served when the proxy cannot be read at that moment. */
+    private volatile List<Map<String, Object>> lastBackends;
 
     public ProxyPlatform(ProxyHost host, BridgeLog log, Path root, String bridgeVersion, String platformName) {
         this.host = host;
         this.log = log;
         this.exec = Executors.newSingleThreadExecutor(daemon("pm-bridge-proxy"));
         this.integrations = host.integrations();
-        Map<String, Object> hello = new LinkedHashMap<String, Object>();
-        Map<String, Object> range = host.protocolRange();
-        if (range != null) hello.put("protocol_range", range);
-        hello.put("modded", Boolean.FALSE);       // set once at start; per-player mod lists are in players.list client rows
-        hello.put("backends", backendMaps(host.backends()));
+        final Map<String, Object> range = host.protocolRange();
+        lastBackends = backendMaps(host.backends());
         this.info = PlatformInfo.builder(platformName, root)
                 .platformVersion(host.proxyVersion())
                 .gameVersion(host.gameVersion())
@@ -82,7 +82,15 @@ public final class ProxyPlatform implements Platform {
                 .events(EVENTS)
                 .features("sensitive")
                 .integrations(integrations)
-                .helloGame(hello)
+                .helloGame(new Supplier<Map<String, Object>>() {
+                    public Map<String, Object> get() {
+                        Map<String, Object> hello = new LinkedHashMap<String, Object>();
+                        if (range != null) hello.put("protocol_range", range);
+                        hello.put("modded", Boolean.FALSE);       // per-player mod lists are in players.list client rows
+                        hello.put("backends", liveBackends());
+                        return hello;
+                    }
+                })
                 .proxy(true)
                 .javaMajor(Versions.javaMajor())
                 .build();
@@ -209,7 +217,7 @@ public final class ProxyPlatform implements Platform {
         m.put("worlds", new ArrayList<Object>());
         m.put("extensions", host.plugins());
         Map<String, Object> game = new LinkedHashMap<String, Object>();
-        game.put("backends", backendMaps(host.backends()));
+        game.put("backends", liveBackends());
         m.put("game", game);
         return m;
     }
@@ -269,6 +277,16 @@ public final class ProxyPlatform implements Platform {
     private static boolean isAdmin(List<String> groups) {
         for (String g : groups) if (ADMIN_GROUPS.contains(g)) return true;
         return false;
+    }
+
+    /** Backends with their current player counts (names and addresses as configured). */
+    private List<Map<String, Object>> liveBackends() {
+        try {
+            lastBackends = backendMaps(host.backends());
+        } catch (RuntimeException e) {
+            log.debug("backend list unavailable: " + e);
+        }
+        return lastBackends;
     }
 
     private static List<Map<String, Object>> backendMaps(List<ProxyHost.BackendSnap> backends) {

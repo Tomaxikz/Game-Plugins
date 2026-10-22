@@ -1,6 +1,8 @@
 package dev.playermanager.bridge.bukkit;
 
 import dev.playermanager.bridge.spi.ActionRegistry;
+import dev.playermanager.bridge.spi.BiomeRegistry;
+import dev.playermanager.bridge.spi.BlockRegistry;
 import dev.playermanager.bridge.spi.BridgeLog;
 import dev.playermanager.bridge.spi.ChunkSource;
 import dev.playermanager.bridge.spi.InventoryProvider;
@@ -25,6 +27,9 @@ final class BukkitPlatform implements Platform {
     private final PackLocator packs;
     private final BukkitActions actions;
     final BukkitChunks chunks;
+    private BukkitBiomes biomes;            // null where the registry cannot be read exactly (Spigot, Paper < 1.20.5); probed on first use, off the game thread
+    private BukkitBlocks blocks;            // null likewise
+    private boolean registriesProbed;
 
     BukkitPlatform(Ctx ctx, PlatformInfo info, BukkitEvents events) {
         this.ctx = ctx;
@@ -51,6 +56,17 @@ final class BukkitPlatform implements Platform {
     @Override public NearbyProvider nearby() { return nearby; }
     @Override public PositionSource positions() { return positions; }
     @Override public PackSourceProvider assets() { return packs; }
+    @Override public PackSourceProvider pack() { return packs; }
     @Override public ChunkSource chunks() { return chunks; }
+    @Override public BiomeRegistry biomes() { probeRegistries(); return biomes; }
+    @Override public BlockRegistry blocks() { probeRegistries(); return blocks; }
+
+    /** Core asks for the two registries while it starts, on a bridge thread: the reflection probes and the sample block read run there, not on the game thread. */
+    private synchronized void probeRegistries() {
+        if (registriesProbed) return;
+        registriesProbed = true;
+        biomes = BukkitBiomes.create(ctx);
+        blocks = BukkitBlocks.create(ctx);
+    }
     @Override public ActionRegistry actions() { return actions.registry(); }
 }

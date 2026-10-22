@@ -8,6 +8,12 @@ import java.util.concurrent.CompletableFuture;
  * ever read: never load or generate one.
  */
 public interface ChunkSource {
+    /**
+     * True when the snapshots carry block states ({@link dev.playermanager.bridge.world.ColumnSource#blockState}), i.e. when
+     * {@code map.volume} can be answered from them. Default: false (the op is then not advertised).
+     */
+    default boolean supportsVolume() { return false; }
+
     /** Called once by core at start. Keep the hub; report dirty/loaded chunks to it while {@link ChunkHub#active()}. */
     void attach(ChunkHub hub);
 

@@ -129,7 +129,15 @@ public final class ItemRecords {
 
         // nested records (hash/fingerprint need them full)
         List<Object> nested = null;
-        if (contents != null && !contents.isEmpty() && depth < MAX_DEPTH) {
+        if (raw.meta != null && !raw.meta.contents.isEmpty() && depth < MAX_DEPTH) {
+            nested = new ArrayList<Object>();
+            for (int i = 0; i < raw.meta.contents.size(); i++) {
+                Map<String, Object> cr = build(raw.meta.contents.get(i), FULL, depth + 1, null);
+                cr.put("slot", raw.meta.contentSlots.get(i));
+                nested.add(cr);
+            }
+            r.put("contents", nested);
+        } else if (contents != null && !contents.isEmpty() && depth < MAX_DEPTH) {
             nested = new ArrayList<Object>();
             for (Map<String, Object> c : contents) {
                 RawItem child = RawItem.fromNbt(c, 0);

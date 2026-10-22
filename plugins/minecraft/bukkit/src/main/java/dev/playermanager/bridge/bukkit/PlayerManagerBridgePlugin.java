@@ -55,7 +55,10 @@ public final class PlayerManagerBridgePlugin extends JavaPlugin {
             } catch (Throwable t) {
                 log.debug("reload listener unavailable: " + t);
             }
-            for (Player p : Bukkit.getOnlinePlayers()) ctx.joinedAt.put(p.getUniqueId(), Long.valueOf(System.currentTimeMillis()));
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                ctx.joinedAt.put(p.getUniqueId(), Long.valueOf(System.currentTimeMillis()));
+                ctx.rememberAddress(p);
+            }
 
             List<String> integrations = new ArrayList<String>();
             if (ctx.perms.hasLuckPerms()) integrations.add("luckperms");

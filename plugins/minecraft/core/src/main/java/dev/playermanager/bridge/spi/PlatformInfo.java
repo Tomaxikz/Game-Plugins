@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /** Static identity and capability declaration of a platform. Build with {@link Builder}. */
 public final class PlatformInfo {
@@ -21,6 +22,8 @@ public final class PlatformInfo {
     public final List<String> features;     // extra features beyond the ones core derives
     public final List<String> integrations;
     public final Map<String, Object> helloGame;   // hello.game extras, may be null
+    /** Evaluated on every {@code hello} instead of {@link #helloGame} when set (extras that change while the server runs). */
+    public final Supplier<Map<String, Object>> helloGameSupplier;
     public final boolean proxy;
     /** Server name shown nowhere by core; informational. */
     public final int javaMajor;
@@ -33,6 +36,7 @@ public final class PlatformInfo {
         features = Collections.unmodifiableList(new ArrayList<String>(b.features));
         integrations = Collections.unmodifiableList(new ArrayList<String>(b.integrations));
         helloGame = b.helloGame == null ? null : Collections.unmodifiableMap(new LinkedHashMap<String, Object>(b.helloGame));
+        helloGameSupplier = b.helloGameSupplier;
         proxy = b.proxy; javaMajor = b.javaMajor;
     }
 
@@ -43,6 +47,7 @@ public final class PlatformInfo {
         Path serverRoot;
         List<String> playerFields = new ArrayList<String>(), events = new ArrayList<String>(), features = new ArrayList<String>(), integrations = new ArrayList<String>();
         Map<String, Object> helloGame;
+        Supplier<Map<String, Object>> helloGameSupplier;
         boolean proxy;
         int javaMajor = 8;
 
@@ -59,6 +64,8 @@ public final class PlatformInfo {
         public Builder features(String... f) { features = new ArrayList<String>(Arrays.asList(f)); return this; }
         public Builder integrations(List<String> i) { integrations = new ArrayList<String>(i); return this; }
         public Builder helloGame(Map<String, Object> g) { helloGame = g; return this; }
+        /** Extras computed per {@code hello}; must be quick, thread-safe and must not throw. */
+        public Builder helloGame(Supplier<Map<String, Object>> g) { helloGameSupplier = g; return this; }
         public Builder proxy(boolean p) { proxy = p; return this; }
         public Builder javaMajor(int j) { javaMajor = j; return this; }
         public PlatformInfo build() { return new PlatformInfo(this); }

@@ -24,6 +24,8 @@ public class FakeChunks implements ChunkSource {
     /** When true, {@code resolve} without a dimension for "world" is ambiguous (like a single-folder multi-dimension layout). */
     public volatile boolean ambiguous = false;
     public volatile int snapshotCalls;
+    /** Whether the fake snapshots carry block states (map.volume). */
+    public volatile boolean volume = true;
 
     public FakeChunks(java.util.concurrent.Executor main) { this.main = main; }
 
@@ -49,6 +51,8 @@ public class FakeChunks implements ChunkSource {
     public void unload(int cx, int cz) { loaded.remove(pos(cx, cz)); }
 
     @Override public void attach(ChunkHub hub) { this.hub = hub; }
+
+    @Override public boolean supportsVolume() { return volume; }
 
     @Override public ChunkWorld resolve(String world, String dimension) {
         if (!"world".equals(world)) throw BridgeException.notFound("unknown world");

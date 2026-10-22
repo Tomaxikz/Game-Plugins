@@ -30,7 +30,7 @@ core.stop();                                      // removes bridge.sock + bridg
   `.platformVersion/.gameVersion/.bridgeVersion/.playerFields/.events/.features/.integrations/.proxy(true)/.helloGame(map)`.
   * `features` you declare: `offline_players`, `sensitive`, `inventory.write`. Core adds `positions.stream`, `assets`, `proxy`.
   * `helloGame`: extras for `hello.game_info` (decision D18; `hello.game` stays the string `minecraft_java`). Proxies also put the same map
-    into `server.info.game`.
+    into `server.info.game`. `.helloGame(Supplier<Map>)` evaluates the extras on every `hello` (live values; must be quick and must not throw).
   * Bridge version: `System.getenv("BRIDGE_VERSION")`, else repo-root `VERSION` — the Gradle root already exposes it as `project.version`.
 
 ## 2. `Platform`
@@ -44,7 +44,10 @@ interface Platform {
   default NearbyProvider nearby();          // player.nearby
   default PositionSource positions();       // positions.subscribe / keyframe / unsubscribe
   default PackSourceProvider assets();      // assets.manifest / assets.get
-  default ChunkSource chunks();             // map.chunks, chunks.subscribe / unsubscribe (section 8a)
+  default PackSourceProvider pack();        // pack.manifest / pack.get (section 8d)
+  default ChunkSource chunks();             // map.chunks, chunks.subscribe / unsubscribe (section 8a); map.volume when supportsVolume()
+  default BiomeRegistry biomes();           // biomes.list (section 8c)
+  default BlockRegistry blocks();           // blocks.list (section 8c)
   default ActionRegistry actions();         // action.run (empty by default)
 }
 ```
@@ -182,13 +185,45 @@ CompletableFuture<List<LoadedChunk>> snapshot(ChunkWorld w, List<int[]> cxcz, De
 * `ChunkWorld(world, dimension, handle)`: one instance per level (`handle` = your ServerLevel/World; equality by world+dimension).
 * `snapshot` runs on the owning thread(s) within <= 2 ms game-thread time per tick (spread the list over ticks; check `d.expired()`), never loads/generates
   a chunk, and returns `LoadedChunk(cx, cz, ColumnSource)`. `world.ColumnSource` is an **immutable, thread-safe** view: `minY()`, `maxYExclusive()`,
-  `scanStartY(x,z)` (inclusive upper bound where scanning can start; return `maxYExclusive()-1` if unsure, never lower than the real surface; a heightmap is only
-  a safe hint if it counts every non-air block), `blockId(x,y,z)` (namespaced id, no states), `biomeId(x,y,z)`. Core computes the surface off-thread (`SurfaceComputer`).
+  `scanStartY(x,z)` (inclusive upper bound where scanning can start; return `maxYExclusive()-1` if unsure, never lower than the highest block that is not `air`/`cave_air`/`void_air`; a heightmap is only
+  a safe hint if it counts every non-air block), `blockId(x,y,z)` (namespaced id, no states), `blockState(x,y,z)` (`map.volume`, section 8c; default = the id), `biomeId(x,y,z)`. Core computes the surface off-thread (`SurfaceComputer`).
 * Dirty tracking: call `hub.dirty(chunkWorld, cx, cz, loaded)` from chunk-load events (`loaded=true`) and block-change hooks (`false`), **only while `hub.active()`**
   (true iff a `chunks.subscribe` exists; test it first so an idle bridge costs nothing). Cheap, thread-safe, any thread. Core coalesces (>= 2 s per chunk snapshot,
   one batch in flight), hashes, filters by world/area/last-sent hash, and applies the 250 ms flush / 64 per frame / 16 per second load-mode rules (D23).
 * Tests: `support.FakeChunks` + `support.FakeColumns` (testFixtures) and `FakePlatform.chunks`; `sub.ChunkService` takes a fake clock (`tick(nowMs)`).
 * Bukkit reference: `bukkit/BukkitChunks`, `BukkitChunkEvents`, `SnapshotColumns`.
+
+## 8c. Block volumes, biomes, blocks (`map.volume`, `biomes.list`, `blocks.list`) — optional
+
+* **`map.volume`**: `ChunkSource.supportsVolume()` (default false) true = advertise `map.volume` + feature `map.volume`. The op reuses `snapshot`
+  and the `ColumnSource`: implement `blockState(x,y,z)` = `id` or `id[key=value,...]` with every property, keys sorted bytewise
+  (`world.BlockSlice.normalizeState` sorts a game string); return the **same String instance** for equal states (core skips its lookup for runs of one
+  instance); cache the string per state, not per call. `scanStartY` must not be below the highest block that is not one of the three air ids
+  (a `light`/`barrier` section counts as non-empty). Core: `world.VolumeComputer` (band rules of operations.md 6c; O(cells of the band) <= 40960
+  state reads, one hash lookup per state change), `sub.ChunkService.volume` (<= 64 chunks, whole chunks per page, `more`/`cursor`).
+  Bukkit: `SnapshotColumns#blockState`; mods: `SectionedColumns.Section#state`.
+* **`biomes.list`** (`spi.BiomeRegistry`): `whenReady()` completes when the registries are frozen (T9), `read()` returns `BiomeInfo`s on a worker thread, once.
+  Core (`world.BiomeCatalog`) sorts, encodes and caches; requests wait for the read up to their deadline, then `timeout`; a failed read answers `unsupported`.
+  Return null from `Platform.biomes()` where the registry cannot be read exactly.
+* **`blocks.list`** (`spi.BlockRegistry`): `whenReady()` completes when the server has started (T10); `read(BlockSink)` runs once on a worker thread:
+  `sink.block(id, mapColor|NO_COLOR, flags, light)` for each block's default state, then for each other state `if (sink.differs(color, flags)) sink.state(properties, color, flags)`
+  (`spi.BlockFlags` has the bits). Core (`world.BlockCatalog`) sorts, encodes, hashes and pages (`busy` until built, `since_hash`/`unchanged`, `<hash>:<page>` cursors).
+  Exception rules (minecraft.md 6c) are the platform's: skip a throwing non-default state, zero a throwing default-state value, log once per block.
+  Return null from `Platform.blocks()` where a value cannot be read exactly (Spigot, Paper < 1.20.5).
+* Tests: `support.FakeChunks#volume` / `FakeColumns` (states via `set(x,y,z,"id[k=v]")`), `RegistryLoopbackTest` (fake registries), `BlockCatalogTest` (hash vectors).
+* References: `bukkit/Nms`, `BukkitBiomes`, `BukkitBlocks` (reflection, Mojang names); `common/.../mc/McBiomes`, `McBlocks` + the `Mc` version shim.
+
+## 8d. Raw pack files (`pack.manifest`, `pack.get`) — stable
+
+`Platform.pack()` returns a `PackSourceProvider` whose `packs()` is the **effective pack** (items-and-assets.md section 11.1), lowest priority first; a path in a
+later source replaces the same path of an earlier one as a whole file. `null` removes both ops and the `pack` feature. Bukkit returns the `assets()` stack
+(`PackLocator`); mod loaders return `McPacks.effective()`: one `new PackSource.Dir(root, label, fixedFingerprint)` per mod resource root from
+`LoaderHooks.modRoots()` (the loader's own file systems, nested jar-in-jar included, ordered by mod id), then the same server-side stack.
+
+`pack.PackService` (created by `BridgeCore` when `pack()` is non-null) does the rest: `PackSource.walk/open` list and stream the files, only `pack.PackPaths.valid`
+paths are kept, hashing runs on its own min-priority thread (`pm-bridge-pack`), the sources are re-checked at most once a second (`PackSource.fingerprint()`),
+`busy` while an index is being built. Sources must therefore have a cheap, change-sensitive `fingerprint()`; a source that never changes (loader-owned mod files)
+may pass a fixed one. Tests: `pack.PackServiceTest`, `pack.PackLoopbackTest`; live check: `scripts/pack-hook.sh`. Details: `NOTES-section-P.md`.
 
 ## 9. Configuration (`.playermanager/config.json`)
 

@@ -392,10 +392,10 @@ public final class AssetService {
             } catch (Exception e) {
                 wire = unavailable(keys.get(i), "not_found");
             }
-            int size = MsgPack.encode(wire).length;
+            int size = wireSize(wire);
             if (size > MAX_ASSET_BYTES + 65536) {
                 wire = unavailable(keys.get(i), "too_large");
-                size = MsgPack.encode(wire).length;
+                size = wireSize(wire);
             }
             if (size <= FRAME_BUDGET) {
                 if (chunk > 0) { chunk = 0; continue; }   // cursor pointed inside a now-small asset
@@ -404,18 +404,17 @@ public final class AssetService {
                 used += size;
                 continue;
             }
-            // oversized: split textures into chunks (only plain top-level textures can be split)
-            if (!chunkable(wire)) {
+            // oversized: one slice of one texture (base, layer or emissive overlay) per answer, each at most FRAME_BUDGET bytes
+            List<Slice> slices = wire.get("textures") instanceof Map ? slices(wire) : null;
+            if (slices == null || !fitsAlongsideSlice(slices, size)) {
                 wire = unavailable(keys.get(i), "too_large");
                 results.add(wire);
-                used += MsgPack.encode(wire).length;
+                used += wireSize(wire);
                 continue;
             }
-            List<Map<String, Object>> chunks = chunkAsset(wire);
             if (!results.isEmpty()) { more = true; next = i + ":" + chunk; break; }
-            Map<String, Object> ch = chunks.get(Math.min(chunk, chunks.size() - 1));
-            results.add(ch);
-            if (chunk + 1 < chunks.size()) { more = true; next = i + ":" + (chunk + 1); }
+            results.add(sliceOf(wire, slices, Math.min(chunk, slices.size() - 1)));
+            if (chunk + 1 < slices.size()) { more = true; next = i + ":" + (chunk + 1); }
             else if (i + 1 < keys.size()) { more = true; next = (i + 1) + ":0"; }
             break;
         }
@@ -426,48 +425,110 @@ public final class AssetService {
         return out;
     }
 
+    /** Approximate encoded size (bytes, MessagePack) without encoding: byte arrays dominate, everything else is counted per node. */
     @SuppressWarnings("unchecked")
-    private static boolean chunkable(Map<String, Object> wire) {
-        Object t = wire.get("textures");
-        if (!(t instanceof Map)) return false;
-        for (Object v : ((Map<String, Object>) t).values()) {
-            if (!(v instanceof Map) || ((Map<String, Object>) v).get("emissive") instanceof Map) return false;
+    static int wireSize(Object v) {
+        if (v instanceof byte[]) return ((byte[]) v).length + 5;
+        if (v instanceof String) return ((String) v).length() + 5;
+        if (v instanceof Map) {
+            int n = 5;
+            for (Map.Entry<String, Object> e : ((Map<String, Object>) v).entrySet()) n += e.getKey().length() + 2 + wireSize(e.getValue());
+            return n;
         }
-        return true;
+        if (v instanceof List) {
+            int n = 5;
+            for (Object o : (List<Object>) v) n += wireSize(o);
+            return n;
+        }
+        return 9;
+    }
+
+    /** Every slice repeats the asset's non-PNG part, so that part must leave room for a full slice in the 4 MiB frame. */
+    private static boolean fitsAlongsideSlice(List<Slice> slices, int size) {
+        long png = 0;
+        for (Slice sl : slices) png += sl.length;
+        return size - png <= Framing.MAX_FRAME - FRAME_BUDGET - 65536;
+    }
+
+    /** A byte range of one texture's PNG: {@code layer} is the index in {@code textures.layers} or -1, {@code emissive} selects the overlay. */
+    private static final class Slice {
+        final String key;
+        final int layer, offset, length, total;
+        final boolean emissive;
+        Slice(String key, int layer, boolean emissive, int offset, int length, int total) {
+            this.key = key; this.layer = layer; this.emissive = emissive; this.offset = offset; this.length = length; this.total = total;
+        }
+    }
+
+    /** All slices of an oversized asset in a fixed order: textures in wire order, a texture's base before its emissive overlay. */
+    @SuppressWarnings("unchecked")
+    private static List<Slice> slices(Map<String, Object> wire) {
+        List<Slice> out = new ArrayList<Slice>();
+        for (Map.Entry<String, Object> t : ((Map<String, Object>) wire.get("textures")).entrySet()) {
+            if (t.getValue() instanceof List) {
+                List<Object> layers = (List<Object>) t.getValue();
+                for (int i = 0; i < layers.size(); i++) addSlices(out, t.getKey(), i, (Map<String, Object>) layers.get(i));
+            } else {
+                addSlices(out, t.getKey(), -1, (Map<String, Object>) t.getValue());
+            }
+        }
+        return out;
     }
 
     @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> chunkAsset(Map<String, Object> wire) {
-        // enumerate (texture, offset, len)
+    private static void addSlices(List<Slice> out, String key, int layer, Map<String, Object> tex) {
+        addSlices(out, key, layer, false, ((byte[]) tex.get("png")).length);
+        if (tex.get("emissive") instanceof Map) addSlices(out, key, layer, true, ((byte[]) ((Map<String, Object>) tex.get("emissive")).get("png")).length);
+    }
+
+    private static void addSlices(List<Slice> out, String key, int layer, boolean emissive, int total) {
+        int off = 0;
+        do {
+            int len = Math.min(FRAME_BUDGET, total - off);
+            out.add(new Slice(key, layer, emissive, off, len, total));
+            off += len;
+        } while (off < total);
+    }
+
+    /**
+     * The answer for slice {@code idx}: the whole asset (same {@code hash}) with {@code textures} reduced to the texture that holds the
+     * slice, placed where it is in the full asset ({@code layers} stays an array with that one layer; {@code chunk.layer} says which).
+     * A base slice carries the texture object without its overlay; an overlay slice carries {@code {emissive: <overlay>}} only. The
+     * PNG is partial ({@code png_offset}, {@code png_total}).
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> sliceOf(Map<String, Object> wire, List<Slice> slices, int idx) {
+        Slice s = slices.get(idx);
         Map<String, Object> textures = (Map<String, Object>) wire.get("textures");
-        List<Object[]> parts = new ArrayList<Object[]>();
-        for (Map.Entry<String, Object> t : textures.entrySet()) {
-            byte[] png = (byte[]) ((Map<String, Object>) t.getValue()).get("png");
-            for (int off = 0; off < png.length || off == 0; off += FRAME_BUDGET) {
-                parts.add(new Object[] {t.getKey(), off, Math.min(FRAME_BUDGET, png.length - off), png.length});
-                if (png.length == 0) break;
-            }
+        Map<String, Object> tex = s.layer < 0 ? (Map<String, Object>) textures.get(s.key)
+                : (Map<String, Object>) ((List<Object>) textures.get(s.key)).get(s.layer);
+        Map<String, Object> part;
+        if (s.emissive) {
+            part = new LinkedHashMap<String, Object>();
+            part.put("emissive", partialPng((Map<String, Object>) tex.get("emissive"), s));
+        } else {
+            Map<String, Object> base = new LinkedHashMap<String, Object>(tex);
+            if (base.get("emissive") instanceof Map) base.remove("emissive");
+            part = partialPng(base, s);
         }
-        List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
-        int total = parts.size();
-        for (int idx = 0; idx < total; idx++) {
-            Object[] p = parts.get(idx);
-            Map<String, Object> c = new LinkedHashMap<String, Object>(wire);
-            Map<String, Object> one = new LinkedHashMap<String, Object>();
-            Map<String, Object> tex = new LinkedHashMap<String, Object>((Map<String, Object>) textures.get(p[0]));
-            byte[] png = (byte[]) tex.get("png");
-            tex.put("png", Arrays.copyOfRange(png, (Integer) p[1], (Integer) p[1] + (Integer) p[2]));
-            tex.put("png_offset", p[1]);
-            tex.put("png_total", p[3]);
-            one.put((String) p[0], tex);
-            c.put("textures", one);
-            Map<String, Object> ci = new LinkedHashMap<String, Object>();
-            ci.put("index", idx);
-            ci.put("total", total);
-            c.put("chunk", ci);
-            out.add(c);
-        }
-        return out;
+        Map<String, Object> one = new LinkedHashMap<String, Object>();
+        one.put(s.key, s.layer < 0 ? part : Collections.singletonList(part));
+        Map<String, Object> c = new LinkedHashMap<String, Object>(wire);
+        c.put("textures", one);
+        Map<String, Object> ci = new LinkedHashMap<String, Object>();
+        ci.put("index", idx);
+        ci.put("total", slices.size());
+        if (s.layer >= 0) ci.put("layer", s.layer);
+        c.put("chunk", ci);
+        return c;
+    }
+
+    private static Map<String, Object> partialPng(Map<String, Object> tex, Slice s) {
+        Map<String, Object> p = new LinkedHashMap<String, Object>(tex);
+        p.put("png", Arrays.copyOfRange((byte[]) tex.get("png"), s.offset, s.offset + s.length));
+        p.put("png_offset", s.offset);
+        p.put("png_total", s.total);
+        return p;
     }
 
     static Map<String, Object> unavailable(String key, String reason) {
@@ -1108,7 +1169,7 @@ public final class AssetService {
             if (f.builtinEntity || f.custom) throw new Unresolved("client_only_renderer");
             if (f.generated || f.elements == null) {
                 GenPart g = new GenPart();
-                if (f.textures.get("layer0") == null) throw new Unresolved("model_unresolved");
+                if (f.textures.get("layer0") == null) throw new Unresolved(f.textures.containsKey("layer1") ? "model_unresolved" : "no_art_on_server");
                 for (int i = 0; i < 32; i++) {
                     Object ref = f.textures.get("layer" + i);
                     if (ref == null) continue;

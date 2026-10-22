@@ -2,12 +2,14 @@ package dev.playermanager.bridge.assets;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -26,6 +28,20 @@ public abstract class PackSource {
     /** File content or null if absent. */
     public abstract byte[] read(String path) throws IOException;
 
+    /** Receives the files below {@code assets/}: size in bytes and last-modified time in milliseconds (-1 when unknown). */
+    public interface Visitor {
+        /** @param dir directory relative to the pack root ({@code assets}, {@code assets/ns}, ...); false skips its content (folders only). */
+        boolean enter(String dir);
+
+        void file(String path, long size, long mtime);
+    }
+
+    /** Visits the files below {@code assets/} without reading their content. */
+    public abstract void walk(Visitor v) throws IOException;
+
+    /** Streams a file's bytes as stored, or null if absent. The caller closes the stream. */
+    public abstract InputStream open(String path) throws IOException;
+
     /** Changes when the content changes (mtime + size based). */
     public abstract String fingerprint();
 
@@ -39,10 +55,18 @@ public abstract class PackSource {
     /** Directory pack. */
     public static final class Dir extends PackSource {
         private final Path root;
+        private final String label;
+        private final String fixedFingerprint;
 
-        public Dir(Path root) { this.root = root; }
+        public Dir(Path root) { this(root, root.toString(), null); }
 
-        public String label() { return root.toString(); }
+        /**
+         * A tree owned by someone else (a mod file opened by its loader, possibly inside another jar): {@code root} may belong to any
+         * file system, {@code label} names it, and {@code fingerprint} replaces the file walk because the owner never changes it.
+         */
+        public Dir(Path root, String label, String fingerprint) { this.root = root; this.label = label; this.fixedFingerprint = fingerprint; }
+
+        public String label() { return label; }
 
         public List<String> list() throws IOException {
             final List<String> out = new ArrayList<String>();
@@ -64,7 +88,34 @@ public abstract class PackSource {
             return Files.readAllBytes(f);
         }
 
+        public void walk(final Visitor v) throws IOException {
+            Path assets = root.resolve("assets");
+            if (!Files.isDirectory(assets)) return;
+            Files.walkFileTree(assets, EnumSet.of(FileVisitOption.FOLLOW_LINKS), Integer.MAX_VALUE, new SimpleFileVisitor<Path>() {
+                @Override public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes a) {
+                    return v.enter(relative(d)) ? FileVisitResult.CONTINUE : FileVisitResult.SKIP_SUBTREE;
+                }
+
+                @Override public FileVisitResult visitFile(Path f, BasicFileAttributes a) {
+                    if (a.isRegularFile()) v.file(relative(f), a.size(), a.lastModifiedTime().toMillis());
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override public FileVisitResult visitFileFailed(Path f, IOException e) { return FileVisitResult.CONTINUE; }
+            });
+        }
+
+        private String relative(Path p) { return root.relativize(p).toString().replace('\\', '/'); }
+
+        public InputStream open(String path) throws IOException {
+            if (path.contains("..")) return null;
+            Path f = root.resolve(path);
+            if (!f.normalize().startsWith(root.normalize()) || !Files.isRegularFile(f)) return null;
+            return Files.newInputStream(f);
+        }
+
         public String fingerprint() {
+            if (fixedFingerprint != null) return fixedFingerprint;
             long[] acc = new long[2];
             try {
                 Path assets = root.resolve("assets");
@@ -162,6 +213,33 @@ public abstract class PackSource {
             } finally {
                 in.close();
             }
+        }
+
+        public void walk(Visitor v) throws IOException {
+            ZipFile z = new ZipFile(file.toFile());
+            try {
+                String pre = detectPrefix(z);
+                String assets = pre + "assets/";
+                Enumeration<? extends ZipEntry> en = z.entries();
+                while (en.hasMoreElements()) {
+                    ZipEntry e = en.nextElement();
+                    String n = e.getName();
+                    if (!e.isDirectory() && n.startsWith(assets)) v.file(n.substring(pre.length()), e.getSize(), e.getTime());
+                }
+            } finally {
+                z.close();
+            }
+        }
+
+        public InputStream open(String path) throws IOException {
+            ZipFile z;
+            String pre;
+            synchronized (this) {
+                z = open();
+                pre = prefix;
+            }
+            ZipEntry e = z.getEntry(pre + path);
+            return e == null || e.isDirectory() ? null : z.getInputStream(e);
         }
 
         public String fingerprint() {
