@@ -54,6 +54,11 @@ public interface GameProvider {
     default void setPresenceListener(java.util.function.Consumer<String> onChange) {
     }
 
+    /** Item icons for assets.manifest / assets.get, or {@code null} when the build has no usable asset API. */
+    default AssetSource assetSource() {
+        return null;
+    }
+
     default void stop() {
     }
 }

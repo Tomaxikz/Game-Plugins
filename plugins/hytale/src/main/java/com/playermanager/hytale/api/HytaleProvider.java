@@ -40,6 +40,7 @@ import com.hypixel.hytale.server.core.universe.world.World;
 import com.hypixel.hytale.server.core.universe.world.storage.EntityStore;
 import com.hypixel.hytale.server.npc.entities.NPCEntity;
 import com.playermanager.hytale.BridgeLog;
+import com.playermanager.hytale.game.AssetSource;
 import com.playermanager.hytale.game.BridgeError;
 import com.playermanager.hytale.game.Capabilities;
 import com.playermanager.hytale.game.Expect;
@@ -90,6 +91,7 @@ public final class HytaleProvider implements GameProvider {
     private volatile Consumer<GameEvent> sink = e -> { };
     private volatile Flags flags;
     private volatile Capabilities caps = Capabilities.none("unknown");
+    private volatile AssetSource assetSource;
     private volatile boolean evJoin;
     private volatile boolean evLeave;
     private volatile boolean evChat;
@@ -191,6 +193,11 @@ public final class HytaleProvider implements GameProvider {
         return caps;
     }
 
+    @Override
+    public AssetSource assetSource() {
+        return assetSource;
+    }
+
     /** Runs every capability probe and builds the advertised capability set. Call from start(). */
     public Capabilities probe() {
         ApiProbe p = new ApiProbe(loader);
@@ -217,6 +224,7 @@ public final class HytaleProvider implements GameProvider {
         boolean clear = base && inventory && p.ok("clear_inventory", p.clearInventory());
         boolean evBase = base && p.ok("events", p.eventsJoinLeaveChat());
         boolean evDth = base && position && p.ok("event.death", p.eventDeath());
+        this.assetSource = base && p.ok("assets", p.assets()) ? new HytaleAssets() : null;
         Flags f = new Flags(base, position, health, gameMode, inventory, held, equip, ping, ip, perms, nearby,
                 kick, ban, unban, wl, op, kill, heal, tp, give, clear,
                 evBase && evJoin, evBase && evLeave, evBase && evChat, evDth && evDeath);
@@ -287,6 +295,10 @@ public final class HytaleProvider implements GameProvider {
         }
         if (f.give() || f.clear()) {
             features.add("inventory.write");
+        }
+        if (assetSource != null) {
+            ops.addAll(List.of("assets.manifest", "assets.get"));
+            features.add("assets");
         }
         return new Capabilities(runningBuild, runningBuild, ops, fields, GAME_KEYS, events, actions, features);
     }

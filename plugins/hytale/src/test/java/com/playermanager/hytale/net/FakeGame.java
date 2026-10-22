@@ -1,5 +1,6 @@
 package com.playermanager.hytale.net;
 
+import com.playermanager.hytale.game.AssetSource;
 import com.playermanager.hytale.game.BridgeError;
 import com.playermanager.hytale.game.Capabilities;
 import com.playermanager.hytale.game.Expect;
@@ -92,11 +93,64 @@ final class FakeGame implements GameProvider {
                 action("whitelist_on", false, false));
         return new Capabilities("0.7.0", "0.7.0",
                 List.of("server.info", "players.list", "player.get", "player.inventory", "item.get", "player.nearby",
-                        "positions.subscribe", "events.subscribe", "action.run"),
+                        "positions.subscribe", "events.subscribe", "action.run", "assets.manifest", "assets.get"),
                 List.of("world", "position", "health", "max_health", "game_mode", "game"),
                 List.of("stats", "groups"),
                 List.of("join", "leave", "chat", "death"), actions,
-                List.of("positions.stream", "inventory.write", "sensitive"));
+                List.of("positions.stream", "inventory.write", "sensitive", "assets"));
+    }
+
+    /** Item art; null (the default) means the build has no asset API, so the dispatcher hides assets.*. */
+    volatile AssetSource assets;
+
+    @Override
+    public AssetSource assetSource() {
+        return assets;
+    }
+
+    /** A solid-colour PNG of the given size. */
+    static byte[] png(int w, int h, int rgb) {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                img.setRGB(x, y, 0xff000000 | rgb);
+            }
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try {
+            javax.imageio.ImageIO.write(img, "png", out);
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+        return out.toByteArray();
+    }
+
+    /** In-memory icons: Soil_Dirt (no model) and Weapon_Sword_Iron (with a model), one item without art. */
+    static final class FakeAssets implements AssetSource {
+        final Map<String, byte[]> files = new java.util.concurrent.ConcurrentHashMap<>();
+        volatile List<Icon> icons;
+        final java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+
+        FakeAssets() {
+            files.put("Icons/ItemsGenerated/Soil_Dirt.png", png(64, 64, 0x7a5230));
+            files.put("Icons/ItemsGenerated/Weapon_Sword_Iron.png", png(64, 64, 0xc0c0c0));
+            icons = List.of(
+                    new Icon("Weapon_Sword_Iron", "Items/Weapons/Sword/Iron.blockymodel",
+                            "Icons/ItemsGenerated/Weapon_Sword_Iron.png", "v1"),
+                    new Icon("Soil_Dirt", null, "Icons/ItemsGenerated/Soil_Dirt.png", "v1"),
+                    new Icon("Ghost_Item", null, "Icons/ItemsGenerated/Missing.png", "v1"));
+        }
+
+        @Override
+        public List<Icon> icons() {
+            return icons;
+        }
+
+        @Override
+        public byte[] read(String name) {
+            reads.incrementAndGet();
+            return files.get(name);
+        }
     }
 
     @Override

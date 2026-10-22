@@ -19,6 +19,7 @@ public final class FakeServerMain {
         FakeGame game = new FakeGame();
         game.samples = List.of(new PositionSample(FakeGame.ID, "Steve", "default", 12.5, 64, -3.25, 90, -10, false));
         game.drift = true;
+        game.assets = new FakeGame.FakeAssets();
         BridgeLog log = new BridgeLog(root.resolve(".playermanager/bridge.log"), null);
         BridgeConfig cfg = BridgeConfig.load(root.resolve(".playermanager/config.json"));
         StreamHub hub = new StreamHub(game, log);

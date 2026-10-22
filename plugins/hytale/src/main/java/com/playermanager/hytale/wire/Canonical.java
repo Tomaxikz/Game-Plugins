@@ -68,7 +68,7 @@ public final class Canonical {
         return out;
     }
 
-    static String sha256Hex(byte[] data) {
+    public static String sha256Hex(byte[] data) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
             StringBuilder sb = new StringBuilder(d.length * 2);

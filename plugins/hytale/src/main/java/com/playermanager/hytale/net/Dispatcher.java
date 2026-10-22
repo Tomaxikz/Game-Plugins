@@ -49,6 +49,7 @@ public final class Dispatcher {
     /** Identical reads within this window share one game-thread computation (0 disables). */
     public static final long READ_TTL_MS = 500L;
     private final ReadCache reads;
+    private final AssetService assets;
     private volatile Map<String, Object> helloMemo;
 
     public Dispatcher(GameProvider provider, StreamHub hub, BridgeConfig cfg, String bridgeVersion) {
@@ -60,10 +61,15 @@ public final class Dispatcher {
         this.positionsMinIntervalMs = cfg.positionsMinIntervalMs();
         this.reads = new ReadCache(READ_TTL_MS, System::currentTimeMillis);
         provider.setPresenceListener(id -> reads.invalidate(id));
+        this.assets = provider.assetSource() == null ? null
+                : new AssetService(provider.assetSource(), System::currentTimeMillis);
 
         Set<String> ops = new LinkedHashSet<>();
         ops.add("hello");
         for (String op : verified.ops()) {
+            if (op.startsWith("assets.") && assets == null) {
+                continue;
+            }
             if (enabled(cfg.enabledOps(), op)) {
                 ops.add(op);
                 if (op.equals("positions.subscribe")) {
@@ -141,6 +147,8 @@ public final class Dispatcher {
             }
             case "item.get" -> Result.of(itemGet(args));
             case "player.nearby" -> Result.of(nearby(args));
+            case "assets.manifest" -> Result.of(assets.manifest(args));
+            case "assets.get" -> Result.of(assets.get(args));
             case "action.run" -> Result.of(actionRun(args));
             case "positions.subscribe" -> subscribePositions(args, conn);
             case "events.subscribe" -> subscribeEvents(args, conn);
@@ -169,7 +177,11 @@ public final class Dispatcher {
         caps.put("player_fields", verified.playerFields());
         caps.put("events", ops.contains("events.subscribe") ? verified.events() : List.of());
         caps.put("actions", actions);
-        caps.put("features", verified.features());
+        List<String> features = new ArrayList<>(verified.features());
+        if (!ops.contains("assets.manifest") || !ops.contains("assets.get")) {
+            features.remove("assets");
+        }
+        caps.put("features", features);
 
         Map<String, Object> limits = new LinkedHashMap<>();
         limits.put("max_frame", maxFrame);

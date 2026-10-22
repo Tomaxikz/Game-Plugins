@@ -37,7 +37,9 @@ class ProbeTest {
         assertEquals(List.of("kick", "ban", "unban", "whitelist", "unwhitelist", "whitelist_on", "whitelist_off",
                 "op", "deop", "kill", "gamemode", "teleport", "give_item", "clear_inventory", "heal"), ids);
         assertFalse(ids.contains("teleport_player"));
-        assertTrue(caps.features().containsAll(List.of("positions.stream", "inventory.write", "sensitive")));
+        assertTrue(caps.features().containsAll(List.of("positions.stream", "inventory.write", "sensitive", "assets")));
+        assertTrue(ops.containsAll(List.of("assets.manifest", "assets.get")));
+        assertTrue(p.assetSource() instanceof HytaleAssets);
     }
 
     @SuppressWarnings("unchecked")

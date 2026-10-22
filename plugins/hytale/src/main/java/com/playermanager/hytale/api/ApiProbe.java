@@ -332,6 +332,17 @@ final class ApiProbe {
         return new Req[] {method(CONTAINER, "clear"), method(CONTAINER, "isEmpty")};
     }
 
+    Req[] assets() {
+        String item = S + "asset.type.item.config.Item";
+        String common = S + "asset.common.";
+        return new Req[] {
+            method(item, "getAssetMap"), method(item, "getIcon"), method(item, "getId"), method(item, "getModel"),
+            method("com.hypixel.hytale.assetstore.map.DefaultAssetMap", "getAssetMap"),
+            method(common + "CommonAssetRegistry", "getByName", "java.lang.String"),
+            method(common + "CommonAsset", "getBlob"), method(common + "CommonAsset", "getHash"),
+        };
+    }
+
     Req[] eventsJoinLeaveChat() {
         return new Req[] {
             type(S + "event.events.player.PlayerConnectEvent"),
