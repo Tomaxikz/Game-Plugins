@@ -51,6 +51,18 @@ public final class Golden {
             }
         }
 
+        /**
+         * Like {@link #hex}, for steps that carry PNG bytes. Deflate output depends on the zlib build the JDK links
+         * (zlib vs zlib-ng: same pixels, different bytes), so a PNG is pinned by its size and decoded pixels, and
+         * every 16-hex hash (asset, tile and manifest hashes are computed over PNG bytes) by a token numbered in
+         * first-appearance order, which keeps "same hash here as there" pinned. A recorded raw frame whose decoded
+         * copy changed is dropped; the decoded copy is still pinned. Hash values themselves are pinned by the
+         * vector tests (CanonicalTest, AssetServiceTest, ItemRecordGoldenTest).
+         */
+        public void hexPngNeutral(String name, List<Object> steps) {
+            hex(name, new PngNeutral().list(steps));
+        }
+
         /** Pins a JSON-shaped value, pretty-printed with map insertion order preserved. */
         public void json(String name, Object value) {
             Path file = DIR.resolve(name + ".json");
@@ -74,6 +86,88 @@ public final class Golden {
             }
             if (!written.isEmpty()) {
                 throw new AssertionFailedError("golden written, re-run: " + written);
+            }
+        }
+    }
+
+    // ---- zlib-independent normalisation -------------------------------------------------------
+
+    private static final class PngNeutral {
+        private static final java.util.regex.Pattern HASH = java.util.regex.Pattern.compile("[0-9a-f]{16}");
+        private final Map<String, String> tokens = new java.util.HashMap<>();
+        private boolean changed;
+
+        List<Object> list(Iterable<?> in) {
+            List<Object> out = new ArrayList<>();
+            for (Object o : in) {
+                out.add(value(o));
+            }
+            return out;
+        }
+
+        Object value(Object v) {
+            if (v instanceof byte[] bin && isPng(bin)) {
+                changed = true;
+                return png(bin);
+            }
+            if (v instanceof String s && HASH.matcher(s).matches()) {
+                changed = true;
+                return tokens.computeIfAbsent(s, k -> "<hash#" + (tokens.size() + 1) + ">");
+            }
+            if (v instanceof Map<?, ?> m) {
+                return map(m);
+            }
+            if (v instanceof Iterable<?> it) {
+                return list(it);
+            }
+            return v;
+        }
+
+        private Map<String, Object> map(Map<?, ?> m) {
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            if (m.get("raw") instanceof byte[] && m.containsKey("decoded")) {
+                // a recorded socket frame: keep the exact bytes unless the frame carries PNG-derived data
+                boolean outer = changed;
+                changed = false;
+                Object decoded = value(m.get("decoded"));
+                boolean dirty = changed;
+                changed = outer || dirty;
+                for (Map.Entry<?, ?> e : m.entrySet()) {
+                    String k = String.valueOf(e.getKey());
+                    out.put(k, switch (k) {
+                        case "raw" -> dirty ? "<raw omitted: frame carries png-derived data>" : e.getValue();
+                        case "decoded" -> decoded;
+                        default -> value(e.getValue());
+                    });
+                }
+                return out;
+            }
+            m.forEach((k, val) -> out.put(String.valueOf(k), value(val)));
+            return out;
+        }
+
+        private static boolean isPng(byte[] b) {
+            return b.length > 8 && (b[0] & 0xff) == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G';
+        }
+
+        private static String png(byte[] bin) {
+            try {
+                java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(bin));
+                if (img == null) {
+                    return "<png undecodable>";
+                }
+                int w = img.getWidth();
+                int h = img.getHeight();
+                java.nio.ByteBuffer px = java.nio.ByteBuffer.allocate(w * h * 4);
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        px.putInt(img.getRGB(x, y));
+                    }
+                }
+                byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(px.array());
+                return "<png " + w + "x" + h + " argb " + HexFormat.of().formatHex(d, 0, 8) + ">";
+            } catch (IOException | java.security.NoSuchAlgorithmException e) {
+                throw new IllegalStateException(e);
             }
         }
     }

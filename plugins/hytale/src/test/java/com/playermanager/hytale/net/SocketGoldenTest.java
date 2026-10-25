@@ -188,7 +188,7 @@ class SocketGoldenTest {
             c.call("positions.keyframe unknown sub", 22, "positions.keyframe", m("sub", 99L));
             c.call("positions.unsubscribe without sub", 23, "positions.unsubscribe", m());
             c.call("tiles.unsubscribe unknown sub", 24, "tiles.unsubscribe", m("sub", 99L));
-            g.hex("socket-envelopes", c.steps);
+            g.hexPngNeutral("socket-envelopes", c.steps);
         }
     }
 
@@ -265,7 +265,7 @@ class SocketGoldenTest {
             game.map.bump(0, -1);
             c.record("changed tile (seq 0)", c.streams);
             c.call("tiles.unsubscribe", 5, "tiles.unsubscribe", m("sub", 1L));
-            g.hex("socket-stream-tiles", c.steps);
+            g.hexPngNeutral("socket-stream-tiles", c.steps);
         }
     }
 

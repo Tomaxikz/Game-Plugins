@@ -467,7 +467,7 @@ class WireGoldenTest {
                 many.add("item:X" + i);
             }
             s.err("get 65 keys", "assets.get", m("keys", many));
-            g.hex("assets", s.steps);
+            g.hexPngNeutral("assets", s.steps);
         }
     }
 
@@ -507,7 +507,7 @@ class WireGoldenTest {
                     "area", m("min_tx", 5L, "min_tz", 0L, "max_tx", 1L, "max_tz", 0L)));
             s.err("tiles.subscribe area not a map", "tiles.subscribe", m("world", "default", "area", "x"));
             s.err("tiles.unsubscribe without sub", "tiles.unsubscribe", m());
-            g.hex("map-tiles", s.steps);
+            g.hexPngNeutral("map-tiles", s.steps);
         }
     }
 

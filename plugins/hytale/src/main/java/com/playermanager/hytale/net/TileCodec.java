@@ -114,7 +114,7 @@ final class TileCodec {
                 raw[p++] = (byte) c;
             }
         }
-        // zlib's own worst case (deflateBound plus the 6 byte wrapper), so one deflate call always fits
+        // zlib's own worst case (deflateBound plus the 6 byte wrapper), so one deflate call normally fits
         int bound = rawLen + (rawLen >> 12) + (rawLen >> 14) + (rawLen >> 25) + 13 + 6;
         byte[] out = new byte[IDAT_DATA + bound + 4 + IEND_CHUNK];
         System.arraycopy(SIGNATURE, 0, out, 0, 8);
@@ -137,11 +137,12 @@ final class TileCodec {
         d.finish();
         int n = 0;
         while (!d.finished()) {
-            int k = d.deflate(out, IDAT_DATA + n, bound - n);
-            if (k == 0 && n >= bound) {
-                throw new IllegalStateException("deflate overran its bound");
+            if (n >= bound) {
+                // the bound is classic zlib's; other builds the JDK may link (zlib-ng) can exceed it on noisy input
+                bound += Math.max(64, bound >> 3);
+                out = Arrays.copyOf(out, IDAT_DATA + bound + 4 + IEND_CHUNK);
             }
-            n += k;
+            n += d.deflate(out, IDAT_DATA + n, bound - n);
         }
         putInt(out, o, n);
         out[o + 4] = 'I';
