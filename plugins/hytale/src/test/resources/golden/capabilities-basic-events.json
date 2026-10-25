@@ -1,0 +1,254 @@
+{
+  "platform_version": "0.7.0",
+  "game_version": "0.7.0",
+  "ops": ["server.info", "players.list", "player.get", "positions.subscribe", "player.inventory", "item.get", "player.nearby", "events.subscribe", "action.run", "assets.manifest", "assets.get", "map.tiles", "map.markers"],
+  "player_fields": ["world", "position", "health", "max_health", "game_mode", "held_item", "ping", "game"],
+  "game_keys": ["stats", "permissions", "groups", "equipment"],
+  "events": ["join", "leave", "chat"],
+  "features": ["positions.stream", "sensitive", "inventory.write", "assets", "map.tiles", "map.markers"],
+  "actions": [
+    {
+      "id": "kick",
+      "label": "kick",
+      "target": true,
+      "destructive": true,
+      "offline": false,
+      "fields": [
+        {
+          "key": "reason",
+          "label": "Reason",
+          "kind": "text",
+          "choices": [],
+          "min": null,
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "ban",
+      "label": "ban",
+      "target": true,
+      "destructive": true,
+      "offline": true,
+      "fields": [
+        {
+          "key": "reason",
+          "label": "Reason",
+          "kind": "text",
+          "choices": [],
+          "min": null,
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "unban",
+      "label": "unban",
+      "target": true,
+      "destructive": false,
+      "offline": true,
+      "fields": []
+    },
+    {
+      "id": "whitelist",
+      "label": "whitelist",
+      "target": true,
+      "destructive": false,
+      "offline": true,
+      "fields": []
+    },
+    {
+      "id": "unwhitelist",
+      "label": "unwhitelist",
+      "target": true,
+      "destructive": false,
+      "offline": true,
+      "fields": []
+    },
+    {
+      "id": "whitelist_on",
+      "label": "whitelist_on",
+      "target": false,
+      "destructive": false,
+      "offline": false,
+      "fields": []
+    },
+    {
+      "id": "whitelist_off",
+      "label": "whitelist_off",
+      "target": false,
+      "destructive": false,
+      "offline": false,
+      "fields": []
+    },
+    {
+      "id": "op",
+      "label": "op",
+      "target": true,
+      "destructive": true,
+      "offline": true,
+      "fields": []
+    },
+    {
+      "id": "deop",
+      "label": "deop",
+      "target": true,
+      "destructive": true,
+      "offline": true,
+      "fields": []
+    },
+    {
+      "id": "kill",
+      "label": "kill",
+      "target": true,
+      "destructive": true,
+      "offline": false,
+      "fields": []
+    },
+    {
+      "id": "gamemode",
+      "label": "gamemode",
+      "target": true,
+      "destructive": false,
+      "offline": false,
+      "fields": [
+        {
+          "key": "mode",
+          "label": "Mode",
+          "kind": "select",
+          "choices": ["adventure", "creative"],
+          "min": null,
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "teleport",
+      "label": "teleport",
+      "target": true,
+      "destructive": false,
+      "offline": false,
+      "fields": [
+        {
+          "key": "to_player",
+          "label": "To player",
+          "kind": "target",
+          "choices": [],
+          "min": null,
+          "max": null
+        },
+        {
+          "key": "world",
+          "label": "World (current world only)",
+          "kind": "text",
+          "choices": [],
+          "min": null,
+          "max": null
+        },
+        {
+          "key": "x",
+          "label": "X",
+          "kind": "number",
+          "choices": [],
+          "min": -30000000,
+          "max": 30000000
+        },
+        {
+          "key": "y",
+          "label": "Y",
+          "kind": "number",
+          "choices": [],
+          "min": -4096,
+          "max": 4096
+        },
+        {
+          "key": "z",
+          "label": "Z",
+          "kind": "number",
+          "choices": [],
+          "min": -30000000,
+          "max": 30000000
+        },
+        {
+          "key": "yaw",
+          "label": "Yaw (degrees)",
+          "kind": "number",
+          "choices": [],
+          "min": -360,
+          "max": 360
+        },
+        {
+          "key": "pitch",
+          "label": "Pitch (degrees)",
+          "kind": "number",
+          "choices": [],
+          "min": -90,
+          "max": 90
+        }
+      ]
+    },
+    {
+      "id": "give_item",
+      "label": "give_item",
+      "target": true,
+      "destructive": false,
+      "offline": false,
+      "fields": [
+        {
+          "key": "item",
+          "label": "Item",
+          "kind": "item",
+          "choices": [],
+          "min": null,
+          "max": null
+        },
+        {
+          "key": "amount",
+          "label": "Amount",
+          "kind": "integer",
+          "choices": [],
+          "min": 1,
+          "max": 10000
+        },
+        {
+          "key": "container",
+          "label": "Container",
+          "kind": "select",
+          "choices": ["HotbarInventory", "StorageInventory", "BackpackInventory"],
+          "min": null,
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "clear_inventory",
+      "label": "clear_inventory",
+      "target": true,
+      "destructive": true,
+      "offline": false,
+      "fields": [
+        {
+          "key": "container",
+          "label": "Container",
+          "kind": "select",
+          "choices": ["HotbarInventory", "StorageInventory", "ArmorInventory", "UtilityInventory", "ToolInventory", "BackpackInventory", "RuneBagInventory", "AbilitySlotsInventory"],
+          "min": null,
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "heal",
+      "label": "heal",
+      "target": true,
+      "destructive": false,
+      "offline": false,
+      "fields": []
+    }
+  ],
+  "sources": {
+    "asset_source": true,
+    "map_source": true,
+    "tile_size": 32
+  }
+}

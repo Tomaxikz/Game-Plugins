@@ -1,15 +1,38 @@
 {
   "name": "hytale",
   "description": "Hytale bridge (Java plugin on the pinned server build). Container ids and sizes are whatever the build exposes.",
-  "sources": ["docs/protocol/games/hytale.md sections 2, 3, 5, 8"],
+  "sources": [
+    "docs/protocol/games/hytale.md sections 2, 3, 5, 8, 13-16"
+  ],
   "game": "hytale",
-  "platforms": ["hytale"],
-  "required_ops": ["server.info", "players.list", "player.get", "player.inventory", "action.run"],
+  "platforms": [
+    "hytale"
+  ],
+  "required_ops": [
+    "server.info",
+    "players.list",
+    "player.get",
+    "player.inventory",
+    "action.run",
+    "map.tiles",
+    "map.markers",
+    "tiles.subscribe",
+    "tiles.unsubscribe"
+  ],
   "forbidden_ops": [],
-  "required_features": [],
-  "forbidden_features": ["proxy"],
+  "required_features": [
+    "map.tiles",
+    "tiles.stream",
+    "map.markers"
+  ],
+  "forbidden_features": [
+    "proxy"
+  ],
   "required_player_fields": [],
   "required_containers": [],
-  "checks": ["hytale.world"],
+  "checks": [
+    "hytale.world",
+    "hytale.world-status"
+  ],
   "expect": {}
 }

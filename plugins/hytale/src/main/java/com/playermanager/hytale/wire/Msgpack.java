@@ -1,8 +1,8 @@
 package com.playermanager.hytale.wire;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,12 +23,76 @@ public final class Msgpack {
     }
 
     public static byte[] encode(Object value, boolean canonical) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Buf out = new Buf(256, 0);
         write(out, value, canonical);
-        return out.toByteArray();
+        return out.toArray();
     }
 
-    static void write(ByteArrayOutputStream out, Object v, boolean canonical) {
+    /**
+     * Same bytes as {@link #encode}, preceded by {@link Framing#PREFIX} reserved bytes for the frame length, so
+     * {@link Framing#writeFramed} sends the frame with one write and no copy.
+     */
+    public static byte[] encodeFramed(Object value, boolean canonical) {
+        Buf out = new Buf(256, Framing.PREFIX);
+        write(out, value, canonical);
+        return out.toArray();
+    }
+
+    /** Unsynchronized growable output buffer (the encoder is single-threaded per call). */
+    private static final class Buf {
+        private byte[] a;
+        private int n;
+
+        Buf(int capacity, int reserved) {
+            a = new byte[Math.max(capacity, reserved)];
+            n = reserved;
+        }
+
+        private void ensure(int extra) {
+            int need = n + extra;
+            if (need > a.length) {
+                a = Arrays.copyOf(a, Math.max(need, a.length + (a.length >> 1)));
+            }
+        }
+
+        void write(int b) {
+            ensure(1);
+            a[n++] = (byte) b;
+        }
+
+        void write(byte[] b) {
+            ensure(b.length);
+            System.arraycopy(b, 0, a, n, b.length);
+            n += b.length;
+        }
+
+        void u16(int v) {
+            ensure(2);
+            a[n++] = (byte) (v >>> 8);
+            a[n++] = (byte) v;
+        }
+
+        void u32(long v) {
+            ensure(4);
+            a[n++] = (byte) (v >>> 24);
+            a[n++] = (byte) (v >>> 16);
+            a[n++] = (byte) (v >>> 8);
+            a[n++] = (byte) v;
+        }
+
+        void u64(long v) {
+            ensure(8);
+            for (int i = 56; i >= 0; i -= 8) {
+                a[n++] = (byte) (v >>> i);
+            }
+        }
+
+        byte[] toArray() {
+            return Arrays.copyOf(a, n);
+        }
+    }
+
+    private static void write(Buf out, Object v, boolean canonical) {
         if (v == null) {
             out.write(0xc0);
         } else if (v instanceof Boolean b) {
@@ -42,17 +106,18 @@ public final class Msgpack {
                 writeInt(out, (long) d);
             } else {
                 out.write(0xcb);
-                long bits = Double.doubleToRawLongBits(d);
-                for (int i = 56; i >= 0; i -= 8) {
-                    out.write((int) (bits >>> i) & 0xff);
-                }
+                out.u64(Double.doubleToRawLongBits(d));
             }
         } else if (v instanceof String s) {
             writeStr(out, s.getBytes(StandardCharsets.UTF_8));
         } else if (v instanceof byte[] bin) {
             writeBin(out, bin);
         } else if (v instanceof Map<?, ?> m) {
-            writeMap(out, m, canonical);
+            if (canonical) {
+                writeCanonicalMap(out, m);
+            } else {
+                writeMap(out, m);
+            }
         } else if (v instanceof Collection<?> c) {
             writeArrayHeader(out, c.size());
             for (Object o : c) {
@@ -68,34 +133,37 @@ public final class Msgpack {
         }
     }
 
-    private static void writeMap(ByteArrayOutputStream out, Map<?, ?> m, boolean canonical) {
-        List<Map.Entry<byte[], Map.Entry<?, ?>>> entries = new ArrayList<>();
+    /** Insertion order, nulls kept: streamed straight into the buffer. */
+    private static void writeMap(Buf out, Map<?, ?> m) {
+        writeMapHeader(out, m.size());
         for (Map.Entry<?, ?> e : m.entrySet()) {
             if (!(e.getKey() instanceof String key)) {
                 throw new IllegalArgumentException("map keys must be strings");
             }
-            if (canonical && e.getValue() == null) {
-                continue;
+            writeStr(out, key.getBytes(StandardCharsets.UTF_8));
+            write(out, e.getValue(), false);
+        }
+    }
+
+    private record Field(byte[] key, Object value) {
+    }
+
+    /** Keys sorted by UTF-8 bytes, null values dropped (items-and-assets.md §2). */
+    private static void writeCanonicalMap(Buf out, Map<?, ?> m) {
+        List<Field> fields = new ArrayList<>(m.size());
+        for (Map.Entry<?, ?> e : m.entrySet()) {
+            if (!(e.getKey() instanceof String key)) {
+                throw new IllegalArgumentException("map keys must be strings");
             }
-            entries.add(Map.entry(key.getBytes(StandardCharsets.UTF_8), e));
+            if (e.getValue() != null) {
+                fields.add(new Field(key.getBytes(StandardCharsets.UTF_8), e.getValue()));
+            }
         }
-        if (canonical) {
-            entries.sort((a, b) -> compareUtf8(a.getKey(), b.getKey()));
-        }
-        int n = entries.size();
-        if (n < 16) {
-            out.write(0x80 | n);
-        } else if (n < 65536) {
-            out.write(0xde);
-            out.write(n >>> 8);
-            out.write(n & 0xff);
-        } else {
-            out.write(0xdf);
-            writeU32(out, n);
-        }
-        for (Map.Entry<byte[], Map.Entry<?, ?>> e : entries) {
-            writeStr(out, e.getKey());
-            write(out, e.getValue().getValue(), canonical);
+        fields.sort((a, b) -> compareUtf8(a.key(), b.key()));
+        writeMapHeader(out, fields.size());
+        for (Field f : fields) {
+            writeStr(out, f.key());
+            write(out, f.value(), true);
         }
     }
 
@@ -112,7 +180,7 @@ public final class Msgpack {
         return Integer.compare(a.length, b.length);
     }
 
-    private static void writeInt(ByteArrayOutputStream out, long v) {
+    private static void writeInt(Buf out, long v) {
         if (v >= 0) {
             if (v < 128) {
                 out.write((int) v);
@@ -121,40 +189,34 @@ public final class Msgpack {
                 out.write((int) v);
             } else if (v <= 0xffffL) {
                 out.write(0xcd);
-                out.write((int) (v >>> 8));
-                out.write((int) (v & 0xff));
+                out.u16((int) v);
             } else if (v <= 0xffffffffL) {
                 out.write(0xce);
-                writeU32(out, v);
+                out.u32(v);
             } else {
                 out.write(0xcf);
-                for (int i = 56; i >= 0; i -= 8) {
-                    out.write((int) (v >>> i) & 0xff);
-                }
+                out.u64(v);
             }
         } else {
             if (v >= -32) {
-                out.write((int) v & 0xff);
+                out.write((int) v);
             } else if (v >= -128) {
                 out.write(0xd0);
-                out.write((int) v & 0xff);
+                out.write((int) v);
             } else if (v >= -32768) {
                 out.write(0xd1);
-                out.write((int) (v >>> 8) & 0xff);
-                out.write((int) v & 0xff);
+                out.u16((int) v);
             } else if (v >= Integer.MIN_VALUE) {
                 out.write(0xd2);
-                writeU32(out, v & 0xffffffffL);
+                out.u32(v);
             } else {
                 out.write(0xd3);
-                for (int i = 56; i >= 0; i -= 8) {
-                    out.write((int) (v >>> i) & 0xff);
-                }
+                out.u64(v);
             }
         }
     }
 
-    private static void writeStr(ByteArrayOutputStream out, byte[] b) {
+    private static void writeStr(Buf out, byte[] b) {
         int n = b.length;
         if (n < 32) {
             out.write(0xa0 | n);
@@ -163,49 +225,51 @@ public final class Msgpack {
             out.write(n);
         } else if (n <= 0xffff) {
             out.write(0xda);
-            out.write(n >>> 8);
-            out.write(n & 0xff);
+            out.u16(n);
         } else {
             out.write(0xdb);
-            writeU32(out, n);
+            out.u32(n);
         }
-        out.write(b, 0, n);
+        out.write(b);
     }
 
-    private static void writeBin(ByteArrayOutputStream out, byte[] b) {
+    private static void writeBin(Buf out, byte[] b) {
         int n = b.length;
         if (n <= 0xff) {
             out.write(0xc4);
             out.write(n);
         } else if (n <= 0xffff) {
             out.write(0xc5);
-            out.write(n >>> 8);
-            out.write(n & 0xff);
+            out.u16(n);
         } else {
             out.write(0xc6);
-            writeU32(out, n);
+            out.u32(n);
         }
-        out.write(b, 0, n);
+        out.write(b);
     }
 
-    private static void writeArrayHeader(ByteArrayOutputStream out, int n) {
+    private static void writeMapHeader(Buf out, int n) {
+        if (n < 16) {
+            out.write(0x80 | n);
+        } else if (n < 65536) {
+            out.write(0xde);
+            out.u16(n);
+        } else {
+            out.write(0xdf);
+            out.u32(n);
+        }
+    }
+
+    private static void writeArrayHeader(Buf out, int n) {
         if (n < 16) {
             out.write(0x90 | n);
         } else if (n < 65536) {
             out.write(0xdc);
-            out.write(n >>> 8);
-            out.write(n & 0xff);
+            out.u16(n);
         } else {
             out.write(0xdd);
-            writeU32(out, n);
+            out.u32(n);
         }
-    }
-
-    private static void writeU32(ByteArrayOutputStream out, long v) {
-        out.write((int) (v >>> 24) & 0xff);
-        out.write((int) (v >>> 16) & 0xff);
-        out.write((int) (v >>> 8) & 0xff);
-        out.write((int) v & 0xff);
     }
 
     // ---------------------------------------------------------------- decoding

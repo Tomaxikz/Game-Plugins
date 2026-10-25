@@ -379,7 +379,8 @@ export const tests = [
       for (const w of info.worlds) {
         c.ok(isStr(w.world), 'world must be a plain string');
         c.ok(!('dimension' in w), 'hytale worlds must not carry dimension');
-        for (const k of Object.keys(w)) c.ok(['world', 'name', 'loaded', 'players'].includes(k), `hytale worlds[] key ${k} is not in {world,name,loaded,players}`);
+        const keys = ['world', 'name', 'loaded', 'players', 'time', 'day', 'weather', 'moon_phase'];
+        for (const k of Object.keys(w)) c.ok(keys.includes(k), `hytale worlds[] key ${k} is not in {${keys.join(',')}}`);
       }
       const p = await ctx.getPlayer();
       if (p) {
@@ -391,6 +392,28 @@ export const tests = [
       }
       c.done();
       return 'hytale world rules';
+    },
+  },
+  {
+    id: 'profile.hytale.world-status',
+    group: 'profile',
+    title: 'Hytale server.info worlds[] status keys: time "HH:MM", day int >= 0, weather and moon_phase strings, each optional (games/hytale.md section 3)',
+    needs: ['profile:hytale.world-status', 'op:server.info'],
+    async run(ctx) {
+      const info = okData(await ctx.call('server.info', {}), 'server.info');
+      const c = new Check('hytale world status');
+      let seen = 0;
+      for (const w of info.worlds ?? []) {
+        const at = `worlds[${w.world}]`;
+        if ('time' in w) c.ok(isStr(w.time) && /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(w.time), `${at}.time ${JSON.stringify(w.time)} must be HH:MM`);
+        if ('day' in w) c.ok(isIntV(w.day) && num(w.day) >= 0, `${at}.day must be an int >= 0`);
+        if ('weather' in w) c.ok(isStr(w.weather) && w.weather.length > 0, `${at}.weather must be a non-empty string`);
+        if ('moon_phase' in w) c.ok(isStr(w.moon_phase) && w.moon_phase.length > 0, `${at}.moon_phase must be a non-empty string`);
+        if (w.loaded === false) for (const k of ['time', 'day', 'weather', 'moon_phase']) c.ok(!(k in w), `${at}: unloaded worlds carry no ${k}`);
+        if ('time' in w || 'day' in w || 'weather' in w || 'moon_phase' in w) seen++;
+      }
+      c.done();
+      return `${seen} world(s) with status keys`;
     },
   },
 ];

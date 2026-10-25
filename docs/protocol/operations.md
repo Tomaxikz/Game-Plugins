@@ -23,7 +23,10 @@ Notation: `req` = required, `opt` = optional (omit the key to use the default). 
 | `biomes.list` (optional) | request | 2 s | T9 |
 | `blocks.list` (optional) | request | 2 s per page | T10 |
 | `chunks.subscribe` | subscription | 2 s (to ack) | T7 |
-| `positions.unsubscribe`, `events.unsubscribe`, `chunks.unsubscribe` | request | 2 s | none |
+| `map.tiles` (optional) | request | 5 s | T1, T11 |
+| `map.markers` (optional) | request | 3 s | T1 |
+| `tiles.subscribe` (optional) | subscription | 2 s (to ack) | T11 |
+| `positions.unsubscribe`, `events.unsubscribe`, `chunks.unsubscribe`, `tiles.unsubscribe` | request | 2 s | none |
 | `action.run` | request | 5 s (10 s for `save`, `reload`, `wipe_data`) | T1, T6 |
 | `assets.manifest`, `assets.get` | request | see `items-and-assets.md` | see `items-and-assets.md` |
 | `pack.manifest`, `pack.get` (optional) | request | 10 s | T8 |
@@ -45,6 +48,7 @@ Ops marked *optional* are additive (protocol stays 1, README §8). A bridge that
 - **T8 (pack files):** `pack.*` only read files (resource-pack folders and zips, mod files) on bridge worker threads, never on the game thread. Hashing runs in the background and is cached by file path + mtime + size; while the first index is built, `pack.manifest` answers `busy`.
 - **T9 (frozen registries):** the biome registry is fixed when the server starts (datapacks and mods included; `/reload` does not change worldgen registries). The bridge may read it once, on the game thread at startup or on a worker thread after the server has started, and cache the result for the server's lifetime. Never read it before the server finished loading its registries.
 - **T10 (block registry):** the block registry and every block state's properties are fixed once the server has started (mods register blocks during startup; datapacks and `/reload` cannot add blocks). Build the `blocks.list` answer once, in the background on a bridge worker thread after the server has started, and cache it for the server's lifetime. Read only the immutable values of each `BlockState` and evaluate level-dependent getters against an empty block getter at position 0, 0, 0 (`games/minecraft.md` §6c), never against a live level or chunk. Nothing runs on the game thread. Until the cache is ready, `blocks.list` answers `busy`.
+- **T11 (map tiles):** a tile is drawn on the thread that owns its world (the game's own map renderer where the game doc names one), from chunks that are **already loaded**; never load or generate terrain for the panel. Budget ≤ 2 ms of tile work per world pass; the rest waits for the next pass. Encoding (PNG) and hashing run on bridge worker threads.
 
 ## 1. `hello`
 
@@ -107,8 +111,11 @@ Must be the first request on every connection. In TCP fallback mode a missing/wr
 | `biomes` | `biomes.list` works (§6d) |
 | `blocks` | `blocks.list` works (§6e) |
 | `pack` | `pack.manifest` and `pack.get` work (§10a, §10b) |
+| `map.tiles` | `map.tiles` works (pre-rendered map images of loaded chunks, §6f) |
+| `tiles.stream` | `tiles.subscribe` works (tile change notifications, §7.4) |
+| `map.markers` | `map.markers` works (map markers, §6g) |
 
-A feature is advertised exactly when its ops are in `capabilities.ops` (`pack` needs both `pack.*` ops). The panel decides by `capabilities.ops`; the feature flags are informational.
+A feature is advertised exactly when its ops are in `capabilities.ops` (`pack` needs both `pack.*` ops; `tiles.stream` needs `tiles.subscribe` and `tiles.unsubscribe`). The panel decides by `capabilities.ops`; the feature flags are informational.
 
 ```json
 {
@@ -158,7 +165,7 @@ Errors: `unauthorized` (TCP token), `invalid_args` (missing `panel_version`).
 | `performance.mspt` | number | opt; mean tick ms |
 | `performance.frame_ms` | number | opt; mean frame/update ms for non-ticked games (Rust, FiveM) |
 | `uptime` | int | Seconds since server start |
-| `worlds[]` | object[] | `world` string (game-doc id), `dimension` string opt, `name` string, `environment` string opt (game-doc vocabulary), `players` int opt (players in it), `loaded` bool opt, `size` int opt (map size), `seed` string opt (**sensitive**: only send if the game doc allows; string because seeds exceed 2^53) |
+| `worlds[]` | object[] | `world` string (game-doc id), `dimension` string opt, `name` string, `environment` string opt (game-doc vocabulary), `players` int opt (players in it), `loaded` bool opt, `size` int opt (map size), `seed` string opt (**sensitive**: only send if the game doc allows; string because seeds exceed 2^53). Game docs may add per-world status keys (Hytale: `time`, `day`, `weather`, `moon_phase`, `games/hytale.md` §3); each is omitted when the bridge cannot read it |
 | `extensions[]` | object[] | `name`, `version`, `kind` = `plugin` \| `mod` \| `resource`, `state` string opt (e.g. FiveM resource state) |
 | `game` | object | opt; game-specific server section, keys defined **only** in `games/<game>.md` (e.g. Rust map/roles/bans, FiveM convars, Hytale universe, Minecraft proxy `backends`). |
 
@@ -567,6 +574,73 @@ Test vector: for the three `blocks` entries in the example below, `hash` is `efe
 { "id": 14, "ok": true, "data": { "hash": "efeed82267412635", "unchanged": true } }
 ```
 
+## 6f. `map.tiles` (optional)
+
+Pre-rendered map images of **already loaded** chunks, for games whose server has its own map renderer (Hytale: the in-game world map, `games/hytale.md` §13). One tile is one square of the world; its size in blocks and the renderer are defined by the game doc. **Optional** (feature `map.tiles`). Without it, the panel draws its own map from saved data.
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | Game-doc world id |
+| `tiles` | `[[tx, tz], …]` | req | Tile coordinates, 1–**64** per request; duplicates are answered once |
+| `cursor` | string | opt | From the previous page (same `world` and `tiles`) |
+
+**Response `data`**
+
+| Key | Type | Notes |
+|---|---|---|
+| `tile_size` | int | Width (= height) of one tile in blocks. Block x of pixel column `px` = `tx * tile_size + px * (tile_size / image width)`, likewise z |
+| `tiles` | `[{tx, tz, png, hash}]` | `png` = bin, the image exactly as the renderer produced it (the image width can be smaller or larger than `tile_size`); `hash` = first 16 lowercase hex of SHA-256 over the `png` bytes. Request order |
+| `missing` | `[[tx, tz], …]` | Requested tiles that are not available: chunk not loaded, or not renderable without loading (the panel keeps its own image) |
+| `more`, `cursor` | bool, string | When the PNGs do not fit in one frame: as many whole tiles as fit, then `more: true` and `cursor`. The panel repeats the call with the same args plus `cursor`; the last page has no `more` |
+
+Each requested tile appears exactly once, in `tiles` or `missing`, across all pages of one request. Bridges cache PNGs and drop a tile from the cache when its chunk changes (game doc).
+
+**Threading**: T11. Errors: `invalid_args` (missing/invalid `world`, `tiles` not 1–64 `[tx, tz]` integer pairs, bad `cursor`), `not_found` (unknown world), `unsupported` (the world's map is disabled or drawn by a renderer the bridge cannot use), `busy` (the world's map is still loading), `timeout`.
+
+```json
+{ "id": 15, "op": "map.tiles", "args": { "world": "default", "tiles": [[0, -1], [1, -1]] } }
+{ "id": 15, "ok": true, "data": {
+  "tile_size": 32,
+  "tiles": [{ "tx": 0, "tz": -1, "png": "<bin 712 B>", "hash": "4be2f0c51d9a7e33" }],
+  "missing": [[1, -1]] } }
+```
+
+## 6g. `map.markers` (optional)
+
+The markers the game shows on its map. **Optional** (feature `map.markers`).
+
+**Args**
+
+| Key | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | Game-doc world id |
+| `player` | string | opt | Player id (README §6). Adds that player's own markers (game doc: personal, death, respawn). A player who is not online adds nothing (no error) |
+| `cursor` | string | opt | From the previous page |
+
+**Response `data`**: `{ "markers": [Marker], "more"?: true, "cursor"?: string }`, sorted by `id`, each `id` once; pages of at most 2000 markers.
+
+| Marker key | Type | Notes |
+|---|---|---|
+| `id` | string | Unique within the answer; `<kind>:<game id>` |
+| `kind` | string | `poi`, `warp`, `spawn`, `shared`, `user`, `death`, `respawn` |
+| `name` | string | opt; plain text (or the game's translation key when the game stores only a key, game doc) |
+| `icon` | string | opt; game asset path of the marker icon; the panel fetches it with `assets.get` (key form in the game doc) |
+| `x`, `y`, `z` | number | World position in native units; `y` is omitted for markers the game stores without a height |
+| `owner` | `{id?, name?}` | opt; who created or owns the marker |
+
+Errors: `invalid_args` (missing/invalid `world`, malformed `player`, bad `cursor`), `not_found` (unknown world), `unsupported`, `timeout`.
+
+```json
+{ "id": 16, "op": "map.markers", "args": { "world": "default", "player": "069a79f4-44e9-4726-a5be-fca90e38aaf5" } }
+{ "id": 16, "ok": true, "data": { "markers": [
+  { "id": "death:5f0c", "kind": "death", "name": "Death (day 3)", "icon": "UI/WorldMap/MapMarkers/Death.png",
+    "x": 7.5, "y": 60.0, "z": 7.5, "owner": { "id": "069a79f4-44e9-4726-a5be-fca90e38aaf5", "name": "Steve" } },
+  { "id": "spawn:0", "kind": "spawn", "name": "Spawn", "icon": "UI/WorldMap/MapMarkers/Spawn.png",
+    "x": 0.5, "y": 80.0, "z": 0.5 } ] } }
+```
+
 ## 7. Subscriptions
 
 Common: the response to a `*.subscribe` is `{"id":N,"ok":true,"data":{"sub":S}}`; frames then arrive as `{"sub":S,"seq":n,"data":{...}}` with `seq` starting at 0 and +1 per frame. A connection may hold at most one positions and one events subscription (a second → `busy`). **Keep-alive (defined here, once):** when no frame has been sent on a subscription for 60 s, the bridge sends the `ping` frame `{"sub":S,"seq":n,"data":{"type":"ping"}}` on it, on both positions and events subscriptions. It consumes a `seq`, has no other keys, is never listed in `types` (it is always sent) and resets the 120 s idle timer. Any other frame also resets the 60 s timer, so a busy subscription needs no pings. Panels ignore `ping` frames apart from the `seq` check. Unsubscribing: `positions.unsubscribe` / `events.unsubscribe` with `{sub}` → `{}`; unknown `sub` → `not_found`. Closing the connection drops all subscriptions.
@@ -610,7 +684,7 @@ Rules: a keyframe is sent at subscribe, every 10 s, and on `positions.keyframe`.
 
 | Arg | Type | Req | Notes |
 |---|---|---|---|
-| `types` | string[] | req | Subset of `join`,`leave`,`death`,`chat`,`command`,`advancement`,`damage`,`kick`,`ban` and in `capabilities.events`; unsupported → `unsupported`; empty → `invalid_args` |
+| `types` | string[] | req | Subset of `join`,`leave`,`death`,`chat`,`command`,`advancement`,`damage`,`kick`,`ban` (plus the game-specific types of the game doc, e.g. Hytale `zone`, `instance`, `objective`, `memory`, `world`, `kill`, `craft`) and in `capabilities.events`; unsupported → `unsupported`; empty → `invalid_args` |
 
 **Frame `data`** — common keys: `type`, `time` (unix s), `player` `{id,name}` (subject, when applicable); `world`/`dimension` opt.
 
@@ -627,6 +701,7 @@ Rules: a keyframe is sent at subscribe, every 10 s, and on `positions.keyframe`.
 | `ban` | `reason` string opt, `by` string opt, `expires_at` int opt |
 | `overflow` | `dropped` int (see T5) |
 | `ping` | keep-alive frame defined in the Subscriptions preamble; also sent on positions subscriptions |
+| game-specific | Defined only in `games/<game>.md` and advertised in `capabilities.events` (Hytale §16: `zone`, `instance`, `objective`, `memory`, `world`, `kill`, `craft`). Common keys as above |
 
 ```json
 {"sub":4,"seq":12,"data":{"type":"chat","time":1760280123,"player":{"id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Notch"},"message":"hello","channel":"global"}}
@@ -642,7 +717,7 @@ Rules: a keyframe is sent at subscribe, every 10 s, and on `positions.keyframe`.
 | `leave` | `leave` | name | `left the game` | `name left the game` |
 | `death` | `death` | name | `message` minus leading name | `message` |
 | `advancement` | `advancement` | name | `title` or `id` | `name has made the advancement [title]` |
-| `command`, `damage`, `kick`, `ban`, `overflow`, `ping` | not shown as chat lines (panel: new — may feed an activity log) | | | |
+| `command`, `damage`, `kick`, `ban`, `overflow`, `ping`, game-specific types | not shown as chat lines (panel: new — may feed an activity log) | | | |
 
 `time` = event `time`; `clock` = `HH:MM:SS` of `time` in the server's clock (or omitted → panel computes with `clock_offset_minutes`).
 
@@ -672,9 +747,34 @@ Rules:
 
 `chunks.unsubscribe` `{sub}` → `{}` (see §8).
 
+### 7.4 `tiles.subscribe` (optional)
+
+Notifications that map tiles (§6f) changed. **Optional** (feature `tiles.stream`). The panel fetches the new PNGs with `map.tiles`.
+
+| Arg | Type | Req | Notes |
+|---|---|---|---|
+| `world` | string | req | Game-doc world id |
+| `area` | `{min_tx, min_tz, max_tx, max_tz}` | opt | Only tiles inside (inclusive); default: every tile of the world. The game doc may cap the area size (Hytale: 128 × 128 tiles); a larger area → `invalid_args` |
+
+Response `{sub}`. At most one tiles subscription per connection (a second → `busy`). **Frame `data`**: `{ "tiles": [ { "tx", "tz", "hash" } ] }` — `hash` is the hash `map.tiles` now returns for that tile.
+
+Rules:
+- A tile is sent when its image changes (its hash differs from the last hash sent on this subscription, or from the hash the bridge had cached before the change). An unchanged re-render is not sent.
+- **Coalescing:** at most one frame entry per tile per **5 s**; at most 64 tiles per frame (the rest follow in later frames).
+- No initial dump: the panel calls `map.tiles` for the visible area after subscribing. Unloading a chunk sends nothing.
+- Keep-alive `ping` as in the preamble.
+
+Errors: `invalid_args` (bad `world` or `area`), `busy`, `unsupported`.
+
+```json
+{"sub":6,"seq":2,"data":{"tiles":[{"tx":0,"tz":-1,"hash":"91c0d2aa0e5b3f47"}]}}
+```
+
+`tiles.unsubscribe` `{sub}` → `{}` (see §8).
+
 ## 8. `*.unsubscribe`
 
-`positions.unsubscribe` / `events.unsubscribe` / `chunks.unsubscribe`: args `{sub: int}` (req) → `{}`. Errors: `not_found`. Idempotent semantics are not required; the panel never unsubscribes twice.
+`positions.unsubscribe` / `events.unsubscribe` / `chunks.unsubscribe` / `tiles.unsubscribe`: args `{sub: int}` (req) → `{}`. Errors: `not_found`. Idempotent semantics are not required; the panel never unsubscribes twice.
 
 ## 9. `action.run`
 
@@ -833,5 +933,6 @@ Every requested path (duplicates counted once) appears in exactly one of `files`
 | `PlayerPosition` / `Positions` | `positions.subscribe` frames | See §7.1; `Positions.live`=`true`, `observed_at`=`captured_at`=receipt time, `warnings`=`[]`. |
 | `ChatLine` / `ChatResponse` | `events.subscribe` (`chat`,`join`,`leave`,`death`,`advancement`) | See §7.2 table; `live_available`=`true` while subscribed. |
 | 3D map volume / tints / block art | `map.volume`, `biomes.list`, `pack.manifest` + `pack.get` (all optional) | `map.volume` chunks replace the region-file volume chunks of the same `cx`/`cz` (same JSON shape to the frontend, bins base64-encoded); `biomes.list` replaces the built-in biome table; `pack.*` files feed the block model/texture loader. Each falls back to the panel's own file decoding when the op is absent. |
+| 2D map tiles and markers | `map.tiles`, `tiles.subscribe`, `map.markers` (all optional) | Tiles replace the panel's own image for the same tile (keyed by `world`, `tx`, `tz`; redraw when `hash` changes); `tiles.subscribe` frames tell the panel which tiles to refetch; markers are drawn over the map with icons from `assets.get`. Without the ops the panel keeps its own map. |
 | 2D map block colours / block classes | `blocks.list` (optional) | Per-server table keyed by block id (and `properties` for listed states): `map_color` replaces the built-in colour of that id (`null` = draw nothing, look below), `flags` classify air, liquids, plants and light sources for the surface and shading rules. Ids missing from the answer, and servers without the op, use the built-in table. |
 | `Game` enum | `hello.game` | `minecraft_java`,`rust`,`hytale`,`fivem` map directly (`minecraft_bedrock`/`auto` are never reported by a bridge). |

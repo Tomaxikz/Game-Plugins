@@ -13,7 +13,8 @@ import java.util.Map;
 public record BridgeConfig(List<String> enabledOps, List<String> disabledActions,
                            long positionsMinIntervalMs, int maxConnections, int tcpFallbackPort) {
 
-    public static BridgeConfig load(Path file) {
+    /** Loads the config; an unreadable or invalid file is logged (when {@code log} is given) and defaults apply. */
+    public static BridgeConfig load(Path file, BridgeLog log) {
         List<String> enabled = List.of("*");
         List<String> disabled = List.of();
         long minInterval = 250;
@@ -45,7 +46,9 @@ public record BridgeConfig(List<String> enabledOps, List<String> disabledActions
                         "tcp_fallback_port", 25590)) + "\n", StandardCharsets.UTF_8);
             }
         } catch (IOException | RuntimeException e) {
-            // invalid config: keep defaults; the caller logs nothing secret here
+            if (log != null) {
+                log.error("config.json is unreadable or invalid; using defaults", e);
+            }
         }
         return new BridgeConfig(enabled, disabled, minInterval, maxConn, port);
     }

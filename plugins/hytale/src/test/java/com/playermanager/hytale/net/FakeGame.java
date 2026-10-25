@@ -91,13 +91,34 @@ final class FakeGame implements GameProvider {
                 action("clear_inventory", true, false,
                         field("container", "select", List.of("HotbarInventory", "StorageInventory"), null, null)),
                 action("whitelist_on", false, false));
-        return new Capabilities("0.7.0", "0.7.0",
-                List.of("server.info", "players.list", "player.get", "player.inventory", "item.get", "player.nearby",
-                        "positions.subscribe", "events.subscribe", "action.run", "assets.manifest", "assets.get"),
+        List<String> ops = new java.util.ArrayList<>(List.of("server.info", "players.list", "player.get",
+                "player.inventory", "item.get", "player.nearby", "positions.subscribe", "events.subscribe", "action.run",
+                "assets.manifest", "assets.get"));
+        List<String> features = new java.util.ArrayList<>(List.of("positions.stream", "inventory.write", "sensitive",
+                "assets"));
+        if (map != null) {
+            ops.addAll(List.of("map.tiles", "tiles.subscribe", "map.markers"));
+            features.addAll(List.of("map.tiles", "tiles.stream", "map.markers"));
+        }
+        return new Capabilities("0.7.0", "0.7.0", ops,
                 List.of("world", "position", "health", "max_health", "game_mode", "game"),
                 List.of("stats", "groups"),
-                List.of("join", "leave", "chat", "death"), actions,
-                List.of("positions.stream", "inventory.write", "sensitive", "assets"));
+                List.of("join", "leave", "chat", "death", "ban", "zone", "instance", "objective", "memory", "world",
+                        "kill", "craft"), actions, features);
+    }
+
+    /** Map tiles and markers; null (the default) means the build has no map API. */
+    volatile FakeMap map;
+    volatile com.playermanager.hytale.game.StatsSink stats = com.playermanager.hytale.game.StatsSink.NONE;
+
+    @Override
+    public com.playermanager.hytale.game.MapSource mapSource() {
+        return map;
+    }
+
+    @Override
+    public void setStatsSink(com.playermanager.hytale.game.StatsSink sink) {
+        this.stats = sink;
     }
 
     /** Item art; null (the default) means the build has no asset API, so the dispatcher hides assets.*. */
@@ -157,8 +178,16 @@ final class FakeGame implements GameProvider {
     public Map<String, Object> serverInfo() {
         infoCalls.incrementAndGet();
         gate();
-        return Map.of("name", "fake", "max_players", 20L, "online", 1L, "uptime", 5L, "worlds",
-                List.of(Map.of("world", "default", "name", "default", "loaded", true, "players", 1L)));
+        Map<String, Object> w = new LinkedHashMap<>();
+        w.put("world", "default");
+        w.put("name", "default");
+        w.put("loaded", true);
+        w.put("players", 1L);
+        w.put("time", "06:30");
+        w.put("day", 3L);
+        w.put("weather", "Zone1_Sunny");
+        w.put("moon_phase", "2");
+        return Map.of("name", "fake", "max_players", 20L, "online", 1L, "uptime", 5L, "worlds", List.of(w));
     }
 
     @Override

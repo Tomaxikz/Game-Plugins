@@ -1,9 +1,9 @@
 package com.playermanager.hytale.wire;
 
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,20 +68,16 @@ public final class Canonical {
         return out;
     }
 
-    public static String sha256Hex(byte[] data) {
+    private static final ThreadLocal<MessageDigest> SHA256 = ThreadLocal.withInitial(() -> {
         try {
-            byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) {
-                sb.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
-            }
-            return sb.toString();
+            return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
+    });
 
-    static byte[] utf8(String s) {
-        return s.getBytes(StandardCharsets.UTF_8);
+    /** Lowercase hex SHA-256 (the digest instance is per thread and reset by {@code digest}). */
+    public static String sha256Hex(byte[] data) {
+        return HexFormat.of().formatHex(SHA256.get().digest(data));
     }
 }

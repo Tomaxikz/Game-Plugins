@@ -30,6 +30,14 @@ public final class BridgeError extends RuntimeException {
         return new BridgeError("timeout", message);
     }
 
+    public static BridgeError busy(String message) {
+        return new BridgeError("busy", message);
+    }
+
+    public static BridgeError offline(String message) {
+        return new BridgeError("offline", message);
+    }
+
     public static BridgeError internal(String message) {
         return new BridgeError("internal", message);
     }

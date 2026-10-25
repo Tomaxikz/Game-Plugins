@@ -7,6 +7,7 @@ import { tests as data } from './data.mjs';
 import { tests as streams } from './streams.mjs';
 import { tests as connection } from './connection.mjs';
 import { tests as chunks } from './chunks.mjs';
+import { tests as maptiles } from './maptiles.mjs';
 import { tests as volume } from './volume.mjs';
 import { tests as registry } from './registry.mjs';
 import { tests as pack } from './pack.mjs';
@@ -22,6 +23,7 @@ export const ALL_TESTS = [
   ...data,
   ...streams,
   ...chunks,
+  ...maptiles,
   ...volume,
   ...registry,
   ...pack,

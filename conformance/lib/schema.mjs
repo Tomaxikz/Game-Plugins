@@ -12,6 +12,7 @@ import {
   ITEM_NULLABLE_KEYS,
   KNOWN_OPS,
   EVENT_TYPES,
+  eventTypesFor,
   MAX_FRAME,
   PLATFORMS,
   GAMES,
@@ -53,7 +54,10 @@ export function helloErrors(d, bridge) {
     }
     if (!isStrArr(c.player_fields)) e.push('capabilities.player_fields must be string[]');
     if (!isStrArr(c.events)) e.push('capabilities.events must be string[]');
-    else for (const ev of c.events) if (!EVENT_TYPES.includes(ev)) e.push(`capabilities.events has unknown type ${ev}`);
+    else {
+      const allowed = eventTypesFor(d.game);
+      for (const ev of c.events) if (!allowed.includes(ev)) e.push(`capabilities.events has unknown type ${ev}`);
+    }
     if (!isStrArr(c.features)) e.push('capabilities.features must be string[]');
     if (!Array.isArray(c.actions)) e.push('capabilities.actions must be an array');
     else e.push(...actionSpecErrors(c.actions));
@@ -478,8 +482,8 @@ export function blocksErrors(b) {
   return e;
 }
 
-export function eventsErrors(f) {
-  if (!isObj(f) || !EVENT_TYPES.includes(f.type)) return [`event type ${JSON.stringify(f && f.type)} unknown`];
+export function eventsErrors(f, game = null) {
+  if (!isObj(f) || !eventTypesFor(game).includes(f.type)) return [`event type ${JSON.stringify(f && f.type)} unknown`];
   return [];
 }
 

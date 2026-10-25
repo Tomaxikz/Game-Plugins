@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Subscription state (operations.md §7). */
+/** Subscription state (operations.md §7). The registry that holds it is {@link SubRegistry}. */
 final class Subs {
     private Subs() {
     }
@@ -73,6 +73,20 @@ final class Subs {
         EventSub(int id, Conn conn, Set<String> types) {
             super(id, conn);
             this.types = types;
+        }
+    }
+
+    /** tiles.subscribe (operations.md §7.4). Its pending/sent state belongs to the {@link TileStream}. */
+    static final class TileSub extends Sub {
+        final String world;
+        /** {min_tx, min_tz, max_tx, max_tz} inclusive, or null for every tile of the world. */
+        final int[] area;
+        final TileStream.Feed feed = new TileStream.Feed();
+
+        TileSub(int id, Conn conn, String world, int[] area) {
+            super(id, conn);
+            this.world = world;
+            this.area = area;
         }
     }
 }

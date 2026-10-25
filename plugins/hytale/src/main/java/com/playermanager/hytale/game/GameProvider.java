@@ -59,6 +59,15 @@ public interface GameProvider {
         return null;
     }
 
+    /** Map tiles and markers, or {@code null} when the build has no usable map API. */
+    default MapSource mapSource() {
+        return null;
+    }
+
+    /** The stats store registers itself here; listeners and systems feed it (always, independent of subscriptions). */
+    default void setStatsSink(StatsSink sink) {
+    }
+
     default void stop() {
     }
 }

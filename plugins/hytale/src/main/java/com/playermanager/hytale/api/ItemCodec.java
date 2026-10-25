@@ -2,8 +2,9 @@ package com.playermanager.hytale.api;
 
 import com.hypixel.hytale.server.core.asset.type.item.config.Item;
 import com.hypixel.hytale.server.core.inventory.ItemStack;
+import com.hypixel.hytale.server.core.inventory.container.ItemContainer;
 import com.playermanager.hytale.wire.Canonical;
-import com.playermanager.hytale.wire.Msgpack;
+import com.playermanager.hytale.wire.MsgpackSize;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -13,9 +14,10 @@ import org.bson.BsonDocument;
 import org.bson.BsonValue;
 
 /**
- * Encodes an ItemStack as the generic item record (items-and-assets.md §1) and computes hash and
- * fingerprint. Must be called on the world thread (it reads the stack); the returned map is an
- * immutable-by-convention copy. Hytale item ids are sent exactly as the API reports them
+ * Encodes an ItemStack as the generic item record (items-and-assets.md §1) and computes hash and fingerprint, in two
+ * steps so the world thread does as little as possible: {@link #snapshot} (world thread) copies primitives plus a
+ * clone of the metadata document; {@link #encode} (any thread, normally the bridge thread that asked) builds the maps,
+ * the canonical encoding, the hash and the fingerprint. Hytale item ids are sent exactly as the API reports them
  * (CamelCase_with_underscores): the bridge never invents a namespace.
  */
 final class ItemCodec {
@@ -24,35 +26,66 @@ final class ItemCodec {
     /** item.get and expect checks allow far larger payloads. */
     static final int FULL_COMPONENT_LIMIT = 1024 * 1024;
 
+    /** Everything encode needs from an ItemStack; immutable apart from the private metadata clone. */
+    record Snapshot(String id, int count, double maxDurability, double durability, boolean unbreakable, String model,
+                    int quality, BsonDocument metadata) {
+    }
+
     private ItemCodec() {
     }
 
-    static Map<String, Object> encode(ItemStack s, int componentLimit) {
-        Map<String, Object> rec = new LinkedHashMap<>();
-        rec.put("id", s.getItemId());
-        rec.put("count", (long) s.getQuantity());
+    /** World thread: reads the stack, nothing else (no maps, no encoding, no hashing). */
+    static Snapshot snapshot(ItemStack s) {
+        String id = s.getItemId();
+        int count = s.getQuantity();
         double max = s.getMaxDurability();
-        if (max > 0 && !s.isUnbreakable()) {
+        boolean unbreakable = s.isUnbreakable();
+        double durability = s.getDurability();
+        String model = modelOf(s);
+        BsonDocument meta = s.getMetadata();
+        BsonDocument copy = meta == null || meta.isEmpty() ? null : meta.clone();
+        int quality = s.getQualityIndex();
+        return new Snapshot(id, count, max, durability, unbreakable, model, quality, copy);
+    }
+
+    /** Snapshots every non-empty stack of a container on the world thread, keyed by slot. */
+    static Map<Integer, Snapshot> snapshotSlots(ItemContainer c) {
+        Map<Integer, Snapshot> out = new LinkedHashMap<>();
+        for (int i = 0; i < c.getCapacity(); i++) {
+            ItemStack s = c.getItemStack((short) i);
+            if (s != null && !s.isEmpty()) {
+                out.put(i, snapshot(s));
+            }
+        }
+        return out;
+    }
+
+    /** Bridge thread: the item record. {@code truncated} replaces oversized components (see the limits above). */
+    static Map<String, Object> encode(Snapshot s, int componentLimit) {
+        Map<String, Object> rec = new LinkedHashMap<>();
+        rec.put("id", s.id());
+        rec.put("count", (long) s.count());
+        double max = s.maxDurability();
+        if (max > 0 && !s.unbreakable()) {
             long maxL = Math.round(max);
             rec.put("max_damage", maxL);
-            rec.put("damage", Math.max(0L, Math.round(max - s.getDurability())));
+            rec.put("damage", Math.max(0L, Math.round(max - s.durability())));
         }
-        String model = modelOf(s);
+        String model = s.model();
         if (model != null && !model.isEmpty()) {
             rec.put("model", model);
         }
         Map<String, Object> comps = new LinkedHashMap<>();
-        BsonDocument meta = s.getMetadata();
-        if (meta != null && !meta.isEmpty()) {
-            comps.put("metadata", fromBson(meta, 0));
+        if (s.metadata() != null) {
+            comps.put("metadata", fromBson(s.metadata(), 0));
         }
-        int quality = s.getQualityIndex();
-        if (quality > 0) {
-            comps.put("quality", (long) quality);
+        if (s.quality() > 0) {
+            comps.put("quality", (long) s.quality());
         }
         boolean truncated = false;
         if (!comps.isEmpty()) {
-            if (Msgpack.encode(comps, false).length > componentLimit) {
+            // the limit applies to the plain (non-canonical) encoding of the components
+            if (MsgpackSize.of(comps, false) > componentLimit) {
                 truncated = true;
             } else {
                 rec.put("components", comps);
@@ -64,6 +97,11 @@ final class ItemCodec {
             rec.put("truncated", true);
         }
         return rec;
+    }
+
+    /** Snapshot plus encode in one call, for the rare caller that has to decide on the world thread. */
+    static Map<String, Object> encode(ItemStack s, int componentLimit) {
+        return encode(snapshot(s), componentLimit);
     }
 
     private static String modelOf(ItemStack s) {

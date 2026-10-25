@@ -49,6 +49,16 @@ tasks.processResources {
 tasks.test {
     useJUnitPlatform()
     systemProperty("pm.hytaleBuild", hytaleBuild)
+    // The server's classes (ItemStack, ...) refuse to initialise without its log manager.
+    systemProperty("java.util.logging.manager", "com.hypixel.hytale.logger.backend.HytaleLogManager")
+    // Keep test temp files (sockets, stats dirs) on disk, not in the tmpfs /tmp. Short path: the Unix
+    // socket path limit is 108 bytes. Removed after the run.
+    val testTmp = rootProject.file("../../.work/jt")
+    doFirst { testTmp.mkdirs() }
+    doLast { testTmp.deleteRecursively() }
+    systemProperty("java.io.tmpdir", testTmp.absolutePath)
+    maxHeapSize = "512m"
+    maxParallelForks = 1
 }
 
 val releaseDir = layout.buildDirectory.dir("release")

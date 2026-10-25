@@ -26,12 +26,29 @@ export const KNOWN_OPS = [
   'chunks.unsubscribe',
   'pack.manifest',
   'pack.get',
+  'map.tiles',
+  'map.markers',
+  'tiles.subscribe',
+  'tiles.unsubscribe',
 ];
 
 /** Names that are never implemented (games/minecraft.md D3, operations.md) and must answer unsupported. */
 export const NEVER_OPS = ['ping', 'worlds.list', 'servers.list', 'chat.subscribe', 'inventory.get'];
 
 export const EVENT_TYPES = ['join', 'leave', 'death', 'chat', 'command', 'advancement', 'damage', 'kick', 'ban'];
+
+/** Game-specific event types (operations.md 7.2 "game-specific"; games/hytale.md 16). */
+export const GAME_EVENT_TYPES = {
+  hytale: ['zone', 'instance', 'objective', 'memory', 'world', 'kill', 'craft'],
+};
+
+/** Event types a bridge for `game` may advertise. */
+export function eventTypesFor(game) {
+  return [...EVENT_TYPES, ...(GAME_EVENT_TYPES[game] ?? [])];
+}
+
+/** map.markers kinds (operations.md 6g). */
+export const MARKER_KINDS = ['poi', 'warp', 'spawn', 'shared', 'user', 'death', 'respawn'];
 
 export const ERROR_CODES = [
   'unsupported',
@@ -56,7 +73,7 @@ export const PLATFORMS = {
   fivem: ['fivem', 'redm'],
 };
 
-export const KNOWN_FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets', 'proxy', 'map.chunks', 'chunks.stream', 'map.volume', 'biomes', 'blocks', 'pack'];
+export const KNOWN_FEATURES = ['positions.stream', 'inventory.write', 'offline_players', 'sensitive', 'assets', 'proxy', 'map.chunks', 'chunks.stream', 'map.volume', 'biomes', 'blocks', 'pack', 'map.tiles', 'tiles.stream', 'map.markers'];
 
 export const PLAYER_STATES = ['alive', 'dead', 'spectator'];
 

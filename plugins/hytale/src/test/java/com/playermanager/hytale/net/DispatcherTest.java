@@ -58,7 +58,7 @@ class DispatcherTest {
     void disabledOpsAndActionsAreNotServed() {
         BridgeConfig cfg = new BridgeConfig(List.of("server.info", "action.run"), List.of("kick"), 250, 8, 25590);
         Dispatcher d = dispatcher(cfg);
-        assertTrue(d.serves("server.info"));
+        assertTrue(d.ops().contains("server.info"));
         assertEquals("unsupported", code(() -> handle(d, "players.list", Map.of())));
         assertEquals("unsupported", code(() -> handle(d, "positions.subscribe", Map.of("interval_ms", 250L))));
         assertEquals("unsupported", code(() -> handle(d, "action.run", Map.of("action", "kick", "target", ID))));
@@ -158,6 +158,52 @@ class DispatcherTest {
         assertEquals("invalid_args", code(() -> handle(d, "events.subscribe", Map.of("types", List.of()))));
         assertEquals("unsupported", code(() -> handle(d, "events.subscribe", Map.of("types", List.of("advancement")))));
         assertEquals("invalid_args", code(() -> handle(d, "positions.unsubscribe", Map.of())));
+    }
+
+    static Dispatcher withMap(BridgeConfig cfg) {
+        FakeGame g = new FakeGame();
+        g.map = new FakeMap();
+        lastGame = g;
+        return new Dispatcher(g, new StreamHub(g, new BridgeLog(java.nio.file.Path.of("/dev/null"), null)), cfg, "1.0.0");
+    }
+
+    @Test
+    void mapOpsAreAdvertisedWithTheirFeaturesAndFilteredByEnabledOps() {
+        Dispatcher d = withMap(defaults());
+        Map<?, ?> caps = (Map<?, ?>) handle(d, "hello", Map.of("panel_version", "1")).get("capabilities");
+        List<?> ops = (List<?>) caps.get("ops");
+        for (String op : List.of("map.tiles", "map.markers", "tiles.subscribe", "tiles.unsubscribe")) {
+            assertTrue(ops.contains(op), op);
+        }
+        assertTrue(((List<?>) caps.get("features")).containsAll(List.of("map.tiles", "tiles.stream", "map.markers")));
+        assertTrue(((List<?>) caps.get("events")).containsAll(List.of("zone", "craft", "world", "kill", "ban")));
+        d.close();
+
+        Dispatcher only = withMap(new BridgeConfig(List.of("map.markers"), List.of(), 250, 8, 25590));
+        Map<?, ?> c2 = (Map<?, ?>) handle(only, "hello", Map.of("panel_version", "1")).get("capabilities");
+        assertEquals(List.of("hello", "map.markers"), c2.get("ops"));
+        List<?> f2 = (List<?>) c2.get("features");
+        assertTrue(f2.contains("map.markers"));
+        for (String gone : List.of("map.tiles", "tiles.stream", "positions.stream", "assets")) {
+            assertFalse(f2.contains(gone), gone + " must follow its ops");
+        }
+        assertEquals("unsupported", code(() -> handle(only, "map.tiles", Map.of("world", "default",
+                "tiles", List.of(List.of(0L, 0L))))));
+        assertFalse(lastGame.map.listener.getClass().getName().contains("TileService"),
+                "no tile service (and no tile listener) when no tile op is enabled");
+    }
+
+    @Test
+    void mapArgsAreValidated() {
+        Dispatcher d = withMap(defaults());
+        assertEquals("invalid_args", code(() -> handle(d, "map.markers", Map.of("world", "default", "player", "x"))));
+        assertEquals("not_found", code(() -> handle(d, "map.markers", Map.of("world", "nope"))));
+        assertEquals("invalid_args", code(() -> handle(d, "map.tiles", Map.of("world", 5L, "tiles", List.of()))));
+        assertEquals("invalid_args", code(() -> d.handle("tiles.subscribe", Map.of(), null)));
+        assertEquals("invalid_args", code(() -> d.handle("tiles.subscribe", Map.of("world", "default",
+                "area", Map.of("min_tx", 0L, "min_tz", 0L, "max_tx", 1000L, "max_tz", 1000L)), null)));
+        assertEquals("invalid_args", code(() -> handle(d, "tiles.unsubscribe", Map.of())));
+        d.close();
     }
 
     static Map<String, Object> with(Map<String, Object> base, Map<String, Object> expect) {

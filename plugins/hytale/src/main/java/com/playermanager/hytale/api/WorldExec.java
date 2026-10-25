@@ -1,47 +1,31 @@
 package com.playermanager.hytale.api;
 
-import com.hypixel.hytale.server.core.universe.world.World;
 import com.playermanager.hytale.game.BridgeError;
-import java.lang.ref.WeakReference;
-import java.util.Collections;
-import java.util.Map;
-import java.util.WeakHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
- * The only way bridge threads touch game state: run a task inside {@code World.execute} (the
- * world's own thread) and wait for its immutable result with a deadline (T1, hytale.md §11).
+ * Future plumbing between bridge threads and a {@link WorldBatcher} lane: queue a task, wait for its immutable result
+ * with a deadline, and turn failures into protocol errors (T1, hytale.md §11). Which lane belongs to which world is
+ * {@link Worlds}' business.
  */
 final class WorldExec {
     private WorldExec() {
     }
 
-    /** One batcher per world (weakly keyed: a dropped world takes its batcher with it). */
-    private static final Map<World, WorldBatcher> BATCHERS = Collections.synchronizedMap(new WeakHashMap<>());
-
-    private static WorldBatcher batcher(World world) {
-        return BATCHERS.computeIfAbsent(world, w -> {
-            WeakReference<World> ref = new WeakReference<>(w);
-            return new WorldBatcher(r -> {
-                World live = ref.get();
-                if (live == null) {
-                    throw new RejectedExecutionException("world is gone");
-                }
-                live.execute(r);
-            });
-        });
-    }
-
-    /** Queues fn on the world thread (batched with other pending bridge work for that world). If the caller gave up before it started, fn is skipped. */
-    static <T> CompletableFuture<T> submit(World world, Supplier<T> fn) {
+    /**
+     * Queues fn on a lane. If the caller gave up before it started (future done, or {@code d} passed), fn is skipped
+     * and the future fails with {@code timeout}; a full lane fails it with {@code busy}.
+     */
+    static <T> CompletableFuture<T> submitTo(WorldBatcher lane, Deadline d, Supplier<T> fn) {
         CompletableFuture<T> f = new CompletableFuture<>();
         try {
-            batcher(world).submit(new WorldBatcher.Task() {
+            lane.submit(new WorldBatcher.Task() {
                 @Override
                 public void run() {
                     if (f.isDone()) {
@@ -57,6 +41,11 @@ final class WorldExec {
                 @Override
                 public void reject(Throwable cause) {
                     f.completeExceptionally(cause);
+                }
+
+                @Override
+                public boolean expired() {
+                    return f.isDone() || d.expired();
                 }
             });
         } catch (Throwable t) {
@@ -80,11 +69,26 @@ final class WorldExec {
             if (c instanceof BridgeError be) {
                 throw be;
             }
+            if (c instanceof LinkageError) {
+                throw BridgeError.unsupported("API not available on this server build: " + c.getMessage());
+            }
             throw BridgeError.internal("game access failed: " + c);
         }
     }
 
-    static <T> T call(World world, Deadline d, Supplier<T> fn) {
-        return await(submit(world, fn), d);
+    /** Results in submission order; when one fails the others are cancelled (so their tasks are skipped). */
+    static <T> List<T> awaitAll(List<CompletableFuture<T>> fs, Deadline d) {
+        List<T> out = new ArrayList<>(fs.size());
+        try {
+            for (CompletableFuture<T> f : fs) {
+                out.add(await(f, d));
+            }
+        } catch (RuntimeException e) {
+            for (CompletableFuture<T> f : fs) {
+                f.cancel(false);
+            }
+            throw e;
+        }
+        return out;
     }
 }

@@ -1,0 +1,457 @@
+# API members the bridge uses, per capability (read by api/Probe, see its Javadoc for the format).
+#
+# A capability is advertised only if every member below resolves on the RUNNING server and every capability it
+# requires is verified, so on another build a missing member switches off just what depends on it. Class names are
+# binary names. ProbeCoverageTest fails when the compiled api/ code references a com.hypixel member that is not
+# listed here (or on its small allowlist), so add a line when you start using a new member, in the section of the
+# capability that needs it.
+
+[base]
+method com.hypixel.hytale.server.core.universe.Universe get()
+method com.hypixel.hytale.server.core.universe.Universe getPlayer(java.util.UUID)
+method com.hypixel.hytale.server.core.universe.Universe getWorlds()
+method com.hypixel.hytale.server.core.universe.Universe getPlayerCount()
+method com.hypixel.hytale.server.core.universe.Universe getWorldsPath()
+method com.hypixel.hytale.server.core.universe.PlayerRef getUuid()
+method com.hypixel.hytale.server.core.universe.PlayerRef getUsername()
+method com.hypixel.hytale.server.core.universe.PlayerRef getReference()
+method com.hypixel.hytale.server.core.universe.world.World execute(java.lang.Runnable)
+method com.hypixel.hytale.server.core.universe.world.World scheduleAfter(java.lang.Runnable,long,java.util.concurrent.TimeUnit)
+method com.hypixel.hytale.server.core.universe.world.World getTickStepNanos()
+method com.hypixel.hytale.server.core.universe.world.World getName()
+method com.hypixel.hytale.server.core.universe.world.World getPlayerRefs()
+method com.hypixel.hytale.server.core.universe.world.World isAlive()
+method com.hypixel.hytale.server.core.universe.world.World getPlayerCount()
+method com.hypixel.hytale.component.Ref getStore()
+method com.hypixel.hytale.component.Ref isValid()
+method com.hypixel.hytale.component.Store getComponent(com.hypixel.hytale.component.Ref,com.hypixel.hytale.component.ComponentType)
+method com.hypixel.hytale.component.Store getExternalData()
+method com.hypixel.hytale.server.core.universe.world.storage.EntityStore getWorld()
+method com.hypixel.hytale.server.core.HytaleServer get()
+method com.hypixel.hytale.server.core.HytaleServer getConfig()
+method com.hypixel.hytale.server.core.HytaleServerConfig getMaxPlayers()
+method com.hypixel.hytale.server.core.HytaleServerConfig getServerName()
+method com.hypixel.hytale.server.core.HytaleServerConfig getMotd()
+method com.hypixel.hytale.server.core.HytaleServer getBoot()
+method com.hypixel.hytale.server.core.universe.PlayerRef getLanguage()
+
+# Listener registration: the event bus, ECS system registration and the abstract bases our systems extend
+# (their protected constructors are probed with declaredCtor). Every capability backed by a listener requires this.
+[listeners] requires=base
+method com.hypixel.hytale.event.EventRegistry register(java.lang.Class,java.util.function.Consumer)
+method com.hypixel.hytale.event.EventRegistry registerAsync(java.lang.Class,java.util.function.Function)
+method com.hypixel.hytale.event.EventRegistry registerAsyncGlobal(com.hypixel.hytale.event.EventPriority,java.lang.Class,java.util.function.Function)
+field com.hypixel.hytale.event.EventPriority LAST
+method com.hypixel.hytale.component.ComponentRegistryProxy registerSystem(com.hypixel.hytale.component.system.ISystem)
+declaredCtor com.hypixel.hytale.component.system.EntityEventSystem (java.lang.Class)
+ctor com.hypixel.hytale.component.system.RefChangeSystem ()
+ctor com.hypixel.hytale.component.system.tick.EntityTickingSystem ()
+declaredCtor com.hypixel.hytale.server.core.modules.entity.damage.DamageEventSystem ()
+method com.hypixel.hytale.component.query.Query and([Lcom.hypixel.hytale.component.query.Query;)
+
+[position] requires=base
+method com.hypixel.hytale.server.core.modules.entity.component.TransformComponent getPosition()
+method com.hypixel.hytale.server.core.modules.entity.component.TransformComponent getComponentType()
+method com.hypixel.hytale.server.core.modules.entity.component.HeadRotation getRotation()
+method com.hypixel.hytale.server.core.modules.entity.component.HeadRotation getDirection()
+method com.hypixel.hytale.server.core.modules.entity.component.HeadRotation getComponentType()
+method com.hypixel.hytale.math.vector.Rotation3f yaw()
+method com.hypixel.hytale.math.vector.Rotation3f pitch()
+method com.hypixel.hytale.server.core.modules.entity.component.TransformComponent getRotation()
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent getComponentType()
+
+[health] requires=base
+method com.hypixel.hytale.server.core.modules.entitystats.asset.DefaultEntityStatTypes getHealth()
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap getComponentType()
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap get(int)
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap size()
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatValue get()
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatValue getMax()
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatValue getId()
+
+[game_mode] requires=base
+method com.hypixel.hytale.server.core.entity.entities.Player getComponentType()
+method com.hypixel.hytale.server.core.entity.entities.Player getGameMode()
+method com.hypixel.hytale.server.core.entity.entities.Player setGameMode(com.hypixel.hytale.component.Ref,com.hypixel.hytale.protocol.GameMode,com.hypixel.hytale.component.ComponentAccessor)
+method com.hypixel.hytale.protocol.GameMode values()
+method com.hypixel.hytale.protocol.GameMode name()
+
+[inventory] requires=base
+method com.hypixel.hytale.server.core.inventory.InventoryComponent getInventory()
+method com.hypixel.hytale.server.core.inventory.container.ItemContainer getCapacity()
+method com.hypixel.hytale.server.core.inventory.container.ItemContainer getItemStack(short)
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Hotbar getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Storage getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Armor getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Utility getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Tool getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$Backpack getComponentType()
+method com.hypixel.hytale.server.core.inventory.ItemStack getItemId()
+method com.hypixel.hytale.server.core.inventory.ItemStack getQuantity()
+method com.hypixel.hytale.server.core.inventory.ItemStack getMetadata()
+method com.hypixel.hytale.server.core.inventory.ItemStack getDurability()
+method com.hypixel.hytale.server.core.inventory.ItemStack getMaxDurability()
+method com.hypixel.hytale.server.core.inventory.ItemStack isEmpty()
+method com.hypixel.hytale.server.core.inventory.ItemStack getItem()
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getModel()
+method com.hypixel.hytale.server.core.inventory.ItemStack getQualityIndex()
+method com.hypixel.hytale.server.core.inventory.ItemStack isUnbreakable()
+
+[held_item] requires=inventory
+method com.hypixel.hytale.server.core.inventory.InventoryComponent getItemInHand(com.hypixel.hytale.component.ComponentAccessor,com.hypixel.hytale.component.Ref)
+
+[equipment] requires=inventory
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getArmor()
+method com.hypixel.hytale.server.core.asset.type.item.config.ItemArmor getArmorSlot()
+method com.hypixel.hytale.protocol.ItemArmorSlot name()
+
+[ping] requires=base
+method com.hypixel.hytale.server.core.universe.PlayerRef getPacketHandler()
+method com.hypixel.hytale.server.core.io.PacketHandler getPingInfo(com.hypixel.hytale.protocol.packets.connection.PongType)
+method com.hypixel.hytale.server.core.io.PacketHandler$PingInfo getPingMetricSet()
+method com.hypixel.hytale.metrics.metric.HistoricMetric getAverage(int)
+field com.hypixel.hytale.protocol.packets.connection.PongType Raw
+
+[ip] requires=base
+method com.hypixel.hytale.server.core.universe.PlayerRef getPacketHandler()
+method com.hypixel.hytale.server.core.io.PacketHandler getChannel()
+method com.hypixel.hytale.protocol.io.ChannelConnection remoteAddress()
+
+[permissions] requires=base
+method com.hypixel.hytale.server.core.permissions.PermissionsModule get()
+method com.hypixel.hytale.server.core.permissions.PermissionsModule getGroupsForUser(java.util.UUID)
+method com.hypixel.hytale.server.core.permissions.PermissionsModule getFirstPermissionProvider()
+method com.hypixel.hytale.server.core.permissions.provider.PermissionProvider getUserPermissions(java.util.UUID)
+
+[nearby] requires=position
+method com.hypixel.hytale.server.core.modules.entity.EntityModule get()
+method com.hypixel.hytale.server.core.modules.entity.EntityModule getEntitySpatialResourceType()
+method com.hypixel.hytale.component.spatial.SpatialResource getSpatialStructure()
+method com.hypixel.hytale.component.spatial.SpatialStructure ordered(org.joml.Vector3dc,double,java.util.List)
+method com.hypixel.hytale.component.Store getResource(com.hypixel.hytale.component.ResourceType)
+method com.hypixel.hytale.server.core.entity.UUIDComponent getComponentType()
+method com.hypixel.hytale.server.npc.entities.NPCEntity getNPCTypeId()
+method com.hypixel.hytale.server.core.entity.UUIDComponent getUuid()
+method com.hypixel.hytale.server.core.modules.entity.item.ItemComponent getComponentType()
+method com.hypixel.hytale.server.npc.entities.NPCEntity getComponentType()
+method com.hypixel.hytale.server.core.universe.PlayerRef getComponentType()
+
+[kick] requires=base
+method com.hypixel.hytale.server.core.io.ConnectionRegistry get()
+method com.hypixel.hytale.server.core.io.ConnectionRegistry disconnect(java.util.UUID,com.hypixel.hytale.server.core.Message)
+method com.hypixel.hytale.server.core.Message raw(java.lang.String)
+
+[ban] requires=base
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule get()
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule ban(com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban)
+ctor com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban (java.util.UUID,java.util.UUID,java.time.Instant,java.time.Instant,java.lang.String)
+
+[unban] requires=base
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule get()
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule unban(java.util.UUID)
+
+[whitelist] requires=base
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule get()
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule allowJoin(java.util.UUID)
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule disallowJoin(java.util.UUID)
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule setJoinPermissionRequired(boolean)
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule isJoinPermissionRequired()
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule getUsersWithJoinGrant()
+
+[op] requires=base
+method com.hypixel.hytale.server.core.permissions.PermissionsModule get()
+method com.hypixel.hytale.server.core.permissions.PermissionsModule addUserToGroup(java.util.UUID,java.lang.String)
+method com.hypixel.hytale.server.core.permissions.PermissionsModule removeUserFromGroup(java.util.UUID,java.lang.String)
+method com.hypixel.hytale.server.core.permissions.PermissionsModule getGroupsForUser(java.util.UUID)
+
+[kill] requires=base
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent tryAddComponent(com.hypixel.hytale.component.Store,com.hypixel.hytale.component.Ref,com.hypixel.hytale.server.core.modules.entity.damage.Damage)
+ctor com.hypixel.hytale.server.core.modules.entity.damage.Damage (com.hypixel.hytale.server.core.modules.entity.damage.Damage$Source,com.hypixel.hytale.server.core.modules.entity.damage.DamageCause,float)
+field com.hypixel.hytale.server.core.modules.entity.damage.Damage NULL_SOURCE
+field com.hypixel.hytale.server.core.modules.entity.damage.DamageCause COMMAND
+
+[heal] requires=base
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap maximizeStatValue(int)
+method com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap getComponentType()
+
+[teleport] requires=position
+method com.hypixel.hytale.server.core.modules.entity.teleport.Teleport createForPlayer(com.hypixel.hytale.server.core.universe.world.World,org.joml.Vector3dc,com.hypixel.hytale.math.vector.Rotation3fc)
+method com.hypixel.hytale.server.core.modules.entity.teleport.Teleport getComponentType()
+method com.hypixel.hytale.component.Store addComponent(com.hypixel.hytale.component.Ref,com.hypixel.hytale.component.ComponentType,com.hypixel.hytale.component.Component)
+method com.hypixel.hytale.math.vector.Rotation3f setYaw(float)
+method com.hypixel.hytale.math.vector.Rotation3f setPitch(float)
+ctor com.hypixel.hytale.math.vector.Rotation3f (com.hypixel.hytale.math.vector.Rotation3fc)
+method com.hypixel.hytale.server.core.universe.Universe getWorld(java.lang.String)
+
+[give_item] requires=inventory
+ctor com.hypixel.hytale.server.core.inventory.ItemStack (java.lang.String,int)
+method com.hypixel.hytale.server.core.inventory.container.ItemContainer addItemStack(com.hypixel.hytale.server.core.inventory.ItemStack)
+method com.hypixel.hytale.server.core.entity.entities.Player giveItem(com.hypixel.hytale.server.core.inventory.ItemStack,com.hypixel.hytale.component.Ref,com.hypixel.hytale.component.ComponentAccessor)
+method com.hypixel.hytale.server.core.inventory.transaction.ItemStackTransaction getRemainder()
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getAssetMap()
+method com.hypixel.hytale.assetstore.map.DefaultAssetMap getAsset(java.lang.Object)
+
+[clear_inventory] requires=inventory
+method com.hypixel.hytale.server.core.inventory.container.ItemContainer clear()
+
+[assets] requires=base
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getAssetMap()
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getIcon()
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getId()
+method com.hypixel.hytale.server.core.asset.type.item.config.Item getModel()
+method com.hypixel.hytale.assetstore.map.DefaultAssetMap getAssetMap()
+method com.hypixel.hytale.server.core.asset.common.CommonAssetRegistry getByName(java.lang.String)
+method com.hypixel.hytale.server.core.asset.common.CommonAsset getBlob()
+method com.hypixel.hytale.server.core.asset.common.CommonAsset getHash()
+
+# join / leave / chat listeners
+[events] requires=listeners
+type com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+type com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent
+type com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent
+method com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent getContent()
+method com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent isCancelled()
+method com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent getSender()
+method com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent getPlayerRef()
+method com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent getWorld()
+method com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent getPlayerRef()
+method com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent getDisconnectReason()
+method com.hypixel.hytale.server.core.io.PacketHandler$DisconnectReason getServerDisconnectReason()
+method com.hypixel.hytale.server.core.universe.PlayerRef getWorldUuid()
+method com.hypixel.hytale.server.core.universe.Universe getWorld(java.util.UUID)
+
+[event.death] requires=position,listeners
+type com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent getComponentType()
+method com.hypixel.hytale.server.core.modules.entity.damage.DamageCause getId()
+method com.hypixel.hytale.server.core.Message getRawText()
+method com.hypixel.hytale.server.core.universe.PlayerRef getComponentType()
+method com.hypixel.hytale.server.npc.entities.NPCEntity getComponentType()
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent getDeathMessage()
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent getDeathCause()
+method com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent getDeathInfo()
+type com.hypixel.hytale.component.system.RefChangeSystem
+
+[map.tiles] requires=base
+method com.hypixel.hytale.server.core.universe.Universe getWorld(java.lang.String)
+method com.hypixel.hytale.server.core.universe.world.World getChunkStore()
+method com.hypixel.hytale.server.core.universe.world.World getWorldMapManager()
+method com.hypixel.hytale.server.core.universe.world.World getWorldConfig()
+method com.hypixel.hytale.server.core.universe.world.WorldConfig getWorldMapProvider()
+type com.hypixel.hytale.server.core.universe.world.worldmap.provider.DisabledWorldMapProvider
+type com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ChunkWorldMap
+method com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager getGenerator()
+method com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager getWorldMapSettings()
+method com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapSettings getImageScale()
+method com.hypixel.hytale.server.core.universe.world.storage.ChunkStore getChunkReference(long)
+method com.hypixel.hytale.server.core.universe.world.storage.ChunkStore getChunkSectionReference(int,int,int)
+method com.hypixel.hytale.server.core.universe.world.storage.ChunkStore getStore()
+method com.hypixel.hytale.server.core.universe.world.chunk.BlockChunk getComponentType()
+method com.hypixel.hytale.server.core.universe.world.chunk.heightmap.HeightmapColumn getComponentType()
+method com.hypixel.hytale.server.core.universe.world.chunk.heightmap.HeightmapColumn getHeight(int,int)
+field com.hypixel.hytale.server.core.universe.world.chunk.heightmap.HeightmapColumn NO_HEIGHT
+method com.hypixel.hytale.server.core.universe.world.chunk.section.BlockSection getComponentType()
+method com.hypixel.hytale.server.core.universe.world.chunk.section.FluidSection getComponentType()
+method com.hypixel.hytale.server.core.universe.world.chunk.section.EnvironmentSection getComponentType()
+method com.hypixel.hytale.math.util.ChunkUtil indexChunk(int,int)
+field com.hypixel.hytale.math.util.ChunkUtil SIZE
+field com.hypixel.hytale.math.util.ChunkUtil BITS
+ctor com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder (long,int,int,com.hypixel.hytale.server.core.universe.world.World)
+method com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder getImage()
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder blockChunk
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder heightmapColumn
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder blockSections
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder fluidSections
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder environmentSections
+declaredField com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder neighborHeightSamples
+declaredMethod com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder generateImageAsync()
+field com.hypixel.hytale.protocol.packets.worldmap.MapImage width
+field com.hypixel.hytale.protocol.packets.worldmap.MapImage height
+field com.hypixel.hytale.protocol.packets.worldmap.MapImage palette
+field com.hypixel.hytale.protocol.packets.worldmap.MapImage bitsPerIndex
+field com.hypixel.hytale.protocol.packets.worldmap.MapImage packedIndices
+
+# the server's builder pool: optional, without it the renderer constructs builders itself (ImageBuilderEngine)
+[map.tiles.pool] requires=map.tiles
+method com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder release()
+declaredMethod com.hypixel.hytale.server.core.universe.world.worldmap.provider.chunk.ImageBuilder acquire(long,int,int,com.hypixel.hytale.server.core.universe.world.World)
+
+# invalidation sources for tiles.subscribe (block events come from the stats probes)
+[tiles.stream] requires=map.tiles,listeners
+type com.hypixel.hytale.server.core.universe.world.events.ecs.ChunkSaveEvent
+method com.hypixel.hytale.server.core.universe.world.events.ecs.ChunkSaveEvent getChunk()
+method com.hypixel.hytale.server.core.universe.world.chunk.WorldChunk getX()
+method com.hypixel.hytale.server.core.universe.world.chunk.WorldChunk getZ()
+method com.hypixel.hytale.component.query.Query any()
+method com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent getTargetBlock()
+method com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent getTargetBlock()
+method com.hypixel.hytale.server.core.universe.world.storage.ChunkStore getWorld()
+
+[map.markers] requires=base
+method com.hypixel.hytale.server.core.universe.Universe getWorld(java.lang.String)
+method com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager getPointsOfInterest()
+field com.hypixel.hytale.protocol.packets.worldmap.MapMarker id
+field com.hypixel.hytale.protocol.packets.worldmap.MapMarker name
+field com.hypixel.hytale.protocol.packets.worldmap.MapMarker markerImage
+field com.hypixel.hytale.protocol.packets.worldmap.MapMarker transform
+field com.hypixel.hytale.protocol.Transform position
+field com.hypixel.hytale.protocol.Position x
+field com.hypixel.hytale.protocol.FormattedMessage rawText
+field com.hypixel.hytale.protocol.FormattedMessage messageId
+method com.hypixel.hytale.server.core.universe.world.WorldConfig getSpawnProvider()
+method com.hypixel.hytale.server.core.universe.world.spawn.ISpawnProvider getSpawnPoints()
+method com.hypixel.hytale.math.vector.Transform getPosition()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.worldstore.WorldMarkersResource getResourceType()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.worldstore.WorldMarkersResource getUserMapMarkers()
+method com.hypixel.hytale.component.Store getResource(com.hypixel.hytale.component.ResourceType)
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getId()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getX()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getZ()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getName()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getIcon()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getCreatedByUuid()
+method com.hypixel.hytale.server.core.universe.world.worldmap.markers.user.UserMapMarker getCreatedByName()
+method com.hypixel.hytale.server.core.entity.entities.Player getPlayerConfigData()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerConfigData getPerWorldData()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerWorldData getUserMapMarkers()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerWorldData getDeathPositions()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerWorldData getRespawnPoints()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerDeathPositionData getTransform()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerDeathPositionData getDay()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerDeathPositionData getMarkerId()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerRespawnPointData getName()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerRespawnPointData getRespawnPosition()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerRespawnPointData getBlockPosition()
+field com.hypixel.hytale.protocol.Position y
+field com.hypixel.hytale.protocol.Position z
+
+# optional marker source: logged only, the code skips it when absent
+[map.markers.warps]
+method com.hypixel.hytale.builtin.teleport.TeleportPlugin get()
+method com.hypixel.hytale.builtin.teleport.TeleportPlugin getWarps()
+method com.hypixel.hytale.builtin.teleport.Warp getId()
+method com.hypixel.hytale.builtin.teleport.Warp getWorld()
+method com.hypixel.hytale.builtin.teleport.Warp getTransform()
+method com.hypixel.hytale.builtin.teleport.Warp getCreator()
+
+[world.time] requires=base
+method com.hypixel.hytale.server.core.universe.world.World getEntityStore()
+method com.hypixel.hytale.server.core.universe.world.storage.EntityStore getStore()
+method com.hypixel.hytale.component.Store getResource(com.hypixel.hytale.component.ResourceType)
+method com.hypixel.hytale.server.core.modules.time.WorldTimeResource getResourceType()
+method com.hypixel.hytale.server.core.modules.time.WorldTimeResource getGameDateTime()
+method com.hypixel.hytale.server.core.modules.time.WorldTimeResource getGameTime()
+method com.hypixel.hytale.server.core.modules.time.WorldTimeResource getMoonPhase()
+field com.hypixel.hytale.server.core.modules.time.WorldTimeResource ZERO_YEAR
+
+[world.weather] requires=base
+method com.hypixel.hytale.server.core.universe.world.World getEntityStore()
+method com.hypixel.hytale.server.core.universe.world.World getWorldConfig()
+method com.hypixel.hytale.server.core.universe.world.WorldConfig getForcedWeather()
+method com.hypixel.hytale.builtin.weather.resources.WeatherResource getResourceType()
+method com.hypixel.hytale.builtin.weather.resources.WeatherResource getForcedWeatherIndex()
+method com.hypixel.hytale.builtin.weather.resources.WeatherResource getEnvironmentWeather()
+method com.hypixel.hytale.server.core.asset.type.weather.config.Weather getAssetMap()
+method com.hypixel.hytale.server.core.asset.type.weather.config.Weather getId()
+method com.hypixel.hytale.assetstore.map.IndexedLookupTableAssetMap getAsset(int)
+
+# every member the statistics systems read (games/hytale.md §17)
+[stats] requires=listeners
+type com.hypixel.hytale.component.system.EntityEventSystem
+type com.hypixel.hytale.component.system.tick.EntityTickingSystem
+method com.hypixel.hytale.component.ArchetypeChunk getComponent(int,com.hypixel.hytale.component.ComponentType)
+method com.hypixel.hytale.component.ArchetypeChunk getReferenceTo(int)
+method com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent getBlockType()
+method com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType getId()
+method com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent getItemInHand()
+method com.hypixel.hytale.server.core.event.events.ecs.InteractivelyPickupItemEvent getItemStack()
+method com.hypixel.hytale.server.core.event.events.ecs.DropItemEvent$Drop getItemStack()
+method com.hypixel.hytale.server.core.event.events.ecs.CraftRecipeEvent$Post getCraftedRecipe()
+method com.hypixel.hytale.server.core.event.events.ecs.CraftRecipeEvent$Post getQuantity()
+method com.hypixel.hytale.server.core.asset.type.item.config.CraftingRecipe getPrimaryOutput()
+method com.hypixel.hytale.server.core.inventory.MaterialQuantity getItemId()
+method com.hypixel.hytale.server.core.inventory.MaterialQuantity getQuantity()
+method com.hypixel.hytale.server.core.modules.entity.damage.event.KillFeedEvent$KillerMessage getTargetRef()
+method com.hypixel.hytale.server.core.modules.entity.damage.DamageModule get()
+method com.hypixel.hytale.server.core.modules.entity.damage.DamageModule getInspectDamageGroup()
+method com.hypixel.hytale.server.core.modules.entity.damage.Damage getAmount()
+method com.hypixel.hytale.server.core.modules.entity.damage.Damage getSource()
+method com.hypixel.hytale.server.core.modules.entity.damage.Damage$EntitySource getRef()
+method com.hypixel.hytale.server.npc.entities.NPCEntity getRoleName()
+method com.hypixel.hytale.server.core.entity.movement.MovementStatesComponent getComponentType()
+method com.hypixel.hytale.server.core.entity.movement.MovementStatesComponent getMovementStates()
+field com.hypixel.hytale.protocol.MovementStates mounting
+field com.hypixel.hytale.protocol.MovementStates gliding
+field com.hypixel.hytale.protocol.MovementStates swimming
+field com.hypixel.hytale.protocol.MovementStates inFluid
+field com.hypixel.hytale.protocol.MovementStates falling
+field com.hypixel.hytale.protocol.MovementStates fallingFar
+field com.hypixel.hytale.protocol.MovementStates sprinting
+field com.hypixel.hytale.protocol.MovementStates flying
+field com.hypixel.hytale.protocol.MovementStates jumping
+method com.hypixel.hytale.server.core.entity.entities.Player getPlayerConfigData()
+method com.hypixel.hytale.server.core.entity.entities.player.data.PlayerConfigData getDiscoveredZones()
+method com.hypixel.hytale.server.core.universe.PlayerRef getComponentType()
+method com.hypixel.hytale.server.npc.entities.NPCEntity getComponentType()
+method com.hypixel.hytale.server.core.universe.world.storage.ChunkStore getWorld()
+
+# Hytale-only event types (games/hytale.md §16)
+[event.zone] requires=listeners
+method com.hypixel.hytale.server.core.event.events.ecs.DiscoverZoneEvent$Display getDiscoveryInfo()
+method com.hypixel.hytale.server.core.universe.world.WorldMapTracker$ZoneDiscoveryInfo zoneName()
+
+[event.instance] requires=listeners
+method com.hypixel.hytale.builtin.instances.event.DiscoverInstanceEvent$Display getInstanceWorldUuid()
+
+[event.objective] requires=listeners
+method com.hypixel.hytale.builtin.adventure.objectives.ObjectivePlugin get()
+method com.hypixel.hytale.builtin.adventure.objectives.ObjectivePlugin getObjectiveHistoryComponentType()
+method com.hypixel.hytale.builtin.adventure.objectives.components.ObjectiveHistoryComponent getObjectiveHistoryMap()
+method com.hypixel.hytale.builtin.adventure.objectives.historydata.ObjectiveHistoryData getTimesCompleted()
+method com.hypixel.hytale.builtin.adventure.objectives.historydata.ObjectiveHistoryData getId()
+method com.hypixel.hytale.builtin.adventure.objectives.historydata.ObjectiveHistoryData getCategory()
+
+[event.memory] requires=listeners
+method com.hypixel.hytale.builtin.adventure.memories.component.PlayerMemories getComponentType()
+method com.hypixel.hytale.builtin.adventure.memories.component.PlayerMemories getRecordedMemories()
+method com.hypixel.hytale.builtin.adventure.memories.memories.Memory getId()
+method com.hypixel.hytale.builtin.adventure.memories.memories.Memory getTitle()
+method com.hypixel.hytale.builtin.adventure.memories.memories.npc.NPCMemory getNpcRole()
+
+[event.world] requires=listeners
+method com.hypixel.hytale.server.core.event.events.player.DrainPlayerFromWorldEvent getSourceWorld()
+method com.hypixel.hytale.server.core.event.events.player.DrainPlayerFromWorldEvent getDestinationWorld()
+method com.hypixel.hytale.server.core.event.events.player.DrainPlayerFromWorldEvent getHolder()
+method com.hypixel.hytale.component.Holder getComponent(com.hypixel.hytale.component.ComponentType)
+
+[event.kill] requires=listeners
+method com.hypixel.hytale.server.core.modules.entity.damage.event.KillFeedEvent$KillerMessage getTargetRef()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent getItemInHand(com.hypixel.hytale.component.ComponentAccessor,com.hypixel.hytale.component.Ref)
+method com.hypixel.hytale.server.npc.entities.NPCEntity getRoleName()
+
+[event.craft] requires=listeners
+method com.hypixel.hytale.server.core.event.events.ecs.CraftRecipeEvent$Post getCraftedRecipe()
+method com.hypixel.hytale.server.core.event.events.ecs.CraftRecipeEvent$Post getQuantity()
+method com.hypixel.hytale.server.core.asset.type.item.config.CraftingRecipe getPrimaryOutput()
+method com.hypixel.hytale.server.core.inventory.MaterialQuantity getItemId()
+
+[event.ban] requires=listeners
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule get()
+method com.hypixel.hytale.server.core.modules.accesscontrol.AccessControlModule getBanProvider()
+method com.hypixel.hytale.server.core.modules.accesscontrol.provider.BanProvider getBan(java.util.UUID)
+method com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban isInEffect()
+method com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban getReason()
+method com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban getBy()
+method com.hypixel.hytale.server.core.modules.accesscontrol.ban.Ban getExpiresOn()
+
+# Optional pieces: reported in bridge.log when missing, nothing is switched off (the code guards each use).
+[inventory.optional] requires=inventory
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$RuneBag getComponentType()
+method com.hypixel.hytale.server.core.inventory.InventoryComponent$AbilitySlots getComponentType()
+
+[server.extensions] requires=base
+method com.hypixel.hytale.server.core.plugin.PluginManager get()
+method com.hypixel.hytale.server.core.plugin.PluginManager getPlugins()
+method com.hypixel.hytale.server.core.plugin.PluginBase getName()
+method com.hypixel.hytale.server.core.plugin.PluginBase getManifest()
+method com.hypixel.hytale.common.plugin.PluginManifest getVersion()

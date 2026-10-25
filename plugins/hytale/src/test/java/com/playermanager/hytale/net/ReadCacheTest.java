@@ -122,7 +122,7 @@ class ReadCacheTest {
                 assertSame(first, f.get(5, TimeUnit.SECONDS));
             }
             assertEquals(1, g.getCalls.get());
-            assertEquals(5, d.readHits());
+            assertEquals(5, d.reads().hits.get());
         } finally {
             pool.shutdownNow();
         }
@@ -157,6 +157,32 @@ class ReadCacheTest {
                 new Dispatcher(new FakeGame(), new StreamHub(new FakeGame(), new BridgeLog(java.nio.file.Path.of("/dev/null"), null)),
                         new BridgeConfig(List.of("*"), List.of(), 250, 8, 25590), "1.0.0")
                         .handle("player.get", Map.of("id", ID), null).data(), false)));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cachedResultsAreDeeplyReadOnlyAndKeepTheirOrder() {
+        ReadCache c = new ReadCache(500, () -> 0L);
+        java.util.LinkedHashMap<String, Object> inner = new java.util.LinkedHashMap<>();
+        inner.put("z", 1L);
+        inner.put("a", null);
+        inner.put("m", new java.util.ArrayList<>(List.of(1L, 2L)));
+        java.util.LinkedHashMap<String, Object> in = new java.util.LinkedHashMap<>();
+        in.put("players", new java.util.ArrayList<>(List.of(inner)));
+        in.put("set", new java.util.LinkedHashSet<>(List.of("b", "a")));
+        in.put("bin", new byte[] {1, 2});
+        Map<String, Object> out = c.get("players.list", Map.of(), null, () -> in);
+        assertThrows(UnsupportedOperationException.class, () -> out.put("x", 1L));
+        List<Map<String, Object>> players = (List<Map<String, Object>>) out.get("players");
+        assertThrows(UnsupportedOperationException.class, () -> players.add(Map.of()));
+        assertThrows(UnsupportedOperationException.class, () -> players.get(0).put("x", 1L));
+        assertThrows(UnsupportedOperationException.class, () -> ((List<Object>) players.get(0).get("m")).add(3L));
+        assertThrows(UnsupportedOperationException.class, () -> ((java.util.Set<Object>) out.get("set")).add("c"));
+        assertEquals(List.of("z", "a", "m"), new java.util.ArrayList<>(players.get(0).keySet()));
+        assertTrue(players.get(0).containsKey("a") && players.get(0).get("a") == null, "nulls survive");
+        assertTrue(java.util.Arrays.equals(Msgpack.encode(in, false), Msgpack.encode(out, false)),
+                "frozen copy encodes to the same bytes");
+        assertSame(out, c.get("players.list", Map.of(), null, () -> in), "followers share the frozen result");
     }
 
     @Test

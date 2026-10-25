@@ -15,8 +15,8 @@ import java.util.function.Supplier;
 /**
  * Coalesces identical read requests: the same op with the same canonical arguments (so include_sensitive and
  * fields are part of the key) that is in flight, or finished less than {@code ttlMs} ago, shares one computation on
- * the game thread. Errors are never cached. Results are built once and only read afterwards (the encoder never
- * mutates them), so sharing them between connections is safe and the responses are identical to uncached ones.
+ * the game thread. Errors are never cached. Results are frozen (deep, order-preserving read-only copies) before they
+ * are shared between connections, so the responses are identical to uncached ones and nobody can alter them.
  */
 final class ReadCache {
     private static final int MAX_ENTRIES = 256;
@@ -68,7 +68,7 @@ final class ReadCache {
             sweep(now);
         }
         try {
-            Map<String, Object> result = compute.get();
+            Map<String, Object> result = Frozen.of(compute.get()); // shared between connections: read-only
             e.doneAt = clock.getAsLong();
             e.future.complete(result);
             return result;
