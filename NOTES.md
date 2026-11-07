@@ -500,7 +500,8 @@ the same universal jar and share `ProxyPlatform` (one code path); each module ha
 > `lp user <uuid> parent set <group>`. Advertised only when LiteBans or AdvancedBan (`ban`, `unban`, `mute`, `unmute`) or LuckPerms
 > (`set_permission_group`) is loaded (`hello.integrations`: `luckperms`, `litebans`, `advancedban`). `ban` and `mute` need an online
 > target because the proxy only knows online players; `unban` and `unmute` accept any UUID but need the name, which the bridge
-> knows only for players seen since it started (otherwise `not_found`). Names are validated against `[A-Za-z0-9_]{1,16}`; reasons
+> remembers for every player it has seen connect, also across proxy restarts (`.playermanager/known-names.json`, 20 000 most
+> recent, saved off the event thread; a player last online before the bridge was installed is `not_found`). Names are validated against `[A-Za-z0-9_]{1,16}`; reasons
 > are free text without control characters (core). The panel shows `refused` when the proxy does not accept a command. Source:
 > minecraft.md §7 (ban/mute on proxies: partial, via LiteBans/AdvancedBan), §10. Capability effect: the integration-dependent actions
 > above. NOT verified live: LiteBans, AdvancedBan and LuckPerms were not installed in the headless run.

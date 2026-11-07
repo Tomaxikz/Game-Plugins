@@ -61,7 +61,7 @@ public final class ProxyPlatform implements Platform {
     private final PlatformInfo info;
     private final ExecutorService exec;
     private final ActionRegistry actions = new ActionRegistry();
-    private final Map<UUID, String> names = new ConcurrentHashMap<UUID, String>();
+    private final KnownNames names;
     private final List<String> integrations;
     private volatile BridgeCore core;
     /** The backends as of the last successful read, served when the proxy cannot be read at that moment. */
@@ -71,6 +71,7 @@ public final class ProxyPlatform implements Platform {
         this.host = host;
         this.log = log;
         this.exec = Executors.newSingleThreadExecutor(daemon("pm-bridge-proxy"));
+        this.names = new KnownNames(root, log, exec);
         this.integrations = host.integrations();
         final Map<String, Object> range = host.protocolRange();
         lastBackends = backendMaps(host.backends());
@@ -100,8 +101,11 @@ public final class ProxyPlatform implements Platform {
     /** Called once the core exists, so listeners can emit events. */
     public void attach(BridgeCore c) { this.core = c; }
 
-    /** Stops the worker thread; pending work is abandoned. */
-    public void close() { exec.shutdownNow(); }
+    /** Stops the worker thread; pending work is abandoned (the known names are saved first). */
+    public void close() {
+        names.save();
+        exec.shutdownNow();
+    }
 
     /** Emits an event when someone subscribed to it; never throws. */
     public void emit(String type, Map<String, Object> data) {
@@ -123,10 +127,8 @@ public final class ProxyPlatform implements Platform {
         log.warn("event listener " + listener + " failed: " + t);
     }
 
-    /** Remembers a name so unban/unmute can address a player that went offline. */
-    public void remember(UUID id, String name) {
-        if (id != null && name != null) names.put(id, name);
-    }
+    /** Remembers a name so unban/unmute can address a player that went offline, also across proxy restarts. */
+    public void remember(UUID id, String name) { names.remember(id, name); }
 
     // ------------------------------------------------------------------ Platform
 
@@ -368,7 +370,7 @@ public final class ProxyPlatform implements Platform {
 
     private String knownName(ActionRequest req) {
         String name = names.get(target(req));
-        if (name == null) throw BridgeException.notFound("the name of this player is not known to the proxy since it started");
+        if (name == null) throw BridgeException.notFound("the name of this player is not known to the proxy (never seen since the bridge was installed)");
         return name;
     }
 

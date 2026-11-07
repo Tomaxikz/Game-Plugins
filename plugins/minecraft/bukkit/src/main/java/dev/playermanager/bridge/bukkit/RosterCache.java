@@ -42,6 +42,12 @@ final class RosterCache {
         }
     }
 
+    /** Re-reads the files in the background now, after a change made through the server's API. */
+    void refreshSoon() {
+        loadedAt = 0;
+        touch();
+    }
+
     Map<String, Map<String, Object>> ops() { touch(); return ops; }
     Map<String, Map<String, Object>> whitelist() { touch(); return whitelist; }
     Map<String, Map<String, Object>> bans() { touch(); return bans; }

@@ -182,6 +182,27 @@ class ProxyPlatformTest {
         assertTrue(host.log.contains("console lp user " + ALICE + " parent set moderator"));
     }
 
+    @Test void unbanFindsANameRememberedBeforeAProxyRestart() throws Exception {
+        UUID carol = UUID.fromString("5c3e1f2a-7b8d-4e6f-9a0b-1c2d3e4f5a6b");
+        platform.remember(carol, "Carol");
+        // restart: same server root, fresh proxy process that has not seen Carol
+        client.close();
+        core.stop();
+        platform.close();
+        host = new FakeHost();
+        platform = new ProxyPlatform(host, dev.playermanager.bridge.spi.BridgeLog.STDERR, root, "1.0.0", "velocity");
+        core = new BridgeCore(platform);
+        platform.attach(core);
+        assertTrue(core.start());
+        client = TestClient.unix(root.resolve(".playermanager/bridge.sock"));
+        assertTrue(data(client.hello()).containsKey("capabilities"));
+
+        assertEquals(Boolean.TRUE, data(act("unban", carol.toString(), null)).get("ok"));
+        assertTrue(host.log.contains("console unban Carol"));
+        assertEquals(Boolean.TRUE, data(act("unmute", carol.toString(), null)).get("ok"));
+        assertTrue(host.log.contains("console unmute Carol"));
+    }
+
     @Test void joinAndChatEventsReachSubscribers() throws Exception {
         Map<String, Object> sub = data(client.call("events.subscribe", m("types", Arrays.asList("join", "chat"))));
         int subId = ((Number) sub.get("sub")).intValue();

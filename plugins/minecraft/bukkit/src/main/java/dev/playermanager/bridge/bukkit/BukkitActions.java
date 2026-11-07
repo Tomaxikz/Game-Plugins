@@ -46,11 +46,13 @@ final class BukkitActions {
 
     private final Ctx ctx;
     private final BukkitEvents events;
+    private final PlayerBans bans;
     private final ActionRegistry registry = new ActionRegistry();
 
     BukkitActions(Ctx ctx, BukkitEvents events) {
         this.ctx = ctx;
         this.events = events;
+        this.bans = new PlayerBans(ctx.roster);
         register();
     }
 
@@ -466,29 +468,24 @@ final class BukkitActions {
         return op;
     }
 
-    @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
+    /** By UUID, see {@link PlayerBans}: a name lookup misses players the user cache no longer knows. */
+    @SuppressWarnings("deprecation")
     private ActionResult ban(ActionRequest r) {
-        OfflinePlayer op = offlineTarget(r);
-        String name = op.getName();
-        if (name == null) throw BridgeException.notFound("Player name unknown");
+        PlayerBans.Target t = bans.target(r.target);
+        if (t.name == null) throw BridgeException.notFound("Player name unknown");
         String reason = r.args.get("reason") == null ? null : str(r, "reason");
-        BanList list = Bukkit.getBanList(BanList.Type.NAME);
-        if (list.isBanned(name)) return ActionResult.refused("Player is already banned");
-        list.addBan(name, reason, null, SOURCE);
-        Player online = op.getPlayer();
+        if (bans.isBanned(t)) return ActionResult.refused("Player is already banned");
+        bans.ban(t, reason, SOURCE);
+        Player online = t.player == null ? null : t.player.getPlayer();
         if (online != null) online.kickPlayer(reason == null ? "Banned" : reason);
-        events.emitBan(r.target, name, reason, SOURCE, null);
+        events.emitBan(r.target, t.name, reason, SOURCE, null);
         return ActionResult.ok();
     }
 
-    @SuppressWarnings({"deprecation", "rawtypes"})
     private ActionResult unban(ActionRequest r) {
-        OfflinePlayer op = offlineTarget(r);
-        String name = op.getName();
-        if (name == null) throw BridgeException.notFound("Player name unknown");
-        BanList list = Bukkit.getBanList(BanList.Type.NAME);
-        if (!list.isBanned(name)) return ActionResult.refused("Player is not banned");
-        list.pardon(name);
+        PlayerBans.Target t = bans.target(r.target);
+        if (!bans.isBanned(t)) return ActionResult.refused("Player is not banned");
+        bans.unban(t);
         return ActionResult.ok();
     }
 
