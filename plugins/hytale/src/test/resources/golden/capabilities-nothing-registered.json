@@ -1,6 +1,6 @@
 {
-  "platform_version": "0.7.0",
-  "game_version": "0.7.0",
+  "platform_version": "0.7.6",
+  "game_version": "0.7.6",
   "ops": ["server.info", "players.list", "player.get", "positions.subscribe", "player.inventory", "item.get", "player.nearby", "action.run", "assets.manifest", "assets.get", "map.tiles", "map.markers"],
   "player_fields": ["world", "position", "health", "max_health", "game_mode", "held_item", "ping", "game"],
   "game_keys": ["stats", "permissions", "groups", "equipment"],
